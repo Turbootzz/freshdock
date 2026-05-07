@@ -55,17 +55,30 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
         });
     }
 
-    let fetches = rows.iter().map(|r| fetch_for(&hub, &r.image));
-    let fetched = join_all(fetches).await;
+    // Fetch digests once per unique image reference. A homelab compose
+    // stack often has several containers sharing the same image; firing
+    // duplicate token+HEAD requests would burn the Docker Hub anonymous
+    // rate budget (100 / 6h) for nothing.
+    let unique = unique_images(&rows);
+    let hub_ref = &hub;
+    let fetches = unique.into_iter().map(|img| async move {
+        let outcome = fetch_for(hub_ref, &img).await;
+        (img, outcome)
+    });
+    let by_image: HashMap<String, FetchOutcome> = join_all(fetches).await.into_iter().collect();
 
     let mut table = build_table(no_color);
-    for (row, latest) in rows.into_iter().zip(fetched) {
+    for row in rows.into_iter() {
         let local = row
             .local_digest
             .as_deref()
             .map(short_digest)
             .unwrap_or_else(|| "-".to_string());
-        let (latest_cell, update_cell) = match latest {
+        let outcome = by_image
+            .get(&row.image)
+            .cloned()
+            .unwrap_or(FetchOutcome::Error("internal: missing fetch result".into()));
+        let (latest_cell, update_cell) = match outcome {
             FetchOutcome::Found(d) => {
                 let update = row
                     .local_digest
@@ -93,6 +106,18 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Order-preserving deduplication of image references across all rows.
+fn unique_images(rows: &[RowPrep]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for r in rows {
+        if seen.insert(&r.image) {
+            out.push(r.image.clone());
+        }
+    }
+    out
+}
+
 struct RowPrep {
     name: String,
     image: String,
@@ -100,6 +125,7 @@ struct RowPrep {
     mode: Mode,
 }
 
+#[derive(Clone)]
 enum FetchOutcome {
     Found(Digest),
     SkippedAuth,
@@ -189,5 +215,41 @@ mod tests {
     #[test]
     fn short_digest_passes_through_non_sha() {
         assert_eq!(short_digest("alpine:latest"), "alpine:latest");
+    }
+
+    fn row(image: &str) -> RowPrep {
+        RowPrep {
+            name: "n".into(),
+            image: image.into(),
+            local_digest: None,
+            mode: Mode::Watch,
+        }
+    }
+
+    #[test]
+    fn unique_images_deduplicates_preserving_first_occurrence_order() {
+        let rows = vec![
+            row("postgres:16-alpine"),
+            row("redis:7"),
+            row("postgres:16-alpine"),
+            row("nginx:latest"),
+            row("redis:7"),
+        ];
+        assert_eq!(
+            unique_images(&rows),
+            vec!["postgres:16-alpine", "redis:7", "nginx:latest"]
+        );
+    }
+
+    #[test]
+    fn unique_images_treats_distinct_tags_as_distinct() {
+        let rows = vec![row("postgres:16"), row("postgres:17")];
+        assert_eq!(unique_images(&rows), vec!["postgres:16", "postgres:17"]);
+    }
+
+    #[test]
+    fn unique_images_on_empty_input_is_empty() {
+        let rows: Vec<RowPrep> = vec![];
+        assert!(unique_images(&rows).is_empty());
     }
 }

@@ -40,6 +40,8 @@ pub enum RegistryError {
     Auth(String),
     #[error("manifest digest header missing or unparseable")]
     MissingDigest,
+    #[error("invalid endpoint url: {0}")]
+    InvalidEndpoint(String),
 }
 
 #[async_trait::async_trait]

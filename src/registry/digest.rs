@@ -25,19 +25,55 @@ struct TokenResponse {
 /// Where the auth + registry endpoints live. Defaults to Docker Hub;
 /// Phase 5 (P5-1) will add bearer-token registries by constructing
 /// alternative `Endpoints` values without touching the protocol logic.
+///
+/// Construction goes through [`Endpoints::new`] (or [`Endpoints::docker_hub`])
+/// so trailing slashes get normalised once and the host:port we preflight
+/// against is parsed once instead of on every request.
 #[derive(Debug, Clone)]
 pub struct Endpoints {
-    pub auth_base: String,     // e.g. "https://auth.docker.io"
-    pub registry_base: String, // e.g. "https://registry-1.docker.io"
+    auth_base: String,
+    registry_base: String,
+    auth_authority: String,
+    registry_authority: String,
 }
 
 impl Endpoints {
-    pub fn docker_hub() -> Self {
-        Self {
-            auth_base: "https://auth.docker.io".into(),
-            registry_base: "https://registry-1.docker.io".into(),
-        }
+    pub fn new(
+        auth_base: impl Into<String>,
+        registry_base: impl Into<String>,
+    ) -> Result<Self, RegistryError> {
+        let auth_base = normalize(auth_base.into())?;
+        let registry_base = normalize(registry_base.into())?;
+        let auth_authority = authority_of(&auth_base)?;
+        let registry_authority = authority_of(&registry_base)?;
+        Ok(Self {
+            auth_base,
+            registry_base,
+            auth_authority,
+            registry_authority,
+        })
     }
+
+    pub fn docker_hub() -> Self {
+        Self::new("https://auth.docker.io", "https://registry-1.docker.io")
+            .expect("docker hub endpoint URLs are static and valid")
+    }
+}
+
+fn normalize(s: String) -> Result<String, RegistryError> {
+    let trimmed = s.trim_end_matches('/').to_string();
+    Url::parse(&trimmed).map_err(|e| RegistryError::InvalidEndpoint(format!("{trimmed}: {e}")))?;
+    Ok(trimmed)
+}
+
+fn authority_of(base: &str) -> Result<String, RegistryError> {
+    let url =
+        Url::parse(base).map_err(|e| RegistryError::InvalidEndpoint(format!("{base}: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| RegistryError::InvalidEndpoint(format!("no host in {base}")))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    Ok(format!("{host}:{port}"))
 }
 
 pub struct DockerHub {
@@ -66,8 +102,8 @@ impl DockerHub {
     }
 
     async fn preflight(&self) -> Result<(), RegistryError> {
-        let auth = probe(&self.endpoints.auth_base);
-        let registry = probe(&self.endpoints.registry_base);
+        let auth = probe(&self.endpoints.auth_authority);
+        let registry = probe(&self.endpoints.registry_authority);
         let (a, r) = tokio::join!(auth, registry);
         a.and(r)
     }
@@ -90,21 +126,15 @@ impl DockerHub {
     }
 }
 
-async fn probe(base_url: &str) -> Result<(), RegistryError> {
-    let url = Url::parse(base_url).map_err(|e| {
-        RegistryError::NetworkUnavailable(format!("invalid endpoint url {base_url}: {e}"))
-    })?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| RegistryError::NetworkUnavailable(format!("no host in {base_url}")))?;
-    let port = url.port_or_known_default().unwrap_or(443);
-    let addr = format!("{host}:{port}");
-    let connect = TcpStream::connect(&addr);
+async fn probe(authority: &str) -> Result<(), RegistryError> {
+    let connect = TcpStream::connect(authority);
     match timeout(PREFLIGHT_TIMEOUT, connect).await {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(RegistryError::NetworkUnavailable(format!("{addr}: {e}"))),
+        Ok(Err(e)) => Err(RegistryError::NetworkUnavailable(format!(
+            "{authority}: {e}"
+        ))),
         Err(_) => Err(RegistryError::NetworkUnavailable(format!(
-            "{addr}: connect timeout"
+            "{authority}: connect timeout"
         ))),
     }
 }
@@ -148,5 +178,44 @@ impl Registry for DockerHub {
             .ok_or(RegistryError::MissingDigest)?
             .to_string();
         Ok(Digest(digest))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoints_strip_trailing_slash() {
+        let e = Endpoints::new("https://auth.example.com/", "https://reg.example.com/").unwrap();
+        assert_eq!(e.auth_base, "https://auth.example.com");
+        assert_eq!(e.registry_base, "https://reg.example.com");
+    }
+
+    #[test]
+    fn endpoints_cache_authority_with_default_port() {
+        let e = Endpoints::new("https://auth.example.com", "https://reg.example.com").unwrap();
+        assert_eq!(e.auth_authority, "auth.example.com:443");
+        assert_eq!(e.registry_authority, "reg.example.com:443");
+    }
+
+    #[test]
+    fn endpoints_cache_authority_with_explicit_port() {
+        let e = Endpoints::new("http://localhost:5000", "http://localhost:5001").unwrap();
+        assert_eq!(e.auth_authority, "localhost:5000");
+        assert_eq!(e.registry_authority, "localhost:5001");
+    }
+
+    #[test]
+    fn endpoints_reject_garbage_url() {
+        let err = Endpoints::new("not a url", "https://reg.example.com").unwrap_err();
+        assert!(matches!(err, RegistryError::InvalidEndpoint(_)));
+    }
+
+    #[test]
+    fn docker_hub_endpoints_resolve() {
+        let e = Endpoints::docker_hub();
+        assert_eq!(e.auth_authority, "auth.docker.io:443");
+        assert_eq!(e.registry_authority, "registry-1.docker.io:443");
     }
 }

@@ -15,10 +15,21 @@ const SAMPLE_DIGEST: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async fn hub_pointed_at(server: &MockServer) -> DockerHub {
-    DockerHub::with_endpoints(Endpoints {
-        auth_base: server.uri(),
-        registry_base: server.uri(),
-    })
+    DockerHub::with_endpoints(
+        Endpoints::new(server.uri(), server.uri()).expect("mock server URI is valid"),
+    )
+}
+
+/// Bind a TCP listener on a random port, then drop it. The OS may
+/// reuse the port immediately, but within the brief preflight window
+/// the chance of a real listener squatting it is negligible — and this
+/// is much more portable than picking a fixed magic port like 1 or
+/// 65535 which can have privileged or system-reserved listeners.
+async fn unreachable_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
 }
 
 #[tokio::test]
@@ -217,13 +228,9 @@ async fn library_prefix_propagates_into_token_scope() {
 
 #[tokio::test]
 async fn unreachable_endpoint_surfaces_as_network_unavailable() {
-    // A localhost port that nothing is listening on. Any small unused port
-    // works; the OS will refuse the connection immediately.
-    let dead = "http://127.0.0.1:1";
-    let hub = DockerHub::with_endpoints(Endpoints {
-        auth_base: dead.into(),
-        registry_base: dead.into(),
-    });
+    let dead = unreachable_url().await;
+    let hub =
+        DockerHub::with_endpoints(Endpoints::new(dead.clone(), dead).expect("local URL is valid"));
     let err = hub
         .fetch_digest(&ImageRef::parse("alpine"))
         .await
