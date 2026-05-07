@@ -43,9 +43,15 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
         let image_str = c.image.unwrap_or_else(|| "?".to_string());
         // ContainerSummary.image_id is the image *config* digest, not the
         // *manifest* digest the registry returns via Docker-Content-Digest.
-        // Comparing them is meaningless. Phase 2 (P2-1) will resolve the
-        // local manifest digest via image inspect → RepoDigests.
-        let local_digest: Option<String> = None;
+        // Resolve the local manifest digest from `image inspect → RepoDigests`
+        // so the table can compare local vs upstream meaningfully.
+        let local_digest = match docker.inspect_image_repo_digests(&image_str).await {
+            Ok(digests) => manifest_digest_for(&image_str, &digests),
+            Err(e) => {
+                warn!(image = %image_str, error = %e, "image inspect failed; current digest will be unknown");
+                None
+            }
+        };
 
         rows.push(RowPrep {
             name,
@@ -162,6 +168,18 @@ fn is_docker_hub(repository: &str) -> bool {
     !(first.contains('.') || first.contains(':'))
 }
 
+/// Find the manifest digest for an image reference inside an `ImageInspect.RepoDigests`
+/// list. RepoDigests entries look like `repo@sha256:<hex>`; we match on the repo
+/// portion (everything before `@`) against the image's repo (everything before
+/// `:` or `@`) and return the digest.
+fn manifest_digest_for(image: &str, repo_digests: &[String]) -> Option<String> {
+    let want_repo = image.split('@').next()?.split(':').next()?;
+    repo_digests.iter().find_map(|rd| {
+        let (repo, digest) = rd.split_once('@')?;
+        (repo == want_repo).then(|| digest.to_owned())
+    })
+}
+
 fn short_digest(d: &str) -> String {
     if let Some(hex) = d.strip_prefix("sha256:") {
         format!("sha256:{}…", &hex[..hex.len().min(12)])
@@ -251,5 +269,60 @@ mod tests {
     fn unique_images_on_empty_input_is_empty() {
         let rows: Vec<RowPrep> = vec![];
         assert!(unique_images(&rows).is_empty());
+    }
+
+    #[test]
+    fn extracts_manifest_digest_when_repo_matches() {
+        let image = "nginx:alpine";
+        let repo_digests = [
+            "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+        ];
+        assert_eq!(
+            manifest_digest_for(image, &repo_digests).as_deref(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn extracts_manifest_digest_for_namespaced_repo() {
+        let image = "ghcr.io/owner/repo:v1";
+        let repo_digests = [
+            "other/thing@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            "ghcr.io/owner/repo@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                .to_owned(),
+        ];
+        assert_eq!(
+            manifest_digest_for(image, &repo_digests).as_deref(),
+            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_repo_digest_matches() {
+        let image = "nginx:alpine";
+        let repo_digests = ["redis@sha256:dead".to_owned()];
+        assert_eq!(manifest_digest_for(image, &repo_digests), None);
+    }
+
+    #[test]
+    fn returns_none_for_empty_repo_digests() {
+        assert_eq!(manifest_digest_for("nginx:alpine", &[]), None);
+    }
+
+    #[test]
+    fn handles_image_already_pinned_to_digest() {
+        // When the running image is referenced by digest, the input string has
+        // no tag — we should still recover the matching repo_digest entry.
+        let image = "nginx@sha256:beef";
+        let repo_digests = [
+            "nginx@sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
+                .to_owned(),
+        ];
+        assert_eq!(
+            manifest_digest_for(image, &repo_digests).as_deref(),
+            Some("sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef")
+        );
     }
 }

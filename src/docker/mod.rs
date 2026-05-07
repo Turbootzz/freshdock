@@ -1,4 +1,5 @@
 pub mod inspect;
+pub mod spec;
 
 use bollard::models::ContainerSummary;
 use bollard::query_parameters::ListContainersOptions;
@@ -7,6 +8,8 @@ use bollard::query_parameters::ListContainersOptions;
 pub enum DockerError {
     #[error("docker daemon error: {0}")]
     Bollard(#[from] bollard::errors::Error),
+    #[error("container inspect produced an incomplete spec: {0}")]
+    Spec(crate::docker::spec::SpecError),
 }
 
 pub struct Docker(bollard::Docker);
