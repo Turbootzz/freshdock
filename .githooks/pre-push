@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mirror the gates the CI workflow enforces on every push, before they
+# travel to GitHub. Bypass with `git push --no-verify` if you really
+# need to (e.g. pushing a WIP branch for someone to look at).
+set -euo pipefail
+
+# Skip on branch deletion (no commits being pushed).
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        exit 0
+    fi
+done
+
+cd "$(git rev-parse --show-toplevel)"
+exec make ci
