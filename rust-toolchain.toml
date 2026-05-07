@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# Pinned so local pre-push hooks and CI run on the exact same compiler
+# and clippy ruleset. Bump deliberately when adopting new lints or
+# language features. Last bumped: 2026-05-07 (Rust 1.95.0).
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]

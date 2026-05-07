@@ -7,12 +7,10 @@ confidence-threshold = 0.93
 allow = [
     "Apache-2.0",
     "MIT",
-    "BSD-2-Clause",
     "BSD-3-Clause",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "ISC",
-    "Zlib",
+    "CDLA-Permissive-2.0",
 ]
 exceptions = []
 
