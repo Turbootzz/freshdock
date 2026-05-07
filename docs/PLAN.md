@@ -236,7 +236,7 @@ Estimates assume part-time evening/weekend work alongside the dual study program
 
 ### Phase 0 — Reserve the name & scaffolding (1 week)
 
-- **Reserve `freshdock` everywhere before anything else.** Crate names on crates.io are permanent and first-come-first-served. Order: (a) publish a 0.0.1 placeholder crate with a minimal `Cargo.toml` and a stub `main.rs`; (b) create the GitHub repo under your account or a `freshdock` org; (c) claim the `freshdock` Docker Hub namespace; (d) optional — register `freshdock.dev` or `.io` if still available.
+- **Reserve `freshdock` everywhere before anything else.** Crate names on crates.io are permanent and first-come-first-served. Order: (a) publish a 0.0.1 placeholder crate with a minimal `Cargo.toml` and a stub `main.rs`; (b) create the GitHub repo under your account or a `freshdock` org — this also reserves the GHCR namespace (`ghcr.io/<owner>/freshdock`) for free, since GHCR uses the GitHub namespace automatically; (c) optional — register `freshdock.dev` or `.io` if still available. Docker Hub is intentionally skipped: v1 publishes to GHCR only (revisit post-v1 if discoverability matters).
 - Pick licence: AGPL-3.0 (like Cup, protects against commercial appropriation) or MIT/Apache-2.0 dual (maximum adoption). Decide before first real commit.
 - Set up CI (GitHub Actions: fmt, clippy, test, cross-compile to musl for amd64 + arm64).
 - Set up cargo-deny for license/dependency hygiene.

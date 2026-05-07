@@ -121,7 +121,7 @@ cargo install freshdock
 docker run -d \
   --name freshdock \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  freshdock/freshdock
+  ghcr.io/turbootzz/freshdock
 ```
 
 ---
