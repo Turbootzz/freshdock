@@ -135,7 +135,7 @@ docker run -d \
 
 ## Contributing
 
-Contributions are welcome once Phase 1 lands. Until then the codebase is a single `println!` and there is little to do.
+Contributions are welcome once Phase 1 lands.
 
 If you want to help shape the project before code exists:
 
