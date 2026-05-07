@@ -4,12 +4,20 @@
 # need to (e.g. pushing a WIP branch for someone to look at).
 set -euo pipefail
 
-# Skip on branch deletion (no commits being pushed).
-while read -r local_ref local_sha remote_ref remote_sha; do
-    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
-        exit 0
+# Skip CI only when every ref in the push is a deletion (zero sha).
+# A mixed push (e.g. `git push origin new-branch :old-branch`) must
+# still run CI for the new commits.
+zero=0000000000000000000000000000000000000000
+non_deletion=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    if [ "$local_sha" != "$zero" ]; then
+        non_deletion=1
     fi
 done
+
+if [ "$non_deletion" -eq 0 ]; then
+    exit 0
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 exec just ci
