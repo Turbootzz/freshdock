@@ -1,12 +1,9 @@
-mod docker;
-mod errors;
-mod labels;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::docker::Docker;
+use freshdock::docker::Docker;
+use freshdock::{errors, labels};
 
 #[derive(Parser)]
 #[command(name = "freshdock", version, about)]
