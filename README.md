@@ -146,14 +146,14 @@ If you want to help shape the project before code exists:
 
 ### Local development
 
-The repo ships a `Makefile` that mirrors the CI gates and a tracked pre-push hook under `.githooks/`. One-time setup after cloning:
+The repo ships a `justfile` that mirrors the CI gates and a tracked pre-push hook under `.githooks/`. One-time setup after cloning:
 
 ```bash
-cargo install cargo-deny  # if you don't already have it
-make install-hooks        # enables .githooks/pre-push
+cargo install just cargo-deny  # if you don't already have them
+just install-hooks             # enables .githooks/pre-push
 ```
 
-`make ci` runs the full local CI suite (fmt-check, clippy, test, deny). The pre-push hook delegates to it, so anything that would fail on GitHub fails locally first. Bypass with `git push --no-verify` if you really need to (WIP branches, etc.). Run `make` with no arguments to see all targets.
+`just ci` runs the full local CI suite (fmt-check, clippy, test, deny). The pre-push hook delegates to it, so anything that would fail on GitHub fails locally first. Bypass with `git push --no-verify` if you really need to (WIP branches, etc.). Run `just` with no arguments to list every recipe.
 
 ---
 
