@@ -59,7 +59,7 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
     let fetched = join_all(fetches).await;
 
     let mut table = build_table(no_color);
-    for (row, latest) in rows.into_iter().zip(fetched.into_iter()) {
+    for (row, latest) in rows.into_iter().zip(fetched) {
         let local = row
             .local_digest
             .as_deref()
