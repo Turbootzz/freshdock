@@ -8,8 +8,8 @@ removal of the archived container — those land in Phase 3.
 
 - A working Docker daemon reachable on the standard socket.
 - `freshdock` built locally: `just build`.
-- Your shell on `phase-2-single-recreate` (or any branch where `freshdock
-  recreate` is wired in).
+- A checkout where `freshdock recreate` is wired in (i.e. anything from
+  `main` post-Phase-2 onward).
 
 ## Steps
 

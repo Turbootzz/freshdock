@@ -168,14 +168,27 @@ fn is_docker_hub(repository: &str) -> bool {
 
 /// Find the manifest digest for an image reference inside an `ImageInspect.RepoDigests`
 /// list. RepoDigests entries look like `repo@sha256:<hex>`; we match on the repo
-/// portion (everything before `@`) against the image's repo (everything before
-/// `:` or `@`) and return the digest.
+/// portion (everything before `@`) against the image's repo (the input with any
+/// `@digest` and any trailing `:tag` stripped) and return the digest.
 fn manifest_digest_for(image: &str, repo_digests: &[String]) -> Option<String> {
-    let want_repo = image.split('@').next()?.split(':').next()?;
+    let want_repo = strip_tag(image.split('@').next()?);
     repo_digests.iter().find_map(|rd| {
         let (repo, digest) = rd.split_once('@')?;
         (repo == want_repo).then(|| digest.to_owned())
     })
+}
+
+/// Strip a trailing `:tag` from an image reference without confusing it for a
+/// `host:port` separator. A colon is a tag separator only when it appears
+/// after the last `/` (or when there is no `/` at all). Anything else —
+/// `localhost:5000/repo`, `registry.example.com:443/repo` — must round-trip
+/// untouched so the RepoDigests entry's `repo` portion still matches.
+fn strip_tag(image_no_digest: &str) -> &str {
+    match (image_no_digest.rfind(':'), image_no_digest.rfind('/')) {
+        (Some(colon), Some(slash)) if colon > slash => &image_no_digest[..colon],
+        (Some(colon), None) => &image_no_digest[..colon],
+        _ => image_no_digest,
+    }
 }
 
 fn short_digest(d: &str) -> String {
@@ -306,6 +319,36 @@ mod tests {
     #[test]
     fn returns_none_for_empty_repo_digests() {
         assert_eq!(manifest_digest_for("nginx:alpine", &[]), None);
+    }
+
+    #[test]
+    fn handles_host_port_in_registry_reference() {
+        // The hostname `localhost:5000` contains a colon that must NOT be
+        // mistaken for a tag separator. The RepoDigests entry preserves the
+        // host:port verbatim, so we must too.
+        let image = "localhost:5000/repo:v1";
+        let repo_digests = [
+            "localhost:5000/repo@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                .to_owned(),
+        ];
+        assert_eq!(
+            manifest_digest_for(image, &repo_digests).as_deref(),
+            Some("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+        );
+    }
+
+    #[test]
+    fn handles_host_port_with_no_tag() {
+        // No tag at all — the only colon is the host:port separator.
+        let image = "localhost:5000/repo";
+        let repo_digests = [
+            "localhost:5000/repo@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+                .to_owned(),
+        ];
+        assert_eq!(
+            manifest_digest_for(image, &repo_digests).as_deref(),
+            Some("sha256:4444444444444444444444444444444444444444444444444444444444444444")
+        );
     }
 
     #[test]

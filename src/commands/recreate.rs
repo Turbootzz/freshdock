@@ -46,14 +46,21 @@ pub async fn run(name: String) -> Result<(), AppError> {
     }
 
     let outcome = recreate_one(&docker, &name, current_unix_timestamp).await?;
-    let RecreateOutcome::Recreated { old_name, new_id } = outcome;
-    info!(
-        container = %name,
-        archived_as = %old_name,
-        new_id = %new_id,
-        "recreate complete — old container is preserved (Phase 3 will remove it after health gating)"
-    );
-    println!("recreated {name}: archived old container as {old_name}, new id {new_id}");
+    // Exhaustive match (no wildcard) on purpose: when Phase 3 adds
+    // `RolledBack` / `HealthFailure` variants, the compiler will refuse to
+    // build until this site decides what to print and whether to surface
+    // a non-zero exit. That forced revisit is the point.
+    match outcome {
+        RecreateOutcome::Recreated { old_name, new_id } => {
+            info!(
+                container = %name,
+                archived_as = %old_name,
+                new_id = %new_id,
+                "recreate complete — old container is preserved (Phase 3 will remove it after health gating)"
+            );
+            println!("recreated {name}: archived old container as {old_name}, new id {new_id}");
+        }
+    }
     Ok(())
 }
 
