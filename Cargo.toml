@@ -26,5 +26,6 @@ futures = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+wiremock = "0.6"
 # testcontainers will be re-added in Phase 3 once a release compatible with
 # bollard 0.21 is available; the current 0.27.x line pins bollard 0.20.
