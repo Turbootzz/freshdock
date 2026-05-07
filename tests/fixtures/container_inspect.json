@@ -1,0 +1,218 @@
+{
+  "Id": "deadbeef00000000000000000000000000000000000000000000000000000000",
+  "Created": "2026-05-01T12:00:00.000000000Z",
+  "Path": "nginx",
+  "Args": ["-g", "daemon off;"],
+  "State": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 4242,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-05-01T12:00:01.000000000Z",
+    "FinishedAt": "0001-01-01T00:00:00Z"
+  },
+  "Image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "Name": "/fd-smoke",
+  "RestartCount": 0,
+  "Driver": "overlay2",
+  "Platform": "linux",
+  "MountLabel": "",
+  "ProcessLabel": "",
+  "AppArmorProfile": "",
+  "ExecIDs": null,
+  "HostConfig": {
+    "Binds": [
+      "/host/data:/data:rw",
+      "/host/conf:/etc/nginx/conf.d:ro"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "10m"
+      }
+    },
+    "NetworkMode": "fd-net",
+    "PortBindings": {
+      "80/tcp": [
+        {
+          "HostIp": "",
+          "HostPort": "8081"
+        }
+      ]
+    },
+    "RestartPolicy": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "CapAdd": ["NET_ADMIN"],
+    "CapDrop": ["MKNOD"],
+    "CgroupnsMode": "host",
+    "Dns": [],
+    "DnsOptions": [],
+    "DnsSearch": [],
+    "ExtraHosts": null,
+    "GroupAdd": null,
+    "IpcMode": "private",
+    "Cgroup": "",
+    "Links": null,
+    "OomScoreAdj": 0,
+    "PidMode": "",
+    "Privileged": false,
+    "PublishAllPorts": false,
+    "ReadonlyRootfs": false,
+    "SecurityOpt": ["no-new-privileges:true"],
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 67108864,
+    "Sysctls": {
+      "net.ipv4.ip_forward": "1"
+    },
+    "Runtime": "runc",
+    "Devices": [
+      {
+        "PathOnHost": "/dev/null",
+        "PathInContainer": "/dev/null",
+        "CgroupPermissions": "rwm"
+      }
+    ],
+    "DeviceRequests": [
+      {
+        "Driver": "nvidia",
+        "Count": 1,
+        "Capabilities": [["gpu"]]
+      }
+    ],
+    "Ulimits": [
+      {
+        "Name": "nofile",
+        "Soft": 1024,
+        "Hard": 4096
+      }
+    ],
+    "CpuShares": 0,
+    "Memory": 268435456,
+    "NanoCpus": 0,
+    "CgroupParent": "",
+    "BlkioWeight": 0,
+    "BlkioWeightDevice": null,
+    "BlkioDeviceReadBps": null,
+    "BlkioDeviceWriteBps": null,
+    "BlkioDeviceReadIOps": null,
+    "BlkioDeviceWriteIOps": null,
+    "CpuPeriod": 0,
+    "CpuQuota": 0,
+    "CpuRealtimePeriod": 0,
+    "CpuRealtimeRuntime": 0,
+    "CpusetCpus": "",
+    "CpusetMems": "",
+    "DiskQuota": 0,
+    "KernelMemory": 0,
+    "KernelMemoryTCP": 0,
+    "MemoryReservation": 0,
+    "MemorySwap": 0,
+    "MemorySwappiness": null,
+    "OomKillDisable": null,
+    "PidsLimit": null,
+    "MaskedPaths": null,
+    "ReadonlyPaths": null
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/host/data",
+      "Destination": "/data",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "volume",
+      "Name": "fd-named-vol",
+      "Source": "/var/lib/docker/volumes/fd-named-vol/_data",
+      "Destination": "/var/lib/app",
+      "Driver": "local",
+      "Mode": "z",
+      "RW": true,
+      "Propagation": ""
+    },
+    {
+      "Type": "tmpfs",
+      "Source": "",
+      "Destination": "/tmp",
+      "Mode": "",
+      "RW": true,
+      "Propagation": ""
+    }
+  ],
+  "Config": {
+    "Hostname": "fd-smoke",
+    "Domainname": "",
+    "User": "root",
+    "AttachStdin": false,
+    "AttachStdout": false,
+    "AttachStderr": false,
+    "ExposedPorts": {
+      "80/tcp": {}
+    },
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "NGINX_VERSION=1.27.0",
+      "FD_TEST=hello"
+    ],
+    "Cmd": ["nginx", "-g", "daemon off;"],
+    "Healthcheck": {
+      "Test": ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+      "Interval": 30000000000,
+      "Timeout": 5000000000,
+      "Retries": 3,
+      "StartPeriod": 10000000000
+    },
+    "ArgsEscaped": false,
+    "Image": "nginx:alpine",
+    "Volumes": null,
+    "WorkingDir": "/usr/share/nginx/html",
+    "Entrypoint": ["/docker-entrypoint.sh"],
+    "OnBuild": null,
+    "Labels": {
+      "freshdock.enable": "true",
+      "freshdock.mode": "watch",
+      "app": "demo",
+      "team": "infra"
+    },
+    "StopSignal": "SIGTERM",
+    "StopTimeout": 30
+  },
+  "NetworkSettings": {
+    "Networks": {
+      "fd-net": {
+        "IPAMConfig": {
+          "IPv4Address": "172.30.0.42"
+        },
+        "Links": null,
+        "Aliases": ["nginx-alias", "fd-smoke"],
+        "NetworkID": "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface",
+        "EndpointID": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "Gateway": "172.30.0.1",
+        "IPAddress": "172.30.0.42",
+        "IPPrefixLen": 16,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "MacAddress": "02:42:ac:1e:00:2a",
+        "DriverOpts": null
+      }
+    }
+  }
+}
