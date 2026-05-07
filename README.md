@@ -23,8 +23,6 @@ RUST_LOG=info freshdock check  # see registry rate-limit info etc.
 
 Authenticated registries (GHCR, Quay, lscr.io, generic OCI bearer-token) are reported as "skipped: not yet supported (Phase 5)" and lift in Phase 5. The daemon entry (`freshdock run`) lands in Phase 4.
 
-If you need a working tool today, take a look at [Cup](https://github.com/sergi0g/cup) (Rust, checker only), [What's Up Docker](https://github.com/fmartinou/whats-up-docker) (Go, full-featured), or [Tugtainer](https://github.com/Quenary/tugtainer) (Go, with web UI).
-
 ---
 
 ## Why freshdock exists
