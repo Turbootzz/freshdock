@@ -1,5 +1,6 @@
 mod docker;
 mod errors;
+mod labels;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -50,7 +51,17 @@ async fn check() -> Result<(), errors::AppError> {
             .map(|s| s.trim_start_matches('/'))
             .unwrap_or("?");
         let image = c.image.as_deref().unwrap_or("?");
-        println!("{}\t{}\t{}", &id[..id.len().min(12)], name, image);
+        let policy = labels::parse_policy(c.labels.as_ref().unwrap_or(&Default::default()), None)?;
+        if !policy.enabled {
+            continue;
+        }
+        println!(
+            "{}\t{}\t{}\t{:?}",
+            &id[..id.len().min(12)],
+            name,
+            image,
+            policy.mode
+        );
     }
 
     Ok(())
