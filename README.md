@@ -2,6 +2,7 @@
 
 A modern Docker container auto-updater, built in Rust as a successor to Watchtower.
 
+[![CI](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml/badge.svg)](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Crate](https://img.shields.io/crates/v/freshdock.svg)](https://crates.io/crates/freshdock)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
