@@ -10,8 +10,12 @@ use tracing::{debug, info};
 use super::{Digest, ImageRef, Registry, RegistryError};
 
 const AUTH_HOST: &str = "auth.docker.io";
+const REGISTRY_HOST: &str = "registry-1.docker.io";
 const AUTH_URL: &str = "https://auth.docker.io/token";
 const REGISTRY_URL: &str = "https://registry-1.docker.io/v2";
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ACCEPT_MANIFESTS: &str = "application/vnd.docker.distribution.manifest.v2+json, \
      application/vnd.oci.image.manifest.v1+json, \
@@ -21,6 +25,17 @@ const ACCEPT_MANIFESTS: &str = "application/vnd.docker.distribution.manifest.v2+
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     token: String,
+}
+
+async fn probe(host: &str) -> Result<(), RegistryError> {
+    let connect = TcpStream::connect(format!("{host}:443"));
+    match timeout(PREFLIGHT_TIMEOUT, connect).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(RegistryError::NetworkUnavailable(format!("{host}: {e}"))),
+        Err(_) => Err(RegistryError::NetworkUnavailable(format!(
+            "{host}: connect timeout"
+        ))),
+    }
 }
 
 pub struct DockerHub {
@@ -37,20 +52,17 @@ impl DockerHub {
     pub fn new() -> Self {
         let client = Client::builder()
             .user_agent(concat!("freshdock/", env!("CARGO_PKG_VERSION")))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("reqwest client construction with default config cannot fail");
         Self { client }
     }
 
     async fn preflight() -> Result<(), RegistryError> {
-        let connect = TcpStream::connect(format!("{AUTH_HOST}:443"));
-        match timeout(Duration::from_secs(2), connect).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(RegistryError::NetworkUnavailable(e.to_string())),
-            Err(_) => Err(RegistryError::NetworkUnavailable(
-                "connect timeout".to_string(),
-            )),
-        }
+        let auth = probe(AUTH_HOST);
+        let registry = probe(REGISTRY_HOST);
+        let (a, r) = tokio::join!(auth, registry);
+        a.and(r)
     }
 
     async fn fetch_token(&self, repo: &str) -> Result<String, RegistryError> {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -8,6 +9,19 @@ pub enum Mode {
     Monthly,
     Watch,
     Off,
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Mode::Live => "live",
+            Mode::Nightly => "nightly",
+            Mode::Weekly => "weekly",
+            Mode::Monthly => "monthly",
+            Mode::Watch => "watch",
+            Mode::Off => "off",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +81,7 @@ pub fn parse_policy(
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, LabelError> {
-    match value.to_ascii_lowercase().as_str() {
+    match value.trim().to_ascii_lowercase().as_str() {
         "true" => Ok(true),
         "false" => Ok(false),
         _ => Err(LabelError::InvalidBool {
@@ -78,7 +92,7 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, LabelError> {
 }
 
 fn parse_mode(value: &str) -> Result<Mode, LabelError> {
-    match value.to_ascii_lowercase().as_str() {
+    match value.trim().to_ascii_lowercase().as_str() {
         "live" => Ok(Mode::Live),
         "nightly" => Ok(Mode::Nightly),
         "weekly" => Ok(Mode::Weekly),
@@ -201,6 +215,32 @@ mod tests {
         assert!(
             matches!(err, LabelError::InvalidBool { ref key, .. } if key == "freshdock.notify")
         );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", " true "),
+                ("freshdock.mode", "  Nightly\t"),
+                ("freshdock.notify", "\nfalse "),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.mode, Mode::Nightly);
+        assert!(!p.notify);
+    }
+
+    #[test]
+    fn display_for_mode_is_canonical_lowercase() {
+        assert_eq!(Mode::Live.to_string(), "live");
+        assert_eq!(Mode::Nightly.to_string(), "nightly");
+        assert_eq!(Mode::Weekly.to_string(), "weekly");
+        assert_eq!(Mode::Monthly.to_string(), "monthly");
+        assert_eq!(Mode::Watch.to_string(), "watch");
+        assert_eq!(Mode::Off.to_string(), "off");
     }
 
     #[test]

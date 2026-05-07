@@ -41,7 +41,11 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "?".to_string());
         let image_str = c.image.unwrap_or_else(|| "?".to_string());
-        let local_digest = c.image_id;
+        // ContainerSummary.image_id is the image *config* digest, not the
+        // *manifest* digest the registry returns via Docker-Content-Digest.
+        // Comparing them is meaningless. Phase 2 (P2-1) will resolve the
+        // local manifest digest via image inspect → RepoDigests.
+        let local_digest: Option<String> = None;
 
         rows.push(RowPrep {
             name,
@@ -78,7 +82,7 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
         table.add_row(vec![
             row.name,
             row.image,
-            format!("{:?}", row.mode).to_lowercase(),
+            row.mode.to_string(),
             local,
             latest_cell,
             update_cell,
@@ -122,10 +126,13 @@ async fn fetch_for(hub: &DockerHub, image: &str) -> FetchOutcome {
 }
 
 /// Docker Hub references have a repo of `library/<name>` or `<owner>/<name>`.
-/// Anything containing a host (`ghcr.io/...`, `quay.io/...`, `lscr.io/...`)
-/// belongs to a registry that needs Phase 5's bearer-token auth path.
+/// Anything containing a host (`ghcr.io/...`, `quay.io/...`, `lscr.io/...`,
+/// or a bare `localhost[/...]`) belongs to a private/non-Hub registry.
 fn is_docker_hub(repository: &str) -> bool {
     let first = repository.split('/').next().unwrap_or("");
+    if first.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
     !(first.contains('.') || first.contains(':'))
 }
 
@@ -164,6 +171,13 @@ mod tests {
         assert!(!is_docker_hub("ghcr.io/owner/repo"));
         assert!(!is_docker_hub("quay.io/foo/bar"));
         assert!(!is_docker_hub("lscr.io/linuxserver/sonarr"));
+    }
+
+    #[test]
+    fn localhost_is_not_docker_hub() {
+        assert!(!is_docker_hub("localhost/image"));
+        assert!(!is_docker_hub("LOCALHOST/repo"));
+        assert!(!is_docker_hub("localhost:5000/repo"));
     }
 
     #[test]
