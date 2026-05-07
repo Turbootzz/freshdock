@@ -41,6 +41,17 @@ impl super::Docker {
     /// Rename a running container to its `<name>-old-<ts>` archive form,
     /// avoiding collisions via [`next_available_old_name`]. Returns the new
     /// name so the caller can pass it to a later removal/rollback step.
+    ///
+    /// **TOCTOU caveat.** There is an inherent race window between the
+    /// per-candidate "does this name exist?" probe and the eventual
+    /// rename API call: another caller (or a separate freshdock instance)
+    /// could create a container with the chosen name in between. In that
+    /// case the rename returns a daemon error rather than silently
+    /// overwriting; we propagate it as `DockerError::Bollard`. In a
+    /// single-host homelab the practical risk is negligible — if you do
+    /// hit it, retry the recreate. Phase 3 may add a typed
+    /// `RenameConflict` variant + automatic retry once we understand how
+    /// bollard surfaces the daemon's 409.
     pub async fn rename_to_old(&self, original: &str, ts_unix: i64) -> Result<String, DockerError> {
         let new_name = {
             let docker = self.0.clone();

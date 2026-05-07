@@ -41,53 +41,52 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "?".to_string());
         let image_str = c.image.unwrap_or_else(|| "?".to_string());
-        // ContainerSummary.image_id is the image *config* digest, not the
-        // *manifest* digest the registry returns via Docker-Content-Digest.
-        // Resolve the local manifest digest from `image inspect → RepoDigests`
-        // so the table can compare local vs upstream meaningfully.
-        let local_digest = match docker.inspect_image_repo_digests(&image_str).await {
-            Ok(digests) => manifest_digest_for(&image_str, &digests),
-            Err(e) => {
-                warn!(image = %image_str, error = %e, "image inspect failed; current digest will be unknown");
-                None
-            }
-        };
 
         rows.push(RowPrep {
             name,
             image: image_str,
-            local_digest,
             mode: policy.mode,
         });
     }
 
-    // Fetch digests once per unique image reference. A homelab compose
-    // stack often has several containers sharing the same image; firing
-    // duplicate token+HEAD requests would burn the Docker Hub anonymous
-    // rate budget (100 / 6h) for nothing.
+    // Fetch local *and* upstream digests once per unique image reference. A
+    // homelab compose stack often has several containers sharing the same
+    // image; firing duplicate `image inspect` calls or duplicate token+HEAD
+    // requests would waste Docker Hub's anonymous rate budget (100 / 6h) and
+    // multiply daemon round-trips by the number of duplicate containers.
     let unique = unique_images(&rows);
     let hub_ref = &hub;
+    let docker_ref = &docker;
     let fetches = unique.into_iter().map(|img| async move {
+        // ContainerSummary.image_id is the image *config* digest, not the
+        // *manifest* digest the registry returns via Docker-Content-Digest.
+        // Resolve the local manifest digest from `image inspect → RepoDigests`.
+        let local = match docker_ref.inspect_image_repo_digests(&img).await {
+            Ok(digests) => manifest_digest_for(&img, &digests),
+            Err(e) => {
+                warn!(image = %img, error = %e, "image inspect failed; current digest will be unknown");
+                None
+            }
+        };
         let outcome = fetch_for(hub_ref, &img).await;
-        (img, outcome)
+        (img, (local, outcome))
     });
-    let by_image: HashMap<String, FetchOutcome> = join_all(fetches).await.into_iter().collect();
+    let by_image: HashMap<String, (Option<String>, FetchOutcome)> =
+        join_all(fetches).await.into_iter().collect();
 
     let mut table = build_table(no_color);
     for row in rows.into_iter() {
-        let local = row
-            .local_digest
+        let (local_digest, outcome) = by_image.get(&row.image).cloned().unwrap_or((
+            None,
+            FetchOutcome::Error("internal: missing fetch result".into()),
+        ));
+        let local = local_digest
             .as_deref()
             .map(short_digest)
             .unwrap_or_else(|| "-".to_string());
-        let outcome = by_image
-            .get(&row.image)
-            .cloned()
-            .unwrap_or(FetchOutcome::Error("internal: missing fetch result".into()));
         let (latest_cell, update_cell) = match outcome {
             FetchOutcome::Found(d) => {
-                let update = row
-                    .local_digest
+                let update = local_digest
                     .as_deref()
                     .map(|l| if l == d.0 { "no" } else { "yes" })
                     .unwrap_or("?")
@@ -127,7 +126,6 @@ fn unique_images(rows: &[RowPrep]) -> Vec<String> {
 struct RowPrep {
     name: String,
     image: String,
-    local_digest: Option<String>,
     mode: Mode,
 }
 
@@ -239,7 +237,6 @@ mod tests {
         RowPrep {
             name: "n".into(),
             image: image.into(),
-            local_digest: None,
             mode: Mode::Watch,
         }
     }

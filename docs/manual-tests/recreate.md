@@ -13,10 +13,17 @@ removal of the archived container — those land in Phase 3.
 
 ## Steps
 
+`freshdock recreate` is a *manual* admin tool, not the automatic update
+loop. It refuses two opt-out signals — `freshdock.enable` not `true`, or
+`freshdock.mode=off` — and otherwise honours the operator's explicit
+invocation regardless of the scheduler mode (`live`, `nightly`,
+`weekly`, `monthly`, `watch`). This is why the test container below
+uses `mode=watch`: a watch-mode container is *never* touched by the
+automatic loop, but is a fine target for a manual `recreate`.
+
 ```bash
 # 1. Launch the test container with freshdock labels so the recreate
-#    command is willing to act on it (the orchestrator refuses to touch
-#    containers that did not opt in).
+#    command is willing to act on it.
 docker run -d --name fd-smoke \
   --label freshdock.enable=true \
   --label freshdock.mode=watch \

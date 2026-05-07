@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
@@ -11,20 +12,35 @@ use crate::updater::RecreateOutcome;
 /// Recreate a single container by name: inspect → pull → stop → rename →
 /// create → start. Health gating, removal of the archived `-old-` instance,
 /// and rollback on failure are Phase 3 work and explicitly *not* run here.
+///
+/// ## Policy gate
+///
+/// This is a *manual* admin tool, not the automatic update loop, so the
+/// `freshdock.mode` knob (live / nightly / weekly / monthly / watch) is
+/// **deliberately not** enforced here — those modes describe how the
+/// scheduler treats the container, not whether the operator can ever
+/// touch it. A `mode=watch` container is a perfectly valid target for
+/// `freshdock recreate`: the operator has explicitly typed the command.
+///
+/// What we *do* refuse is the two opt-out signals from PLAN §4 ("honest
+/// defaults"): containers without `freshdock.enable=true`, and containers
+/// with `freshdock.mode=off`. Those are the user saying "this container
+/// is not a freshdock target at all" and we respect that even on a
+/// manual invocation.
 pub async fn run(name: String) -> Result<(), AppError> {
     let docker = Docker::connect()?;
     let spec = docker.inspect_container_spec(&name).await?;
 
-    let policy = labels::parse_policy(
-        spec.config.labels.as_ref().unwrap_or(&Default::default()),
-        None,
-    )?;
+    let empty: HashMap<String, String> = HashMap::new();
+    let policy = labels::parse_policy(spec.config.labels.as_ref().unwrap_or(&empty), None)?;
     if !policy.enabled || policy.mode == Mode::Off {
         warn!(
             container = %name,
             mode = %policy.mode,
             enabled = policy.enabled,
-            "refusing to recreate a container that did not opt in to freshdock"
+            "refusing to recreate: container is not opted into freshdock \
+             (set freshdock.enable=true and a non-off mode to allow even \
+             manual recreate)"
         );
         return Ok(());
     }

@@ -9,7 +9,7 @@ use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptions, StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::docker::recreate::DockerOps;
 use crate::docker::spec::ContainerSpec;
@@ -98,15 +98,19 @@ impl Docker {
     }
 }
 
+/// Production wiring of the `DockerOps` trait. Per-step traces are emitted
+/// at `debug!` level — six per recreate would be too chatty at default
+/// `info`. The orchestrator's caller (`commands::recreate::run`) emits the
+/// single info-level "recreate complete" summary line.
 #[async_trait]
 impl DockerOps for Docker {
     async fn inspect(&self, name: &str) -> Result<ContainerSpec, DockerError> {
-        info!(container = %name, "inspect");
+        debug!(container = %name, "inspect");
         self.inspect_container_spec(name).await
     }
 
     async fn pull(&self, image_ref: &ImageRef) -> Result<String, DockerError> {
-        info!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
+        debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
         self.pull_image(image_ref).await
     }
 
@@ -116,12 +120,12 @@ impl DockerOps for Docker {
         signal: Option<&str>,
         timeout_s: Option<i64>,
     ) -> Result<(), DockerError> {
-        info!(container = %name, signal = ?signal, timeout_s = ?timeout_s, "stop");
+        debug!(container = %name, signal = ?signal, timeout_s = ?timeout_s, "stop");
         self.stop_container(name, signal, timeout_s).await
     }
 
     async fn rename(&self, name: &str, ts_unix: i64) -> Result<String, DockerError> {
-        info!(container = %name, ts = ts_unix, "rename");
+        debug!(container = %name, ts = ts_unix, "rename");
         self.rename_to_old(name, ts_unix).await
     }
 
@@ -131,12 +135,12 @@ impl DockerOps for Docker {
         spec: &ContainerSpec,
         image: &str,
     ) -> Result<String, DockerError> {
-        info!(container = %name, image = %image, "create");
+        debug!(container = %name, image = %image, "create");
         self.create_container_from_spec(name, spec, image).await
     }
 
     async fn start(&self, name_or_id: &str) -> Result<(), DockerError> {
-        info!(container = %name_or_id, "start");
+        debug!(container = %name_or_id, "start");
         self.start_container(name_or_id).await
     }
 }
