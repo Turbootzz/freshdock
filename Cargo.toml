@@ -2,5 +2,11 @@
 name = "freshdock"
 version = "0.0.1"
 edition = "2024"
+description = "A modern Rust-based Docker container auto-updater. Successor to Watchtower with health-gated rollback. Work in progress — placeholder release."
+license = "Apache-2.0"
+repository = "https://github.com/Turbootzz/freshdock"
+readme = "README.md"
+keywords = ["docker", "container", "watchtower", "auto-update", "devops"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
