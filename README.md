@@ -10,9 +10,17 @@ A modern Docker container auto-updater, built in Rust as a successor to Watchtow
 
 ## Status
 
-**Pre-alpha. Active planning, no usable code yet.**
+**Pre-alpha — Phase 1 (read-only spike) is landing.**
 
-The current `0.0.1` release on crates.io exists only to reserve the name. The first working version is targeted for the read-only spike (Phase 1 in the [roadmap](PLAN.md)). If you want to know when there is something to try, star or watch this repo.
+The `0.0.1` crates.io release was a name reservation. The first working iteration is `freshdock check`: a read-only command that lists running containers, parses freshdock labels into a per-container policy, fetches the latest digest from Docker Hub anonymously, and prints a table showing which containers have updates available. It never touches container state.
+
+```bash
+freshdock check             # render the update-status table
+freshdock --no-color check  # ANSI-free output, suitable for log files
+RUST_LOG=info freshdock check  # see registry rate-limit info etc.
+```
+
+Authenticated registries (GHCR, Quay, lscr.io, generic OCI bearer-token) are reported as "skipped: not yet supported (Phase 5)" and lift in Phase 5. The daemon entry (`freshdock run`) lands in Phase 4.
 
 If you need a working tool today, take a look at [Cup](https://github.com/sergi0g/cup) (Rust, checker only), [What's Up Docker](https://github.com/fmartinou/whats-up-docker) (Go, full-featured), or [Tugtainer](https://github.com/Quenary/tugtainer) (Go, with web UI).
 
@@ -94,8 +102,8 @@ The full plan, including phased milestones and architecture, lives in [PLAN.md](
 
 Short version:
 
-- **Phase 0** *(current)* — Name reservation, repo scaffolding, CI.
-- **Phase 1** — Read-only spike: list containers, check digests, print update status.
+- **Phase 0** — Name reservation, repo scaffolding, CI.
+- **Phase 1** *(current)* — Read-only spike: list containers, check digests, print update status.
 - **Phase 2** — Single container recreate cycle.
 - **Phase 3** — Health-gating and rollback (the quality bar for v1.0).
 - **Phase 4** — Scheduling and per-container modes.

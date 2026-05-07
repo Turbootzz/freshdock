@@ -2,8 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use freshdock::docker::Docker;
-use freshdock::{errors, labels};
+use freshdock::commands;
 
 #[derive(Parser)]
 #[command(name = "freshdock", version, about)]
@@ -22,44 +21,17 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_ansi(!cli.no_color)
         .init();
 
-    let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Check => check().await?,
+        Cmd::Check => commands::check::run(cli.no_color).await?,
     }
-    Ok(())
-}
-
-async fn check() -> Result<(), errors::AppError> {
-    let docker = Docker::connect()?;
-    let containers = docker.list_running().await?;
-
-    for c in &containers {
-        let id = c.id.as_deref().unwrap_or("?");
-        let name = c
-            .names
-            .as_ref()
-            .and_then(|n| n.first())
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or("?");
-        let image = c.image.as_deref().unwrap_or("?");
-        let policy = labels::parse_policy(c.labels.as_ref().unwrap_or(&Default::default()), None)?;
-        if !policy.enabled {
-            continue;
-        }
-        println!(
-            "{}\t{}\t{}\t{:?}",
-            &id[..id.len().min(12)],
-            name,
-            image,
-            policy.mode
-        );
-    }
-
     Ok(())
 }
