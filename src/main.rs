@@ -17,6 +17,12 @@ struct Cli {
 enum Cmd {
     /// List opted-in containers and report which have updates available.
     Check,
+    /// Recreate a single container in place: inspect → pull → stop → rename →
+    /// create → start. No health gating or rollback yet (Phase 3).
+    Recreate {
+        /// Name (or ID) of the running container to recreate.
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -32,6 +38,7 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Check => commands::check::run(cli.no_color).await?,
+        Cmd::Recreate { name } => commands::recreate::run(name).await?,
     }
     Ok(())
 }
