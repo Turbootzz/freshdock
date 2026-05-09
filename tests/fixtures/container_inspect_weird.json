@@ -1,0 +1,231 @@
+{
+  "Id": "weirdbeef00000000000000000000000000000000000000000000000000000000",
+  "Created": "2026-05-09T08:30:00.000000000Z",
+  "Path": "/entrypoint.sh",
+  "Args": ["--serve"],
+  "State": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 9999,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-05-09T08:30:01.000000000Z",
+    "FinishedAt": "0001-01-01T00:00:00Z"
+  },
+  "Image": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "Name": "/fd-smoke-weird",
+  "RestartCount": 0,
+  "Driver": "overlay2",
+  "Platform": "linux",
+  "MountLabel": "",
+  "ProcessLabel": "",
+  "AppArmorProfile": "",
+  "ExecIDs": null,
+  "HostConfig": {
+    "Binds": [
+      "/host/state:/var/lib/state:rw",
+      "/host/secrets:/run/secrets:ro"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {
+        "max-size": "5m"
+      }
+    },
+    "NetworkMode": "fd-front",
+    "PortBindings": {
+      "8443/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "18443"
+        }
+      ],
+      "9090/tcp": [
+        {
+          "HostIp": "",
+          "HostPort": "19090"
+        }
+      ]
+    },
+    "RestartPolicy": {
+      "Name": "on-failure",
+      "MaximumRetryCount": 5
+    },
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "CapAdd": ["NET_BIND_SERVICE", "SYS_TIME"],
+    "CapDrop": ["MKNOD", "AUDIT_WRITE"],
+    "CgroupnsMode": "private",
+    "Dns": [],
+    "DnsOptions": [],
+    "DnsSearch": [],
+    "ExtraHosts": ["db.internal:10.0.0.5"],
+    "GroupAdd": null,
+    "IpcMode": "private",
+    "Cgroup": "",
+    "Links": null,
+    "OomScoreAdj": 0,
+    "PidMode": "",
+    "Privileged": false,
+    "PublishAllPorts": false,
+    "ReadonlyRootfs": false,
+    "SecurityOpt": ["no-new-privileges:true"],
+    "Tmpfs": {
+      "/run": "rw,size=32m",
+      "/var/cache": "rw,size=64m"
+    },
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 134217728,
+    "Sysctls": {
+      "net.ipv4.ip_unprivileged_port_start": "0",
+      "net.core.somaxconn": "4096"
+    },
+    "Runtime": "runc",
+    "Devices": [],
+    "DeviceRequests": null,
+    "Ulimits": [
+      {
+        "Name": "nofile",
+        "Soft": 8192,
+        "Hard": 16384
+      },
+      {
+        "Name": "nproc",
+        "Soft": 512,
+        "Hard": 1024
+      }
+    ],
+    "CpuShares": 0,
+    "Memory": 134217728,
+    "MemoryReservation": 67108864,
+    "NanoCpus": 500000000,
+    "CgroupParent": "",
+    "BlkioWeight": 0,
+    "BlkioWeightDevice": null,
+    "BlkioDeviceReadBps": null,
+    "BlkioDeviceWriteBps": null,
+    "BlkioDeviceReadIOps": null,
+    "BlkioDeviceWriteIOps": null,
+    "CpuPeriod": 0,
+    "CpuQuota": 0,
+    "CpuRealtimePeriod": 0,
+    "CpuRealtimeRuntime": 0,
+    "CpusetCpus": "",
+    "CpusetMems": "",
+    "DiskQuota": 0,
+    "KernelMemory": 0,
+    "KernelMemoryTCP": 0,
+    "MemorySwap": 0,
+    "MemorySwappiness": null,
+    "OomKillDisable": null,
+    "PidsLimit": 256,
+    "MaskedPaths": null,
+    "ReadonlyPaths": null
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/host/state",
+      "Destination": "/var/lib/state",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "tmpfs",
+      "Source": "",
+      "Destination": "/run",
+      "Mode": "",
+      "RW": true,
+      "Propagation": ""
+    }
+  ],
+  "Config": {
+    "Hostname": "fd-smoke-weird",
+    "Domainname": "",
+    "User": "1000:1000",
+    "AttachStdin": false,
+    "AttachStdout": false,
+    "AttachStderr": false,
+    "ExposedPorts": {
+      "8443/tcp": {},
+      "9090/tcp": {}
+    },
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "APP_MODE=production",
+      "APP_TOKEN=base64=padded==",
+      "EMPTY_VAR="
+    ],
+    "Cmd": ["server", "--port", "8443"],
+    "Healthcheck": {
+      "Test": ["CMD", "/usr/local/bin/healthz"],
+      "Interval": 15000000000,
+      "Timeout": 3000000000,
+      "Retries": 5,
+      "StartPeriod": 20000000000
+    },
+    "ArgsEscaped": false,
+    "Image": "ghcr.io/owner/repo:v1",
+    "Volumes": null,
+    "WorkingDir": "/srv/app",
+    "Entrypoint": ["/entrypoint.sh"],
+    "OnBuild": null,
+    "Labels": {
+      "freshdock.enable": "true",
+      "freshdock.mode": "watch",
+      "freshdock.notify": "true",
+      "app": "weird",
+      "team": "platform",
+      "owner": "thijs@bendy.nl"
+    },
+    "StopSignal": "SIGUSR1",
+    "StopTimeout": 45
+  },
+  "NetworkSettings": {
+    "Networks": {
+      "fd-front": {
+        "IPAMConfig": {
+          "IPv4Address": "172.31.10.20"
+        },
+        "Links": null,
+        "Aliases": ["weird-front", "fd-smoke-weird"],
+        "NetworkID": "front0000front0000front0000front0000front0000front0000front0000",
+        "EndpointID": "ep0000ep0000ep0000ep0000ep0000ep0000ep0000ep0000ep0000ep0000ep00",
+        "Gateway": "172.31.10.1",
+        "IPAddress": "172.31.10.20",
+        "IPPrefixLen": 24,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "MacAddress": "02:42:ac:1f:0a:14",
+        "DriverOpts": null
+      },
+      "fd-back": {
+        "IPAMConfig": null,
+        "Links": null,
+        "Aliases": ["weird-back"],
+        "NetworkID": "back0000back0000back0000back0000back0000back0000back0000back0000",
+        "EndpointID": "ep1111ep1111ep1111ep1111ep1111ep1111ep1111ep1111ep1111ep1111ep11",
+        "Gateway": "172.32.20.1",
+        "IPAddress": "172.32.20.30",
+        "IPPrefixLen": 24,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "MacAddress": "02:42:ac:20:14:1e",
+        "DriverOpts": null
+      }
+    }
+  }
+}
