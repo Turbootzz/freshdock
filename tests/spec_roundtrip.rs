@@ -2,6 +2,7 @@ use bollard::models::ContainerInspectResponse;
 use freshdock::docker::spec::ContainerSpec;
 
 const FIXTURE: &str = include_str!("fixtures/container_inspect.json");
+const FIXTURE_WEIRD: &str = include_str!("fixtures/container_inspect_weird.json");
 const NEW_IMAGE: &str =
     "nginx@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -11,6 +12,12 @@ fn load_inspect() -> ContainerInspectResponse {
 
 fn load_spec() -> ContainerSpec {
     ContainerSpec::from_inspect(load_inspect()).expect("spec should build from fixture")
+}
+
+fn load_weird_spec() -> ContainerSpec {
+    let inspect: ContainerInspectResponse = serde_json::from_str(FIXTURE_WEIRD)
+        .expect("weird fixture should deserialize into ContainerInspectResponse");
+    ContainerSpec::from_inspect(inspect).expect("weird spec should build from fixture")
 }
 
 #[test]
@@ -204,4 +211,251 @@ fn unset_fields_in_inspect_stay_none_in_spec_and_create_body() {
     assert!(body.networking_config.is_none());
     assert!(body.env.is_none());
     assert!(body.entrypoint.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Weird-fixture round-trip pins (issue #25, item 3)
+//
+// One #[test] per HostConfig/Config dimension that the basic fixture doesn't
+// already cover (or covers with a different value). Each one is mechanical —
+// "weird-fixture value in, same value out of `to_create_body`" — but every
+// dimension pinned here is one less thing to verify on a real daemon next
+// phase. The fixture also uses a non-Hub image (`ghcr.io/owner/repo:v1`) so
+// the suite pins that `ImageRef::parse` round-trip works for refs that don't
+// trip the `library/` prefix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn weird_spec_captures_non_hub_image_ref_unchanged() {
+    let spec = load_weird_spec();
+    assert_eq!(
+        spec.name, "fd-smoke-weird",
+        "leading slash from Docker name should be stripped"
+    );
+    assert_eq!(
+        spec.image_ref, "ghcr.io/owner/repo:v1",
+        "non-Hub refs (which ImageRef::parse passes through) must round-trip \
+         from Config.Image byte-identical — companion to the #25 Hub test"
+    );
+}
+
+#[test]
+fn weird_spec_preserves_user_and_env() {
+    let body = load_weird_spec().to_create_body(NEW_IMAGE);
+
+    assert_eq!(
+        body.user.as_deref(),
+        Some("1000:1000"),
+        "uid:gid form must round-trip exactly, not collapse to just `1000`"
+    );
+    assert_eq!(
+        body.env.as_deref(),
+        Some(
+            &[
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned(),
+                "APP_MODE=production".to_owned(),
+                "APP_TOKEN=base64=padded==".to_owned(),
+                "EMPTY_VAR=".to_owned(),
+            ][..]
+        ),
+        "env entries with extra `=` and empty values must round-trip verbatim"
+    );
+}
+
+#[test]
+fn weird_spec_preserves_binds_and_tmpfs() {
+    let host = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip");
+
+    let binds = host.binds.expect("binds must round-trip");
+    assert!(binds.contains(&"/host/state:/var/lib/state:rw".to_owned()));
+    assert!(binds.contains(&"/host/secrets:/run/secrets:ro".to_owned()));
+
+    let tmpfs = host
+        .tmpfs
+        .expect("HostConfig.Tmpfs dict must round-trip (separate from Mounts)");
+    assert_eq!(tmpfs.get("/run").map(String::as_str), Some("rw,size=32m"));
+    assert_eq!(
+        tmpfs.get("/var/cache").map(String::as_str),
+        Some("rw,size=64m")
+    );
+}
+
+#[test]
+fn weird_spec_preserves_port_bindings() {
+    let host = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip");
+
+    let bindings = host.port_bindings.expect("port_bindings must round-trip");
+
+    let https = bindings
+        .get("8443/tcp")
+        .and_then(|v| v.as_ref())
+        .expect("8443/tcp binding must round-trip");
+    assert_eq!(https.len(), 1);
+    assert_eq!(https[0].host_ip.as_deref(), Some("127.0.0.1"));
+    assert_eq!(https[0].host_port.as_deref(), Some("18443"));
+
+    let metrics = bindings
+        .get("9090/tcp")
+        .and_then(|v| v.as_ref())
+        .expect("9090/tcp binding must round-trip");
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].host_port.as_deref(), Some("19090"));
+}
+
+#[test]
+fn weird_spec_preserves_cap_add_drop() {
+    let host = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip");
+
+    assert_eq!(
+        host.cap_add.as_deref(),
+        Some(&["NET_BIND_SERVICE".to_owned(), "SYS_TIME".to_owned()][..]),
+        "cap_add order must round-trip"
+    );
+    assert_eq!(
+        host.cap_drop.as_deref(),
+        Some(&["MKNOD".to_owned(), "AUDIT_WRITE".to_owned()][..]),
+        "cap_drop order must round-trip"
+    );
+}
+
+#[test]
+fn weird_spec_preserves_sysctls() {
+    let sysctls = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip")
+        .sysctls
+        .expect("sysctls must round-trip");
+
+    assert_eq!(
+        sysctls
+            .get("net.ipv4.ip_unprivileged_port_start")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        sysctls.get("net.core.somaxconn").map(String::as_str),
+        Some("4096")
+    );
+}
+
+#[test]
+fn weird_spec_preserves_memory_and_nano_cpus() {
+    let host = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip");
+
+    assert_eq!(host.memory, Some(134_217_728));
+    assert_eq!(host.memory_reservation, Some(67_108_864));
+    assert_eq!(
+        host.nano_cpus,
+        Some(500_000_000),
+        "0.5 CPU expressed as nanocpus must round-trip"
+    );
+    assert_eq!(host.pids_limit, Some(256));
+}
+
+#[test]
+fn weird_spec_preserves_restart_policy() {
+    let policy = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .host_config
+        .expect("host_config must round-trip")
+        .restart_policy
+        .expect("restart_policy must round-trip");
+
+    assert_eq!(
+        policy.name,
+        Some(bollard::models::RestartPolicyNameEnum::ON_FAILURE)
+    );
+    assert_eq!(
+        policy.maximum_retry_count,
+        Some(5),
+        "MaximumRetryCount must round-trip alongside the policy name"
+    );
+}
+
+#[test]
+fn weird_spec_preserves_stop_signal_and_timeout() {
+    let body = load_weird_spec().to_create_body(NEW_IMAGE);
+    assert_eq!(body.stop_signal.as_deref(), Some("SIGUSR1"));
+    assert_eq!(body.stop_timeout, Some(45));
+}
+
+#[test]
+fn weird_spec_preserves_multi_network_endpoints_with_aliases() {
+    let endpoints = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .networking_config
+        .expect("networking_config must round-trip")
+        .endpoints_config
+        .expect("endpoints_config must round-trip");
+
+    let front = endpoints
+        .get("fd-front")
+        .expect("fd-front endpoint must round-trip");
+    assert!(
+        front
+            .aliases
+            .as_ref()
+            .is_some_and(|a| a.iter().any(|s| s == "weird-front")),
+        "fd-front aliases must round-trip"
+    );
+    assert_eq!(
+        front
+            .ipam_config
+            .as_ref()
+            .and_then(|c| c.ipv4_address.as_deref()),
+        Some("172.31.10.20"),
+        "static IP on fd-front must round-trip"
+    );
+
+    let back = endpoints
+        .get("fd-back")
+        .expect("fd-back endpoint must round-trip — multi-network attach is preserved");
+    assert!(
+        back.aliases
+            .as_ref()
+            .is_some_and(|a| a.iter().any(|s| s == "weird-back")),
+        "fd-back aliases must round-trip independently of fd-front"
+    );
+}
+
+#[test]
+fn weird_spec_preserves_freshdock_and_user_labels_together() {
+    let labels = load_weird_spec()
+        .to_create_body(NEW_IMAGE)
+        .labels
+        .expect("labels must round-trip");
+
+    // freshdock.* labels (managed namespace, Phase 3 rollback relies on these)
+    assert_eq!(
+        labels.get("freshdock.enable").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        labels.get("freshdock.mode").map(String::as_str),
+        Some("watch")
+    );
+    assert_eq!(
+        labels.get("freshdock.notify").map(String::as_str),
+        Some("true")
+    );
+    // user labels (must survive untouched alongside freshdock.*)
+    assert_eq!(labels.get("app").map(String::as_str), Some("weird"));
+    assert_eq!(labels.get("team").map(String::as_str), Some("platform"));
+    assert_eq!(
+        labels.get("owner").map(String::as_str),
+        Some("owner@example.invalid")
+    );
 }

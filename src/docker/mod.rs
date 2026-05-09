@@ -39,11 +39,12 @@ impl Docker {
     }
 
     /// Pull the given image reference from its registry, draining the
-    /// progress stream. Returns the image string the caller should pass to
-    /// `create_container` — for Phase 2 this is just `repo:tag` since the
-    /// daemon updates the local tag in-place; Phase 5 will replace this
-    /// with explicit digest resolution.
-    pub async fn pull_image(&self, image_ref: &ImageRef) -> Result<String, DockerError> {
+    /// progress stream. Phase 2 only needs the side effect of getting the
+    /// new image into the local store — the orchestrator hands the original
+    /// `spec.image_ref` (not a re-rendering) to `create_from_spec` so
+    /// `Config.Image` round-trips byte-identical (#25). Phase 5 will widen
+    /// the return type back when explicit digest pinning lands.
+    pub async fn pull_image(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         let opts = CreateImageOptionsBuilder::new()
             .from_image(&image_ref.repository)
             .tag(&image_ref.tag)
@@ -55,7 +56,7 @@ impl Docker {
                 debug!(image = %image_ref.repository, %status, "pull progress");
             }
         }
-        Ok(format!("{}:{}", image_ref.repository, image_ref.tag))
+        Ok(())
     }
 
     pub async fn stop_container(
@@ -109,7 +110,7 @@ impl DockerOps for Docker {
         self.inspect_container_spec(name).await
     }
 
-    async fn pull(&self, image_ref: &ImageRef) -> Result<String, DockerError> {
+    async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
         self.pull_image(image_ref).await
     }
