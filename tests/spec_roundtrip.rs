@@ -456,6 +456,6 @@ fn weird_spec_preserves_freshdock_and_user_labels_together() {
     assert_eq!(labels.get("team").map(String::as_str), Some("platform"));
     assert_eq!(
         labels.get("owner").map(String::as_str),
-        Some("thijs@bendy.nl")
+        Some("owner@example.invalid")
     );
 }

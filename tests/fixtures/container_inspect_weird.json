@@ -187,7 +187,7 @@
       "freshdock.notify": "true",
       "app": "weird",
       "team": "platform",
-      "owner": "thijs@bendy.nl"
+      "owner": "owner@example.invalid"
     },
     "StopSignal": "SIGUSR1",
     "StopTimeout": 45

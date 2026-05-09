@@ -80,19 +80,27 @@ this smoke is to verify *spec preservation*, not application behaviour.
 docker network create fd-front >/dev/null
 docker network create fd-back  >/dev/null
 
+# Bind-mount sources. /tmp keeps these cleanup-friendly and avoids needing
+# root for /host/* paths; the container-side destinations match the
+# fixture so `weird_spec_preserves_binds_and_tmpfs` exercises the same
+# `Binds` shape that this manual procedure does.
+mkdir -p /tmp/fd-state /tmp/fd-secrets
+
 # Launch with the kitchen-sink dimensions: non-default user, multi-port
-# binding (one with explicit HostIp), bind + tmpfs (HostConfig.Tmpfs dict),
-# multiple cap_add / cap_drop, sysctls, restart policy with retry count,
-# memory + nano-cpus + pids limit, custom stop signal + timeout, multiple
-# ulimits, extra_hosts, and freshdock.* labels alongside user labels.
+# binding (one with explicit HostIp), bind mounts + tmpfs (HostConfig.Tmpfs
+# dict), multiple cap_add / cap_drop, sysctls, restart policy with retry
+# count, memory + nano-cpus + pids limit, custom stop signal + timeout,
+# multiple ulimits, extra_hosts, and freshdock.* labels alongside user
+# labels.
 docker run -d --name fd-smoke-weird \
   --label freshdock.enable=true \
   --label freshdock.mode=watch \
   --label freshdock.notify=true \
-  --label app=weird --label team=platform --label owner=thijs@bendy.nl \
+  --label app=weird --label team=platform --label owner=owner@example.invalid \
   --user 1000:1000 \
   --network fd-front --network-alias weird-front \
   -p 127.0.0.1:18443:8443 -p 19090:9090 \
+  -v /tmp/fd-state:/var/lib/state:rw -v /tmp/fd-secrets:/run/secrets:ro \
   --tmpfs /run:rw,size=32m --tmpfs /var/cache:rw,size=64m \
   --cap-add NET_BIND_SERVICE --cap-add SYS_TIME \
   --cap-drop MKNOD --cap-drop AUDIT_WRITE \
@@ -106,7 +114,9 @@ docker run -d --name fd-smoke-weird \
   -e APP_MODE=production -e 'APP_TOKEN=base64=padded==' -e EMPTY_VAR= \
   alpine sleep 600
 
-# Attach the second network with its own alias.
+# Attach the second network with its own alias — mirrors the multi-network
+# attachment that `weird_spec_preserves_multi_network_endpoints_with_aliases`
+# pins on the fixture side.
 docker network connect --alias weird-back fd-back fd-smoke-weird
 
 # Capture every dimension we care about *before* the recreate.
@@ -136,6 +146,28 @@ diff \
 diff \
   <(echo "$before" | jq '.[0].HostConfig') \
   <(echo "$after"  | jq '.[0].HostConfig')    # expected: empty diff
+
+# Bind mounts must round-trip: same source/destination/RW. .Mounts entries
+# for binds carry only durable fields (the daemon-assigned propagation is
+# also stable across recreate).
+diff \
+  <(echo "$before" | jq '[.[0].Mounts[] | select(.Type == "bind") | {Source, Destination, Mode, RW}] | sort_by(.Destination)') \
+  <(echo "$after"  | jq '[.[0].Mounts[] | select(.Type == "bind") | {Source, Destination, Mode, RW}] | sort_by(.Destination)')
+                                              # expected: empty diff
+
+# NetworkSettings.Networks: a strict diff would fail because the new
+# container gets a fresh IP / MAC / EndpointID — those are network-driver
+# assignments, not part of the spec. Docker also auto-adds the new
+# container's own short id as an alias on every attached network, which
+# differs per instance. Project to the durable invariants — set of
+# attached networks + the *user-assigned* aliases (filtering out the
+# auto-added short id) — and diff those.
+sid_before=$(echo "$before" | jq -r '.[0].Id[0:12]')
+sid_after=$(echo "$after"  | jq -r '.[0].Id[0:12]')
+diff \
+  <(echo "$before" | jq --arg sid "$sid_before" '.[0].NetworkSettings.Networks | to_entries | map({net: .key, aliases: ((.value.Aliases // []) | map(select(. != $sid)) | sort)}) | sort_by(.net)') \
+  <(echo "$after"  | jq --arg sid "$sid_after"  '.[0].NetworkSettings.Networks | to_entries | map({net: .key, aliases: ((.value.Aliases // []) | map(select(. != $sid)) | sort)}) | sort_by(.net)')
+                                              # expected: empty diff
 ```
 
 Cleanup:
@@ -143,6 +175,7 @@ Cleanup:
 ```bash
 docker rm -f fd-smoke-weird $(docker ps -a --filter name=fd-smoke-weird-old- -q)
 docker network rm fd-front fd-back
+rm -rf /tmp/fd-state /tmp/fd-secrets
 ```
 
 ## Known Phase-2 limitations (do not file as bugs)
