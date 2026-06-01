@@ -1,8 +1,24 @@
 # Manual smoke test: `freshdock recreate`
 
-This walks through the Phase 2 recreate cycle (issue #9) on a real Docker
-daemon. Phase 2 deliberately stops short of health gating, rollback, and
-removal of the archived container — those land in Phase 3.
+This walks through the recreate cycle on a real Docker daemon. As of Phase 3
+the cycle is health-gated: the new container must reach `healthy` (or stay
+running for a grace period if it has no healthcheck) before the run is declared
+a success and the archived `-old-` container is removed; a new image that fails
+health is **rolled back** to the previous container.
+
+> **Canonical automated gate.** The authoritative "is the tool safe to ship"
+> check is the live round-trip test
+> [tests/recreate_roundtrip_live.rs](../../tests/recreate_roundtrip_live.rs)
+> (PLAN §6.3, P3-3). It creates a kitchen-sink container, recreates it, and
+> asserts the inspected config round-trips byte-identical. Run it with a daemon
+> available:
+>
+> ```bash
+> cargo test --test recreate_roundtrip_live -- --ignored
+> ```
+>
+> A failure of that test is a **release blocker**. This manual procedure
+> remains for quick human verification on first install.
 
 ## Prerequisites
 
@@ -43,10 +59,11 @@ docker inspect fd-smoke --format '{{.Config.Image}}'   # → nginx:alpine
 
 ## Expected observations
 
-- The CLI prints `recreated fd-smoke: archived old container as fd-smoke-old-<unix-ts>, new id <id>`.
-- `docker ps -a` shows two containers:
-  - `fd-smoke` — running, with a fresh container id.
-  - `fd-smoke-old-<unix-ts>` — stopped, kept around (Phase 3 removes it on success).
+- The CLI prints `recreated fd-smoke: healthy — removed old container fd-smoke-old-<unix-ts>, new id <id>`.
+- `docker ps -a` shows a **single** `fd-smoke` container, running with a fresh
+  id — the archived `fd-smoke-old-<unix-ts>` was removed once the new instance
+  passed health gating. (nginx:alpine has no healthcheck, so success is decided
+  by the grace period; add a healthcheck to exercise the `healthy` path.)
 - The new container has the same port mapping (`0.0.0.0:8081->80/tcp`),
   the same `freshdock.enable=true` / `freshdock.mode=watch` labels, and
   the same nginx image.
@@ -56,6 +73,11 @@ docker inspect fd-smoke --format '{{.Config.Image}}'   # → nginx:alpine
   `library/nginx:alpine` is the original bug — it must not return.
 - `curl -fsS http://localhost:8081/` still returns the default nginx
   page from the new container.
+
+To exercise **rollback**: recreate a container whose tag has been re-pointed to
+an image with a failing healthcheck; the CLI prints
+`recreate failed for <name>: ... rolled back to the previous container` and the
+original container is restored under its original name.
 
 ## Cleanup
 
@@ -178,18 +200,11 @@ docker network rm fd-front fd-back
 rm -rf /tmp/fd-state /tmp/fd-secrets
 ```
 
-## Known Phase-2 limitations (do not file as bugs)
+## Current limitations (do not file as bugs)
 
-- **No health gating.** The new container is started but the CLI returns
-  before it's verified healthy. If the new image is broken, the CLI
-  declares success anyway — Phase 3 fixes this.
-- **The `-old-` container is not removed.** It is preserved as the
-  rollback target for Phase 3. Until then the operator can `docker rm`
-  it manually after confirming the new instance is healthy.
-- **No live integration test in CI.** The "weird config" round-trip test
-  described in [docs/PLAN.md] §6.3 is Phase 3 (P3-3); it depends on
-  `testcontainers` which is currently incompatible with bollard 0.21
-  (see the comment in [Cargo.toml]).
 - **Registry auth is out of scope.** Pull works for Docker Hub
   anonymously and for any image already present in the local cache.
   GHCR / Quay / lscr.io land in Phase 5.
+- **Health timing is not yet configurable from the CLI/config.** Phase 3 uses
+  built-in defaults (`HealthConfig::default()`); sourcing it from
+  `freshdock.toml`/labels is Phase 4/5.

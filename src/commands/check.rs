@@ -6,6 +6,7 @@ use futures::future::join_all;
 use tracing::warn;
 
 use crate::docker::Docker;
+use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
 use crate::labels::{self, Mode};
 use crate::registry::digest::DockerHub;
@@ -20,10 +21,29 @@ const NETWORK_UNAVAILABLE: &str = "network unavailable";
 /// Always exits with success — including when updates are detected — per
 /// issue #7's acceptance criteria. Errors that prevent the table from
 /// rendering at all (e.g. cannot reach the Docker socket) propagate up.
+///
 pub async fn run(no_color: bool) -> Result<(), AppError> {
     let docker = Docker::connect()?;
-    let containers = docker.list_running().await?;
     let hub = DockerHub::new();
+    let cells = collect_cells(&docker, &hub).await?;
+    let mut table = build_table(no_color);
+    for row in cells {
+        table.add_row(Vec::from(row));
+    }
+    println!("{table}");
+    Ok(())
+}
+
+/// Build the six status columns (`container, image, mode, current digest,
+/// latest digest, update?`) for every opted-in container — the testable seam,
+/// parameterised over the daemon read surface ([`DockerCheck`]) and the
+/// [`Registry`]. Split from table formatting so unit tests assert individual
+/// cells (and the once-per-unique-image fetch) without parsing rendered output.
+async fn collect_cells(
+    docker: &impl DockerCheck,
+    registry: &impl Registry,
+) -> Result<Vec<[String; 6]>, AppError> {
+    let containers = docker.list_running().await?;
 
     let empty = HashMap::new();
 
@@ -55,26 +75,24 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
     // requests would waste Docker Hub's anonymous rate budget (100 / 6h) and
     // multiply daemon round-trips by the number of duplicate containers.
     let unique = unique_images(&rows);
-    let hub_ref = &hub;
-    let docker_ref = &docker;
     let fetches = unique.into_iter().map(|img| async move {
         // ContainerSummary.image_id is the image *config* digest, not the
         // *manifest* digest the registry returns via Docker-Content-Digest.
         // Resolve the local manifest digest from `image inspect → RepoDigests`.
-        let local = match docker_ref.inspect_image_repo_digests(&img).await {
+        let local = match docker.inspect_image_repo_digests(&img).await {
             Ok(digests) => manifest_digest_for(&img, &digests),
             Err(e) => {
                 warn!(image = %img, error = %e, "image inspect failed; current digest will be unknown");
                 None
             }
         };
-        let outcome = fetch_for(hub_ref, &img).await;
+        let outcome = fetch_for(registry, &img).await;
         (img, (local, outcome))
     });
     let by_image: HashMap<String, (Option<String>, FetchOutcome)> =
         join_all(fetches).await.into_iter().collect();
 
-    let mut table = build_table(no_color);
+    let mut cells = Vec::with_capacity(rows.len());
     for row in rows.into_iter() {
         let (local_digest, outcome) = by_image.get(&row.image).cloned().unwrap_or((
             None,
@@ -97,7 +115,7 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
             FetchOutcome::NetworkUnavailable => (NETWORK_UNAVAILABLE.to_string(), "-".to_string()),
             FetchOutcome::Error(msg) => (format!("error: {msg}"), "-".to_string()),
         };
-        table.add_row(vec![
+        cells.push([
             row.name,
             row.image,
             row.mode.to_string(),
@@ -107,8 +125,7 @@ pub async fn run(no_color: bool) -> Result<(), AppError> {
         ]);
     }
 
-    println!("{table}");
-    Ok(())
+    Ok(cells)
 }
 
 /// Order-preserving deduplication of image references across all rows.
@@ -137,12 +154,12 @@ enum FetchOutcome {
     Error(String),
 }
 
-async fn fetch_for(hub: &DockerHub, image: &str) -> FetchOutcome {
+async fn fetch_for(registry: &impl Registry, image: &str) -> FetchOutcome {
     let image_ref = ImageRef::parse(image);
     if !is_docker_hub(&image_ref.repository) {
         return FetchOutcome::SkippedAuth;
     }
-    match hub.fetch_digest(&image_ref).await {
+    match registry.fetch_digest(&image_ref).await {
         Ok(d) => FetchOutcome::Found(d),
         Err(RegistryError::NetworkUnavailable(reason)) => {
             warn!(repo = %image_ref.repository, %reason, "network unavailable");
@@ -363,6 +380,199 @@ mod tests {
         assert_eq!(
             manifest_digest_for(image, &repo_digests).as_deref(),
             Some("sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef")
+        );
+    }
+
+    // --- run_with / collect_cells: command-layer table assembly (#26) ---
+
+    use crate::docker::DockerError;
+    use async_trait::async_trait;
+    use bollard::models::ContainerSummary;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const DIG_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
+        ContainerSummary {
+            names: Some(vec![format!("/{name}")]),
+            image: Some(image.to_owned()),
+            labels: Some(
+                labels
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// Recording fake daemon: serves a fixed container list + per-image
+    /// RepoDigests, and counts `inspect_image_repo_digests` calls so the
+    /// dedupe contract can be asserted.
+    struct FakeDocker {
+        containers: Vec<ContainerSummary>,
+        repo_digests: HashMap<String, Vec<String>>,
+        inspect_calls: AtomicUsize,
+    }
+
+    impl FakeDocker {
+        fn new(containers: Vec<ContainerSummary>, repo_digests: &[(&str, &str)]) -> Self {
+            let repo_digests = repo_digests
+                .iter()
+                .map(|(img, rd)| ((*img).to_owned(), vec![(*rd).to_owned()]))
+                .collect();
+            Self {
+                containers,
+                repo_digests,
+                inspect_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DockerCheck for FakeDocker {
+        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+            Ok(self.containers.clone())
+        }
+        async fn inspect_image_repo_digests(
+            &self,
+            image: &str,
+        ) -> Result<Vec<String>, DockerError> {
+            self.inspect_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.repo_digests.get(image).cloned().unwrap_or_default())
+        }
+    }
+
+    /// Fake registry that returns a fixed upstream digest and counts calls —
+    /// lets the dedupe assertion verify exactly one fetch per unique image
+    /// without standing up a wiremock server.
+    struct FakeRegistry {
+        digest: String,
+        calls: AtomicUsize,
+    }
+
+    impl FakeRegistry {
+        fn new(digest: &str) -> Self {
+            Self {
+                digest: digest.to_owned(),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Registry for FakeRegistry {
+        async fn fetch_digest(&self, _image: &ImageRef) -> Result<Digest, RegistryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Digest(self.digest.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_local_and_upstream_digest_renders_no() {
+        let docker = FakeDocker::new(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[("freshdock.enable", "true")],
+            )],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry).await.unwrap();
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0][0], "web");
+        assert_eq!(
+            cells[0][2], "watch",
+            "enable=true with no mode defaults to watch"
+        );
+        assert_eq!(cells[0][5], "no", "equal digests must report no update");
+    }
+
+    #[tokio::test]
+    async fn differing_digest_renders_yes() {
+        let docker = FakeDocker::new(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[("freshdock.enable", "true")],
+            )],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(&docker, &registry).await.unwrap();
+        assert_eq!(
+            cells[0][5], "yes",
+            "differing digests must report an update"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_hub_image_is_skipped_and_registry_not_called() {
+        let docker = FakeDocker::new(
+            vec![summary(
+                "priv",
+                "ghcr.io/owner/repo:v1",
+                &[("freshdock.enable", "true")],
+            )],
+            &[(
+                "ghcr.io/owner/repo:v1",
+                &format!("ghcr.io/owner/repo@{DIG_A}"),
+            )],
+        );
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(&docker, &registry).await.unwrap();
+        assert_eq!(cells[0][4], SKIPPED_AUTH);
+        assert_eq!(cells[0][5], "-");
+        assert_eq!(
+            registry.calls.load(Ordering::SeqCst),
+            0,
+            "non-Hub images must short-circuit before any registry call"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_container_is_omitted() {
+        let docker = FakeDocker::new(
+            vec![
+                summary("on", "alpine:3.19", &[("freshdock.enable", "true")]),
+                summary("off", "redis:7", &[]),
+            ],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry).await.unwrap();
+        assert_eq!(cells.len(), 1, "only the opted-in container gets a row");
+        assert_eq!(cells[0][0], "on");
+    }
+
+    #[tokio::test]
+    async fn duplicate_image_across_containers_fetches_once() {
+        let docker = FakeDocker::new(
+            vec![
+                summary("a", "redis:7", &[("freshdock.enable", "true")]),
+                summary("b", "redis:7", &[("freshdock.enable", "true")]),
+            ],
+            &[("redis:7", &format!("redis@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry).await.unwrap();
+        assert_eq!(cells.len(), 2, "both containers still get their own row");
+        assert_eq!(
+            registry.calls.load(Ordering::SeqCst),
+            1,
+            "the shared image must be fetched exactly once (rate-budget contract)"
+        );
+        assert_eq!(
+            docker.inspect_calls.load(Ordering::SeqCst),
+            1,
+            "local digest inspect must also dedupe to one call per unique image"
         );
     }
 }

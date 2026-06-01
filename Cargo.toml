@@ -27,5 +27,13 @@ async-trait = "0.1"
 
 [dev-dependencies]
 wiremock = "0.6"
-# testcontainers will be re-added in Phase 3 once a release compatible with
-# bollard 0.21 is available; the current 0.27.x line pins bollard 0.20.
+# `test-util` enables `#[tokio::test(start_paused = true)]` so the health-gate
+# polling tests advance time virtually instead of sleeping real seconds. Kept
+# in dev-dependencies (feature-unified for the test build only) so it doesn't
+# ship in the release binary.
+tokio = { version = "1.52", features = ["test-util"] }
+# `testcontainers` is intentionally NOT used for the Phase-3 live recreate
+# round-trip (tests/recreate_roundtrip_live.rs). Its current 0.27.x line pins
+# bollard 0.20 while we use 0.21; adding it would duplicate bollard and fail
+# `cargo deny` (multiple-versions=deny). The live gate drives the daemon via
+# raw bollard 0.21 instead, gated behind `#[ignore = "needs-docker"]`.

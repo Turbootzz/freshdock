@@ -18,7 +18,8 @@ enum Cmd {
     /// List opted-in containers and report which have updates available.
     Check,
     /// Recreate a single container in place: inspect → pull → stop → rename →
-    /// create → start. No health gating or rollback yet (Phase 3).
+    /// create → start, then health-gate the new container and roll back to the
+    /// previous one if it fails.
     Recreate {
         /// Name (or ID) of the running container to recreate.
         name: String,
