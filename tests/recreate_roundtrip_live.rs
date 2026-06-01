@@ -429,14 +429,23 @@ async fn recreate_with_health_removes_archive_on_live_success() {
         RecreateOutcome::RolledBack(e) => panic!("healthy container must not roll back: {e:?}"),
     };
 
-    // The new container is running under its original name...
-    assert!(
-        docker.inspect_container(&name, None).await.is_ok(),
+    // The new container exists under its original name and is running...
+    let new = docker
+        .inspect_container(&name, None)
+        .await
+        .expect("the recreated container must exist");
+    assert_eq!(
+        new.state.and_then(|s| s.running),
+        Some(true),
         "the recreated container must be running"
     );
-    // ...and the archive was removed on success.
-    assert!(
-        docker.inspect_container(&old_name, None).await.is_err(),
-        "the -old- archive must be removed after a healthy gate"
-    );
+    // ...and the archive was removed on success — specifically a 404, not some
+    // unrelated transport/daemon error masquerading as "gone".
+    match docker.inspect_container(&old_name, None).await {
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {}
+        Ok(_) => panic!("the -old- archive must be removed after a healthy gate"),
+        Err(e) => panic!("expected a 404 for the removed archive, got: {e}"),
+    }
 }
