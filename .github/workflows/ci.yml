@@ -51,6 +51,30 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
+  integration:
+    name: Live recreate gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # ubuntu-latest ships a running Docker daemon, so the `#[ignore]`d live
+      # "weird config" round-trip (PLAN §6.3, P3-3) can run here — it is the
+      # release-blocker quality gate and does not run in the default test job.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The test skips gracefully if the daemon is unreachable; in this gate
+      # job a missing daemon must FAIL, not silently pass, so assert it first.
+      - name: Assert Docker daemon is up
+        run: docker version
+
+      - name: Live recreate round-trip (quality gate)
+        run: cargo test --locked --test recreate_roundtrip_live -- --ignored --nocapture
+
   cross-compile:
     name: Cross-compile (${{ matrix.target }})
     runs-on: ubuntu-latest

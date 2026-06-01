@@ -1,18 +1,23 @@
+pub mod check;
 pub mod inspect;
 pub mod recreate;
 pub mod rename;
 pub mod spec;
 
 use async_trait::async_trait;
-use bollard::models::ContainerSummary;
+use bollard::models::{
+    ContainerState, ContainerStateStatusEnum, ContainerSummary, HealthStatusEnum,
+};
 use bollard::query_parameters::{
-    CreateImageOptionsBuilder, ListContainersOptions, StopContainerOptionsBuilder,
+    CreateImageOptionsBuilder, ListContainersOptions, RemoveContainerOptionsBuilder,
+    RenameContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
 use tracing::debug;
 
 use crate::docker::recreate::DockerOps;
 use crate::docker::spec::ContainerSpec;
+use crate::health::{ContainerRuntimeState, HealthProbe};
 use crate::registry::ImageRef;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,11 +44,11 @@ impl Docker {
     }
 
     /// Pull the given image reference from its registry, draining the
-    /// progress stream. Phase 2 only needs the side effect of getting the
-    /// new image into the local store — the orchestrator hands the original
-    /// `spec.image_ref` (not a re-rendering) to `create_from_spec` so
-    /// `Config.Image` round-trips byte-identical (#25). Phase 5 will widen
-    /// the return type back when explicit digest pinning lands.
+    /// progress stream. The orchestrator hands the original `spec.image_ref`
+    /// (not a re-rendering) to `create_from_spec` so `Config.Image` round-trips
+    /// byte-identical (#25); this only needs the side effect of getting the new
+    /// image into the local store. Phase 5 will widen the return type back when
+    /// explicit digest pinning lands.
     pub async fn pull_image(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         let opts = CreateImageOptionsBuilder::new()
             .from_image(&image_ref.repository)
@@ -97,6 +102,62 @@ impl Docker {
         let resp = self.0.create_container(Some(opts), body).await?;
         Ok(resp.id)
     }
+
+    /// Remove a container by name or id. `force` issues a SIGKILL + remove for
+    /// a still-running container (the rollback path removes the *running* new
+    /// instance); `false` is the graceful remove used for the already-stopped
+    /// `-old-` archive on a successful update.
+    pub async fn remove_container_named(
+        &self,
+        name_or_id: &str,
+        force: bool,
+    ) -> Result<(), DockerError> {
+        let opts = RemoveContainerOptionsBuilder::new().force(force).build();
+        self.0.remove_container(name_or_id, Some(opts)).await?;
+        Ok(())
+    }
+
+    /// Plain `from → to` rename (no archive-naming logic). Used by rollback to
+    /// move `<name>-old-<ts>` back to its original name.
+    pub async fn rename_container_to(&self, from: &str, to: &str) -> Result<(), DockerError> {
+        let opts = RenameContainerOptionsBuilder::new().name(to).build();
+        self.0.rename_container(from, opts).await?;
+        Ok(())
+    }
+
+    /// Inspect a container and classify its lifecycle + health into the
+    /// daemon-agnostic [`ContainerRuntimeState`] the health gate polls on.
+    pub async fn probe_runtime_state(
+        &self,
+        name_or_id: &str,
+    ) -> Result<ContainerRuntimeState, DockerError> {
+        let resp = self.0.inspect_container(name_or_id, None).await?;
+        Ok(classify_runtime_state(resp.state))
+    }
+}
+
+/// Map bollard's `State` into the health gate's projection. `Running` +
+/// health status decides the healthcheck vs. grace-period path; anything not
+/// running is `Exited`. A missing/`none`/empty health status means no
+/// healthcheck was declared.
+fn classify_runtime_state(state: Option<ContainerState>) -> ContainerRuntimeState {
+    let Some(state) = state else {
+        return ContainerRuntimeState::Exited { exit_code: 0 };
+    };
+    let running = matches!(state.status, Some(ContainerStateStatusEnum::RUNNING))
+        || state.running == Some(true);
+    if !running {
+        return ContainerRuntimeState::Exited {
+            exit_code: state.exit_code.unwrap_or(0),
+        };
+    }
+    match state.health.and_then(|h| h.status) {
+        Some(HealthStatusEnum::HEALTHY) => ContainerRuntimeState::HealthHealthy,
+        Some(HealthStatusEnum::UNHEALTHY) => ContainerRuntimeState::HealthUnhealthy,
+        Some(HealthStatusEnum::STARTING) => ContainerRuntimeState::HealthStarting,
+        // None / `none` / empty: no healthcheck declared → grace-period path.
+        _ => ContainerRuntimeState::RunningNoHealthcheck,
+    }
 }
 
 /// Production wiring of the `DockerOps` trait. Per-step traces are emitted
@@ -143,5 +204,108 @@ impl DockerOps for Docker {
     async fn start(&self, name_or_id: &str) -> Result<(), DockerError> {
         debug!(container = %name_or_id, "start");
         self.start_container(name_or_id).await
+    }
+
+    async fn remove(&self, name_or_id: &str, force: bool) -> Result<(), DockerError> {
+        debug!(container = %name_or_id, force, "remove");
+        self.remove_container_named(name_or_id, force).await
+    }
+
+    async fn rename_to(&self, from: &str, to: &str) -> Result<(), DockerError> {
+        debug!(from = %from, to = %to, "rename_to");
+        self.rename_container_to(from, to).await
+    }
+}
+
+#[async_trait]
+impl HealthProbe for Docker {
+    async fn probe_state(&self, name_or_id: &str) -> Result<ContainerRuntimeState, DockerError> {
+        self.probe_runtime_state(name_or_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bollard::models::Health;
+
+    fn state(
+        status: ContainerStateStatusEnum,
+        health: Option<HealthStatusEnum>,
+    ) -> Option<ContainerState> {
+        Some(ContainerState {
+            status: Some(status),
+            health: health.map(|s| Health {
+                status: Some(s),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn running_with_healthy_check_maps_to_healthy() {
+        assert_eq!(
+            classify_runtime_state(state(
+                ContainerStateStatusEnum::RUNNING,
+                Some(HealthStatusEnum::HEALTHY)
+            )),
+            ContainerRuntimeState::HealthHealthy
+        );
+    }
+
+    #[test]
+    fn running_with_unhealthy_and_starting_map_through() {
+        assert_eq!(
+            classify_runtime_state(state(
+                ContainerStateStatusEnum::RUNNING,
+                Some(HealthStatusEnum::UNHEALTHY)
+            )),
+            ContainerRuntimeState::HealthUnhealthy
+        );
+        assert_eq!(
+            classify_runtime_state(state(
+                ContainerStateStatusEnum::RUNNING,
+                Some(HealthStatusEnum::STARTING)
+            )),
+            ContainerRuntimeState::HealthStarting
+        );
+    }
+
+    #[test]
+    fn running_without_healthcheck_maps_to_grace_path() {
+        assert_eq!(
+            classify_runtime_state(state(ContainerStateStatusEnum::RUNNING, None)),
+            ContainerRuntimeState::RunningNoHealthcheck
+        );
+        assert_eq!(
+            classify_runtime_state(state(
+                ContainerStateStatusEnum::RUNNING,
+                Some(HealthStatusEnum::NONE)
+            )),
+            ContainerRuntimeState::RunningNoHealthcheck
+        );
+    }
+
+    #[test]
+    fn exited_container_carries_exit_code() {
+        let st = Some(ContainerState {
+            status: Some(ContainerStateStatusEnum::EXITED),
+            running: Some(false),
+            exit_code: Some(137),
+            ..Default::default()
+        });
+        assert_eq!(
+            classify_runtime_state(st),
+            ContainerRuntimeState::Exited { exit_code: 137 }
+        );
+    }
+
+    #[test]
+    fn missing_state_is_treated_as_exited() {
+        assert_eq!(
+            classify_runtime_state(None),
+            ContainerRuntimeState::Exited { exit_code: 0 }
+        );
     }
 }

@@ -154,6 +154,12 @@ just install-hooks             # enables .githooks/pre-push
 
 `just ci` runs the full local CI suite (fmt-check, clippy, test, deny). The pre-push hook delegates to it, so anything that would fail on GitHub fails locally first. Bypass with `git push --no-verify` if you really need to (WIP branches, etc.). Run `just` with no arguments to list every recipe.
 
+**Release-blocker quality gate.** The live "weird config" recreate round-trip ([tests/recreate_roundtrip_live.rs](tests/recreate_roundtrip_live.rs), PLAN §6.3) creates a kitchen-sink container, recreates it against a real daemon, and asserts the inspected config round-trips byte-identical. It is `#[ignore]`d (needs Docker) so default `cargo test` stays green; CI runs it in a dedicated job, and a failure blocks release. Run it locally with:
+
+```bash
+cargo test --test recreate_roundtrip_live -- --ignored
+```
+
 ---
 
 ## License
