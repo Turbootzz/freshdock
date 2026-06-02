@@ -285,7 +285,11 @@ impl Dispatcher {
             let (raw_triggers, notifier): (Option<Vec<String>>, Box<dyn Notifier>) = match target {
                 NotificationTarget::Webhook { url, triggers } => (
                     triggers,
-                    Box::new(WebhookNotifier::new(name.clone(), url, http.clone())),
+                    Box::new(WebhookNotifier::new(
+                        name.clone(),
+                        url.expose(),
+                        http.clone(),
+                    )),
                 ),
                 NotificationTarget::Discord {
                     webhook_url,
@@ -294,7 +298,7 @@ impl Dispatcher {
                     triggers,
                     Box::new(DiscordNotifier::new(
                         name.clone(),
-                        webhook_url,
+                        webhook_url.expose(),
                         http.clone(),
                     )),
                 ),

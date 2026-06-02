@@ -1088,12 +1088,12 @@ mod tests {
     /// A dispatcher with one webhook target (subscribed to all triggers) aimed
     /// at `uri`.
     fn webhook_dispatcher(uri: String) -> Dispatcher {
-        use crate::config::{NotificationConfig, NotificationTarget};
+        use crate::config::{NotificationConfig, NotificationTarget, Secret};
         let mut targets = std::collections::HashMap::new();
         targets.insert(
             "hook".to_string(),
             NotificationTarget::Webhook {
-                url: uri,
+                url: Secret::new(uri),
                 triggers: None,
             },
         );

@@ -71,12 +71,14 @@ pub struct Config {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum NotificationTarget {
     Webhook {
-        url: String,
+        // `Secret`: a webhook URL can embed a token (Discord's always does), and
+        // wrapping it keeps the derived `Debug` from ever leaking one.
+        url: Secret,
         #[serde(default)]
         triggers: Option<Vec<String>>,
     },
     Discord {
-        webhook_url: String,
+        webhook_url: Secret,
         #[serde(default)]
         triggers: Option<Vec<String>>,
     },

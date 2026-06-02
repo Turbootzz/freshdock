@@ -147,21 +147,21 @@ async fn dispatch_hits_each_subscribed_target_once_and_skips_others() {
     targets.insert(
         "a".to_string(),
         NotificationTarget::Webhook {
-            url: fail_a.uri(),
+            url: Secret::new(fail_a.uri()),
             triggers: Some(vec!["failed".into()]),
         },
     );
     targets.insert(
         "b".to_string(),
         NotificationTarget::Webhook {
-            url: fail_b.uri(),
+            url: Secret::new(fail_b.uri()),
             triggers: Some(vec!["failed".into()]),
         },
     );
     targets.insert(
         "s".to_string(),
         NotificationTarget::Webhook {
-            url: succ_only.uri(),
+            url: Secret::new(succ_only.uri()),
             triggers: Some(vec!["succeeded".into()]),
         },
     );
