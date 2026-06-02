@@ -3,17 +3,18 @@ use std::collections::HashMap;
 use comfy_table::Table;
 use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
-use tracing::warn;
 
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
 use crate::labels::{self, Mode};
+use crate::probe::{self, ProbeOutcome, pinned_digest};
+use crate::registry::Registry;
 use crate::registry::digest::DockerHub;
-use crate::registry::{Digest, ImageRef, Registry, RegistryError};
 
 const SKIPPED_AUTH: &str = "skipped: not yet supported (Phase 5)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
+const PINNED: &str = "pinned (no check)";
 
 /// Run the read-only check: list opted-in containers, fetch latest
 /// digests for those on Docker Hub, and render a status table.
@@ -69,63 +70,63 @@ async fn collect_cells(
         });
     }
 
-    // Fetch local *and* upstream digests once per unique image reference. A
-    // homelab compose stack often has several containers sharing the same
-    // image; firing duplicate `image inspect` calls or duplicate token+HEAD
-    // requests would waste Docker Hub's anonymous rate budget (100 / 6h) and
-    // multiply daemon round-trips by the number of duplicate containers.
+    // Probe each unique image reference once. A homelab compose stack often
+    // has several containers sharing the same image; firing duplicate `image
+    // inspect` calls or duplicate token+HEAD requests would waste Docker Hub's
+    // anonymous rate budget (100 / 6h) and multiply daemon round-trips by the
+    // number of duplicate containers. [`probe::probe_image`] is the same
+    // "is there an update?" path the scheduler daemon uses (DRY).
     let unique = unique_images(&rows);
     let fetches = unique.into_iter().map(|img| async move {
-        // ContainerSummary.image_id is the image *config* digest, not the
-        // *manifest* digest the registry returns via Docker-Content-Digest.
-        // Resolve the local manifest digest from `image inspect → RepoDigests`.
-        let local = match docker.inspect_image_repo_digests(&img).await {
-            Ok(digests) => manifest_digest_for(&img, &digests),
-            Err(e) => {
-                warn!(image = %img, error = %e, "image inspect failed; current digest will be unknown");
-                None
-            }
-        };
-        let outcome = fetch_for(registry, &img).await;
-        (img, (local, outcome))
+        (
+            img.clone(),
+            probe::probe_image(docker, registry, &img).await,
+        )
     });
-    let by_image: HashMap<String, (Option<String>, FetchOutcome)> =
-        join_all(fetches).await.into_iter().collect();
+    let by_image: HashMap<String, ProbeOutcome> = join_all(fetches).await.into_iter().collect();
 
     let mut cells = Vec::with_capacity(rows.len());
     for row in rows.into_iter() {
-        let (local_digest, outcome) = by_image.get(&row.image).cloned().unwrap_or((
-            None,
-            FetchOutcome::Error("internal: missing fetch result".into()),
-        ));
-        let local = local_digest
-            .as_deref()
-            .map(short_digest)
-            .unwrap_or_else(|| "-".to_string());
-        let (latest_cell, update_cell) = match outcome {
-            FetchOutcome::Found(d) => {
-                let update = local_digest
-                    .as_deref()
-                    .map(|l| if l == d.0 { "no" } else { "yes" })
-                    .unwrap_or("?")
-                    .to_string();
-                (short_digest(&d.0), update)
-            }
-            FetchOutcome::SkippedAuth => (SKIPPED_AUTH.to_string(), "-".to_string()),
-            FetchOutcome::NetworkUnavailable => (NETWORK_UNAVAILABLE.to_string(), "-".to_string()),
-            FetchOutcome::Error(msg) => (format!("error: {msg}"), "-".to_string()),
-        };
+        let outcome = by_image
+            .get(&row.image)
+            .cloned()
+            .unwrap_or_else(|| ProbeOutcome::Error("internal: missing fetch result".into()));
+        let (current, latest, update) = render_cells(&row.image, &outcome);
         cells.push([
             row.name,
             row.image,
             row.mode.to_string(),
-            local,
-            latest_cell,
-            update_cell,
+            current,
+            latest,
+            update,
         ]);
     }
 
     Ok(cells)
+}
+
+/// Map a [`ProbeOutcome`] to the `(current digest, latest digest, update?)`
+/// table cells.
+fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String) {
+    let dash = || "-".to_string();
+    match outcome {
+        ProbeOutcome::Fetched { local, latest } => {
+            let current = local.as_deref().map(short_digest).unwrap_or_else(dash);
+            let update = local
+                .as_deref()
+                .map(|l| if l == latest { "no" } else { "yes" })
+                .unwrap_or("?")
+                .to_string();
+            (current, short_digest(latest), update)
+        }
+        ProbeOutcome::Pinned => {
+            let current = pinned_digest(image).map(short_digest).unwrap_or_else(dash);
+            (current, PINNED.to_string(), dash())
+        }
+        ProbeOutcome::SkippedAuth => (dash(), SKIPPED_AUTH.to_string(), dash()),
+        ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
+        ProbeOutcome::Error(msg) => (dash(), format!("error: {msg}"), dash()),
+    }
 }
 
 /// Order-preserving deduplication of image references across all rows.
@@ -144,68 +145,6 @@ struct RowPrep {
     name: String,
     image: String,
     mode: Mode,
-}
-
-#[derive(Clone)]
-enum FetchOutcome {
-    Found(Digest),
-    SkippedAuth,
-    NetworkUnavailable,
-    Error(String),
-}
-
-async fn fetch_for(registry: &impl Registry, image: &str) -> FetchOutcome {
-    let image_ref = ImageRef::parse(image);
-    if !is_docker_hub(&image_ref.repository) {
-        return FetchOutcome::SkippedAuth;
-    }
-    match registry.fetch_digest(&image_ref).await {
-        Ok(d) => FetchOutcome::Found(d),
-        Err(RegistryError::NetworkUnavailable(reason)) => {
-            warn!(repo = %image_ref.repository, %reason, "network unavailable");
-            FetchOutcome::NetworkUnavailable
-        }
-        Err(e) => {
-            warn!(repo = %image_ref.repository, error = %e, "digest fetch failed");
-            FetchOutcome::Error(e.to_string())
-        }
-    }
-}
-
-/// Docker Hub references have a repo of `library/<name>` or `<owner>/<name>`.
-/// Anything containing a host (`ghcr.io/...`, `quay.io/...`, `lscr.io/...`,
-/// or a bare `localhost[/...]`) belongs to a private/non-Hub registry.
-fn is_docker_hub(repository: &str) -> bool {
-    let first = repository.split('/').next().unwrap_or("");
-    if first.eq_ignore_ascii_case("localhost") {
-        return false;
-    }
-    !(first.contains('.') || first.contains(':'))
-}
-
-/// Find the manifest digest for an image reference inside an `ImageInspect.RepoDigests`
-/// list. RepoDigests entries look like `repo@sha256:<hex>`; we match on the repo
-/// portion (everything before `@`) against the image's repo (the input with any
-/// `@digest` and any trailing `:tag` stripped) and return the digest.
-fn manifest_digest_for(image: &str, repo_digests: &[String]) -> Option<String> {
-    let want_repo = strip_tag(image.split('@').next()?);
-    repo_digests.iter().find_map(|rd| {
-        let (repo, digest) = rd.split_once('@')?;
-        (repo == want_repo).then(|| digest.to_owned())
-    })
-}
-
-/// Strip a trailing `:tag` from an image reference without confusing it for a
-/// `host:port` separator. A colon is a tag separator only when it appears
-/// after the last `/` (or when there is no `/` at all). Anything else —
-/// `localhost:5000/repo`, `registry.example.com:443/repo` — must round-trip
-/// untouched so the RepoDigests entry's `repo` portion still matches.
-fn strip_tag(image_no_digest: &str) -> &str {
-    match (image_no_digest.rfind(':'), image_no_digest.rfind('/')) {
-        (Some(colon), Some(slash)) if colon > slash => &image_no_digest[..colon],
-        (Some(colon), None) => &image_no_digest[..colon],
-        _ => image_no_digest,
-    }
 }
 
 fn short_digest(d: &str) -> String {
@@ -235,22 +174,6 @@ fn build_table(no_color: bool) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn docker_hub_namespacing() {
-        assert!(is_docker_hub("library/alpine"));
-        assert!(is_docker_hub("nginxinc/nginx-unprivileged"));
-        assert!(!is_docker_hub("ghcr.io/owner/repo"));
-        assert!(!is_docker_hub("quay.io/foo/bar"));
-        assert!(!is_docker_hub("lscr.io/linuxserver/sonarr"));
-    }
-
-    #[test]
-    fn localhost_is_not_docker_hub() {
-        assert!(!is_docker_hub("localhost/image"));
-        assert!(!is_docker_hub("LOCALHOST/repo"));
-        assert!(!is_docker_hub("localhost:5000/repo"));
-    }
 
     #[test]
     fn short_digest_truncates_sha256() {
@@ -298,94 +221,10 @@ mod tests {
         assert!(unique_images(&rows).is_empty());
     }
 
-    #[test]
-    fn extracts_manifest_digest_when_repo_matches() {
-        let image = "nginx:alpine";
-        let repo_digests = [
-            "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_owned(),
-        ];
-        assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        );
-    }
-
-    #[test]
-    fn extracts_manifest_digest_for_namespaced_repo() {
-        let image = "ghcr.io/owner/repo:v1";
-        let repo_digests = [
-            "other/thing@sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                .to_owned(),
-            "ghcr.io/owner/repo@sha256:2222222222222222222222222222222222222222222222222222222222222222"
-                .to_owned(),
-        ];
-        assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
-        );
-    }
-
-    #[test]
-    fn returns_none_when_no_repo_digest_matches() {
-        let image = "nginx:alpine";
-        let repo_digests = ["redis@sha256:dead".to_owned()];
-        assert_eq!(manifest_digest_for(image, &repo_digests), None);
-    }
-
-    #[test]
-    fn returns_none_for_empty_repo_digests() {
-        assert_eq!(manifest_digest_for("nginx:alpine", &[]), None);
-    }
-
-    #[test]
-    fn handles_host_port_in_registry_reference() {
-        // The hostname `localhost:5000` contains a colon that must NOT be
-        // mistaken for a tag separator. The RepoDigests entry preserves the
-        // host:port verbatim, so we must too.
-        let image = "localhost:5000/repo:v1";
-        let repo_digests = [
-            "localhost:5000/repo@sha256:3333333333333333333333333333333333333333333333333333333333333333"
-                .to_owned(),
-        ];
-        assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:3333333333333333333333333333333333333333333333333333333333333333")
-        );
-    }
-
-    #[test]
-    fn handles_host_port_with_no_tag() {
-        // No tag at all — the only colon is the host:port separator.
-        let image = "localhost:5000/repo";
-        let repo_digests = [
-            "localhost:5000/repo@sha256:4444444444444444444444444444444444444444444444444444444444444444"
-                .to_owned(),
-        ];
-        assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:4444444444444444444444444444444444444444444444444444444444444444")
-        );
-    }
-
-    #[test]
-    fn handles_image_already_pinned_to_digest() {
-        // When the running image is referenced by digest, the input string has
-        // no tag — we should still recover the matching repo_digest entry.
-        let image = "nginx@sha256:beef";
-        let repo_digests = [
-            "nginx@sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
-                .to_owned(),
-        ];
-        assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef")
-        );
-    }
-
-    // --- run_with / collect_cells: command-layer table assembly (#26) ---
+    // --- collect_cells: command-layer table assembly (#26) ---
 
     use crate::docker::DockerError;
+    use crate::registry::{Digest, ImageRef, RegistryError};
     use async_trait::async_trait;
     use bollard::models::ContainerSummary;
     use std::sync::atomic::{AtomicUsize, Ordering};

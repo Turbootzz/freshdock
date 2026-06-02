@@ -24,6 +24,11 @@ anyhow = "1.0"
 comfy-table = "7"
 futures = "0.3"
 async-trait = "0.1"
+# Used only for DST-correct local-time calendar math in the cron scheduler
+# (`DateTime<Local>` + spring-forward gap detection). The cron *parser* and the
+# scheduler loop are hand-rolled (PLAN §10 Q3: "hand-roll; less dependency
+# surface"); chrono owns only the calendar primitive. `clock` brings `Local`.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 wiremock = "0.6"
