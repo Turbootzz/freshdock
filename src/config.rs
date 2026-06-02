@@ -222,8 +222,9 @@ pub const ENV_VAR_HELP: &str = "Registry credentials may also be supplied via en
 overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOCK_REGISTRY_GHCR_USERNAME\n  \
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
 lscr, or a registry host.\nNotification secrets may be overridden the same way (<NAME> is the \
-[notifications.<NAME>] table name, upper-cased):\n  FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
-FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nFRESHDOCK_CONFIG sets the config file path.";
+[notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
+FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names so two can't map to the \
+same variable (e.g. `ops-mail` and `ops_mail` collide).\nFRESHDOCK_CONFIG sets the config file path.";
 
 /// Fold a config key / image host onto its canonical registry host so a
 /// `[registry.dockerhub]` table, a `FRESHDOCK_REGISTRY_DOCKERHUB_TOKEN`, and an

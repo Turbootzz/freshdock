@@ -69,6 +69,10 @@ struct ContainerState {
     next_fire: Option<DateTime<Local>>,
     /// Parsed effective cron, cached so it's parsed once.
     cron: Option<CronExpr>,
+    /// Upstream digest of the last `watch`-mode "update available" notification,
+    /// so the same available update isn't re-announced every poll (it would
+    /// otherwise notify every `poll_interval` until the user acts).
+    last_notified_digest: Option<String>,
 }
 
 /// Resolve the effective cron for a policy: explicit `freshdock.schedule`
@@ -100,6 +104,7 @@ fn seed_state(policy: &Policy, name: &str, now: DateTime<Local>) -> ContainerSta
         last_checked: None,
         next_fire,
         cron,
+        last_notified_digest: None,
     }
 }
 
@@ -263,7 +268,16 @@ async fn run_tick<D, R>(
 
         let image = c.image.as_deref().unwrap_or_default();
         process_container(
-            docker, registry, cfg, clock, now, &name, &policy, image, dispatcher,
+            docker,
+            registry,
+            cfg,
+            clock,
+            now,
+            &name,
+            &policy,
+            image,
+            dispatcher,
+            &mut state.last_notified_digest,
         )
         .await;
     }
@@ -284,6 +298,7 @@ async fn process_container<D, R>(
     policy: &Policy,
     image: &str,
     dispatcher: &Dispatcher,
+    last_notified: &mut Option<String>,
 ) where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
@@ -301,7 +316,9 @@ async fn process_container<D, R>(
             match policy.mode {
                 Mode::Watch => {
                     info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
-                    if policy.notify {
+                    // Only notify once per distinct upstream digest, or a watched
+                    // update would re-alert every poll until the user acts.
+                    if policy.notify && last_notified.as_deref() != Some(latest.as_str()) {
                         dispatcher
                             .dispatch(&NotifyEvent::UpdateAvailable {
                                 container: name.to_string(),
@@ -309,6 +326,7 @@ async fn process_container<D, R>(
                                 latest_digest: latest.clone(),
                             })
                             .await;
+                        *last_notified = Some(latest.clone());
                     }
                 }
                 Mode::Live | Mode::Nightly | Mode::Weekly | Mode::Monthly => {
@@ -1145,6 +1163,53 @@ mod tests {
         let node = FakeNode::new(notifying_container("watch", true), DIG_A);
         let reg = FakeRegistry::new(DIG_A); // same digest → up to date
         one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[tokio::test]
+    async fn watch_available_notifies_once_until_the_digest_changes() {
+        // Two polls of the same available update must produce only one
+        // notification (no re-alert every poll_interval).
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", true), DIG_A);
+        let reg = FakeRegistry::new(DIG_B); // update available, unchanged across polls
+        let dispatcher = webhook_dispatcher(server.uri());
+        let (_tx, rx) = watch::channel(false);
+        let mut states = HashMap::new();
+
+        let clock = std::cell::Cell::new(Local.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap());
+        let now_fn = || clock.get();
+
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &dispatcher,
+        )
+        .await;
+        // 10 min later → past the 5 min poll interval, so watch is due again;
+        // same digest → must NOT re-notify.
+        clock.set(Local.with_ymd_and_hms(2026, 6, 2, 12, 10, 0).unwrap());
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &dispatcher,
+        )
+        .await;
     }
 
     #[tokio::test]

@@ -88,8 +88,20 @@ impl SmtpNotifier {
         })?;
 
         let mut builder = relay.port(params.port);
-        if let (Some(user), Some(pass)) = (params.username, params.password) {
-            builder = builder.credentials(Credentials::new(user, pass.expose().to_string()));
+        match (params.username, params.password) {
+            (Some(user), Some(pass)) => {
+                builder = builder.credentials(Credentials::new(user, pass.expose().to_string()));
+            }
+            // No credentials → anonymous relay (e.g. a local catcher).
+            (None, None) => {}
+            // One without the other can't authenticate; sending unauthenticated
+            // anyway would silently surprise the operator, so reject it.
+            _ => {
+                return Err(NotifyError::Config {
+                    name: params.name.clone(),
+                    reason: "smtp `username` and `password` must be set together".to_string(),
+                });
+            }
         }
 
         Ok(Self {
@@ -186,6 +198,23 @@ mod tests {
             password: None,
             from: "freshdock@example.com".into(),
             to: vec!["ok@example.com".into(), "not-an-email".into()],
+            starttls: true,
+        });
+        assert!(matches!(result, Err(NotifyError::Config { .. })));
+    }
+
+    #[test]
+    fn new_rejects_partial_credentials() {
+        // username without password (or vice versa) must error, not silently
+        // connect unauthenticated.
+        let result = SmtpNotifier::new(SmtpParams {
+            name: "email".into(),
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: Some("user".into()),
+            password: None,
+            from: "freshdock@example.com".into(),
+            to: vec!["admin@example.com".into()],
             starttls: true,
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
