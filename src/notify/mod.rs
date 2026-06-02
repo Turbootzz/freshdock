@@ -21,8 +21,13 @@ use std::sync::Arc;
 use serde::Serialize;
 use tracing::warn;
 
+use crate::config::{NotificationConfig, NotificationTarget};
 use crate::format::short_digest;
 use crate::rollback::RollbackReason;
+use discord::DiscordNotifier;
+use smtp::{SmtpNotifier, SmtpParams};
+use telegram::TelegramNotifier;
+use webhook::WebhookNotifier;
 
 /// Which lifecycle event fired. The config `triggers = [...]` list and the
 /// PLAN §5.4 matrix (update available / succeeded / failed) map onto these.
@@ -158,6 +163,26 @@ impl NotifyEvent {
     }
 }
 
+/// Resolve a target's `triggers` config into a subscription set. Omitted
+/// (`None`) subscribes to all three; an unknown token fails with the target
+/// named so the operator can find it.
+fn parse_triggers(name: &str, triggers: Option<Vec<String>>) -> Result<HashSet<Trigger>, NotifyError> {
+    match triggers {
+        None => Ok(Trigger::all()),
+        Some(list) => list
+            .iter()
+            .map(|t| {
+                Trigger::parse(t).map_err(|bad| NotifyError::Config {
+                    name: name.to_string(),
+                    reason: format!(
+                        "unknown trigger `{bad}` (expected available, succeeded, or failed)"
+                    ),
+                })
+            })
+            .collect(),
+    }
+}
+
 /// Human phrasing for a rollback reason. Kept here (presentation) rather than on
 /// the pure-data [`RollbackReason`].
 fn reason_text(reason: RollbackReason) -> &'static str {
@@ -242,6 +267,72 @@ impl Dispatcher {
         Self {
             targets: Arc::new(Vec::new()),
         }
+    }
+
+    /// Build the dispatcher from parsed config, sharing one `http` client across
+    /// the HTTP backends (SMTP ignores it). Construction errors (bad trigger
+    /// token, malformed SMTP relay/address) are fatal — misconfiguration should
+    /// fail loudly at startup, before the daemon runs.
+    pub fn from_config(
+        config: NotificationConfig,
+        http: reqwest::Client,
+    ) -> Result<Self, NotifyError> {
+        let mut targets = Vec::with_capacity(config.targets.len());
+        for (name, target) in config.targets {
+            let (raw_triggers, notifier): (Option<Vec<String>>, Box<dyn Notifier>) = match target {
+                NotificationTarget::Webhook { url, triggers } => (
+                    triggers,
+                    Box::new(WebhookNotifier::new(name.clone(), url, http.clone())),
+                ),
+                NotificationTarget::Discord {
+                    webhook_url,
+                    triggers,
+                } => (
+                    triggers,
+                    Box::new(DiscordNotifier::new(name.clone(), webhook_url, http.clone())),
+                ),
+                NotificationTarget::Telegram {
+                    bot_token,
+                    chat_id,
+                    triggers,
+                } => (
+                    triggers,
+                    Box::new(TelegramNotifier::new(
+                        name.clone(),
+                        bot_token,
+                        chat_id,
+                        http.clone(),
+                    )),
+                ),
+                NotificationTarget::Smtp {
+                    host,
+                    port,
+                    username,
+                    password,
+                    from,
+                    to,
+                    starttls,
+                    triggers,
+                } => (
+                    triggers,
+                    Box::new(SmtpNotifier::new(SmtpParams {
+                        name: name.clone(),
+                        host,
+                        port,
+                        username,
+                        password,
+                        from,
+                        to,
+                        starttls,
+                    })?),
+                ),
+            };
+            let triggers = parse_triggers(&name, raw_triggers)?;
+            targets.push(Target { triggers, notifier });
+        }
+        Ok(Self {
+            targets: Arc::new(targets),
+        })
     }
 
     #[cfg(test)]
