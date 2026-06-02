@@ -19,9 +19,15 @@ use crate::scheduler::{self, SchedulerConfig};
 pub async fn run(interval: u64, tick: u64, stop_timeout: u64) -> Result<(), AppError> {
     let docker = Docker::connect()?;
     let hub = DockerHub::new();
+
+    // `tokio::time::interval` panics on a zero period, and a poll interval below
+    // the tick can never be honoured (due is evaluated once per tick), so clamp:
+    // tick ≥ 1s and interval ≥ max(tick, 1s).
+    let tick_secs = tick.max(1);
+    let interval_secs = interval.max(1).max(tick_secs);
     let cfg = SchedulerConfig {
-        poll_interval: Duration::from_secs(interval),
-        tick: Duration::from_secs(tick),
+        poll_interval: Duration::from_secs(interval_secs),
+        tick: Duration::from_secs(tick_secs),
         health: HealthConfig::default(),
     };
 
