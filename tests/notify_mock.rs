@@ -185,8 +185,41 @@ async fn dispatch_hits_each_subscribed_target_once_and_skips_others() {
     );
 
     let dispatcher =
-        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client())
-            .expect("dispatcher builds from valid config");
+        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client());
     dispatcher.dispatch(&failed()).await;
     // Per-server .expect(n) is verified when each MockServer drops here.
+}
+
+#[tokio::test]
+async fn a_bad_target_is_skipped_and_a_good_one_still_fires() {
+    // One target has an invalid trigger token (must be dropped); the other is
+    // valid and must still receive the event — a notification typo can't take
+    // the whole dispatcher down.
+    let good = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&good)
+        .await;
+
+    let mut targets = HashMap::new();
+    targets.insert(
+        "broken".to_string(),
+        NotificationTarget::Webhook {
+            url: Secret::new("https://example.invalid"),
+            triggers: Some(vec!["bogus".into()]), // invalid → skipped
+        },
+    );
+    targets.insert(
+        "good".to_string(),
+        NotificationTarget::Webhook {
+            url: Secret::new(good.uri()),
+            triggers: None,
+        },
+    );
+
+    let dispatcher =
+        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client());
+    dispatcher.dispatch(&succeeded()).await;
+    // `good` is asserted via .expect(1) on drop; `broken` never sent (no server).
 }

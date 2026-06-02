@@ -29,8 +29,9 @@ pub async fn run(
     let docker = Docker::connect(credentials.clone())?;
     let registry = OciRegistry::new(credentials);
     // Build the dispatcher once from config, sharing one HTTP client with the
-    // backends. A misconfigured target fails here, before the daemon loops.
-    let dispatcher = Dispatcher::from_config(notifications, crate::http::client())?;
+    // backends. A misconfigured target is skipped with a WARN (resilient): a
+    // notification typo must never stop the daemon from updating containers.
+    let dispatcher = Dispatcher::from_config(notifications, crate::http::client());
 
     // `tokio::time::interval` panics on a zero period, and a poll interval below
     // the tick can never be honoured (due is evaluated once per tick), so clamp:

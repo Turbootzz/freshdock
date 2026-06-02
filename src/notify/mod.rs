@@ -186,6 +186,69 @@ fn parse_triggers(
     }
 }
 
+/// Build one configured target (backend + its trigger subscription). Fallible
+/// so [`Dispatcher::from_config`] can skip a bad target rather than abort.
+fn build_target(
+    name: &str,
+    target: NotificationTarget,
+    http: &reqwest::Client,
+) -> Result<Target, NotifyError> {
+    let (raw_triggers, notifier): (Option<Vec<String>>, Box<dyn Notifier>) = match target {
+        NotificationTarget::Webhook { url, triggers } => (
+            triggers,
+            Box::new(WebhookNotifier::new(name, url.expose(), http.clone())),
+        ),
+        NotificationTarget::Discord {
+            webhook_url,
+            triggers,
+        } => (
+            triggers,
+            Box::new(DiscordNotifier::new(
+                name,
+                webhook_url.expose(),
+                http.clone(),
+            )),
+        ),
+        NotificationTarget::Telegram {
+            bot_token,
+            chat_id,
+            triggers,
+        } => (
+            triggers,
+            Box::new(TelegramNotifier::new(
+                name,
+                bot_token,
+                chat_id,
+                http.clone(),
+            )),
+        ),
+        NotificationTarget::Smtp {
+            host,
+            port,
+            username,
+            password,
+            from,
+            to,
+            starttls,
+            triggers,
+        } => (
+            triggers,
+            Box::new(SmtpNotifier::new(SmtpParams {
+                name: name.to_string(),
+                host,
+                port,
+                username,
+                password,
+                from,
+                to,
+                starttls,
+            })?),
+        ),
+    };
+    let triggers = parse_triggers(name, raw_triggers)?;
+    Ok(Target { triggers, notifier })
+}
+
 /// Human phrasing for a rollback reason. Kept here (presentation) rather than on
 /// the pure-data [`RollbackReason`].
 fn reason_text(reason: RollbackReason) -> &'static str {
@@ -273,77 +336,24 @@ impl Dispatcher {
     }
 
     /// Build the dispatcher from parsed config, sharing one `http` client across
-    /// the HTTP backends (SMTP ignores it). Construction errors (bad trigger
-    /// token, malformed SMTP relay/address) are fatal — misconfiguration should
-    /// fail loudly at startup, before the daemon runs.
-    pub fn from_config(
-        config: NotificationConfig,
-        http: reqwest::Client,
-    ) -> Result<Self, NotifyError> {
+    /// the HTTP backends (SMTP ignores it). **Resilient**: a target that fails to
+    /// build (bad trigger token, malformed SMTP relay/address) is logged and
+    /// skipped, so one bad `[notifications.*]` entry can never stop the daemon
+    /// from updating containers — same rule as a failed send. (Structurally
+    /// broken config is already rejected earlier, when the file is parsed.)
+    pub fn from_config(config: NotificationConfig, http: reqwest::Client) -> Self {
         let mut targets = Vec::with_capacity(config.targets.len());
         for (name, target) in config.targets {
-            let (raw_triggers, notifier): (Option<Vec<String>>, Box<dyn Notifier>) = match target {
-                NotificationTarget::Webhook { url, triggers } => (
-                    triggers,
-                    Box::new(WebhookNotifier::new(
-                        name.clone(),
-                        url.expose(),
-                        http.clone(),
-                    )),
-                ),
-                NotificationTarget::Discord {
-                    webhook_url,
-                    triggers,
-                } => (
-                    triggers,
-                    Box::new(DiscordNotifier::new(
-                        name.clone(),
-                        webhook_url.expose(),
-                        http.clone(),
-                    )),
-                ),
-                NotificationTarget::Telegram {
-                    bot_token,
-                    chat_id,
-                    triggers,
-                } => (
-                    triggers,
-                    Box::new(TelegramNotifier::new(
-                        name.clone(),
-                        bot_token,
-                        chat_id,
-                        http.clone(),
-                    )),
-                ),
-                NotificationTarget::Smtp {
-                    host,
-                    port,
-                    username,
-                    password,
-                    from,
-                    to,
-                    starttls,
-                    triggers,
-                } => (
-                    triggers,
-                    Box::new(SmtpNotifier::new(SmtpParams {
-                        name: name.clone(),
-                        host,
-                        port,
-                        username,
-                        password,
-                        from,
-                        to,
-                        starttls,
-                    })?),
-                ),
-            };
-            let triggers = parse_triggers(&name, raw_triggers)?;
-            targets.push(Target { triggers, notifier });
+            match build_target(&name, target, &http) {
+                Ok(t) => targets.push(t),
+                Err(e) => {
+                    warn!(target = %name, error = %e, "skipping invalid notification target")
+                }
+            }
         }
-        Ok(Self {
+        Self {
             targets: Arc::new(targets),
-        })
+        }
     }
 
     #[cfg(test)]
@@ -570,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn from_config_rejects_an_unknown_trigger() {
+    fn from_config_skips_a_target_with_an_unknown_trigger() {
         use crate::config::{NotificationConfig, NotificationTarget, Secret};
         let mut targets = std::collections::HashMap::new();
         targets.insert(
@@ -580,7 +590,9 @@ mod tests {
                 triggers: Some(vec!["bogus".to_string()]),
             },
         );
-        let result = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
-        assert!(matches!(result, Err(NotifyError::Config { .. })));
+        // Resilient: the bad target is dropped, not an error — the daemon keeps
+        // running (here with no targets left).
+        let d = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
+        assert!(d.is_empty());
     }
 }

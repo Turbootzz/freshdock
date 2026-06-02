@@ -1098,7 +1098,6 @@ mod tests {
             },
         );
         Dispatcher::from_config(NotificationConfig { targets }, crate::http::client())
-            .expect("dispatcher builds")
     }
 
     fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerSummary> {
