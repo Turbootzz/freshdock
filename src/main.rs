@@ -76,7 +76,16 @@ async fn main() -> Result<()> {
             interval,
             tick,
             stop_timeout,
-        } => commands::run::run(interval, tick, stop_timeout, credentials).await?,
+        } => {
+            commands::run::run(
+                interval,
+                tick,
+                stop_timeout,
+                credentials,
+                config.notifications,
+            )
+            .await?
+        }
     }
     Ok(())
 }
