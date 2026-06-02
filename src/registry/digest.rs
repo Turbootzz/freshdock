@@ -13,7 +13,6 @@ use super::auth::{CachedToken, parse_www_authenticate};
 use super::{Digest, ImageRef, Registry, RegistryError};
 use crate::config::{CredentialStore, canonicalize_host};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ACCEPT_MANIFESTS: &str = "application/vnd.docker.distribution.manifest.v2+json, \
@@ -139,13 +138,8 @@ impl OciRegistry {
     }
 
     fn build(store: Arc<CredentialStore>, registry_override: Option<Endpoints>) -> Self {
-        let client = Client::builder()
-            .user_agent(concat!("freshdock/", env!("CARGO_PKG_VERSION")))
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("reqwest client construction with default config cannot fail");
         Self {
-            client,
+            client: crate::http::client(),
             store,
             token_cache: Mutex::new(HashMap::new()),
             registry_override,

@@ -4,6 +4,7 @@ pub mod cron;
 pub mod docker;
 pub mod errors;
 pub mod health;
+pub mod http;
 pub mod labels;
 pub mod probe;
 pub mod registry;
