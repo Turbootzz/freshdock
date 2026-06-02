@@ -7,6 +7,7 @@
 //! the realm, then retries. One flow, parameterised by the challenge — not one
 //! copy per registry.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Token lifetime when the realm response omits `expires_in`.
@@ -61,11 +62,22 @@ pub fn parse_www_authenticate(header: &str) -> Option<Challenge> {
     })
 }
 
-/// A bearer token with its computed expiry, cached per `(host, scope)`.
-#[derive(Debug, Clone)]
+/// A bearer token with its computed expiry, cached per `(host, scope)`. `Debug`
+/// redacts the token so it can never reach a log line, even if a `CachedToken`
+/// is ever traced.
+#[derive(Clone)]
 pub struct CachedToken {
     token: String,
     expires_at: Instant,
+}
+
+impl fmt::Debug for CachedToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CachedToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl CachedToken {
@@ -143,5 +155,14 @@ mod tests {
         let t = CachedToken::new("tok".into(), Some(0), now);
         // Floor keeps it briefly valid rather than underflowing.
         assert_eq!(t.valid_token(now), Some("tok"));
+    }
+
+    #[test]
+    fn cached_token_debug_redacts_the_token() {
+        let t = CachedToken::new("supersecret".into(), Some(60), Instant::now());
+        assert!(
+            !format!("{t:?}").contains("supersecret"),
+            "token leaked via CachedToken Debug"
+        );
     }
 }
