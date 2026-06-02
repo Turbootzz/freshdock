@@ -21,7 +21,17 @@ freshdock --no-color check  # ANSI-free output, suitable for log files
 RUST_LOG=info freshdock check  # see registry rate-limit info etc.
 ```
 
-Authenticated registries (GHCR, Quay, lscr.io, generic OCI bearer-token) are reported as "skipped: not yet supported (Phase 5)" and lift in Phase 5. The daemon entry (`freshdock run`) lands in Phase 4.
+The scheduler daemon `freshdock run` (Phase 4) polls opted-in containers on their per-mode cadence and applies updates with the same health-gated rollback as `freshdock recreate`:
+
+```bash
+freshdock run                  # poll live/watch every 5 min; cron modes on schedule
+freshdock run --interval 600   # poll live/watch every 10 min instead
+RUST_LOG=info freshdock run    # see per-container scheduler events
+```
+
+It runs in the foreground until SIGINT/SIGTERM, then finishes the in-flight container and exits. `watch` mode logs an `update_available` event but never pulls or recreates (notification backends land in Phase 6). See [Scheduling](#scheduling) for cron syntax.
+
+Authenticated registries (GHCR, Quay, lscr.io, generic OCI bearer-token) are reported as "skipped: not yet supported (Phase 5)" and lift in Phase 5. Digest-pinned containers (`image@sha256:…`) are shown as `pinned (no check)` — there is no moving tag to follow.
 
 ---
 
@@ -73,6 +83,29 @@ services:
       - "freshdock.mode=nightly"
       - "freshdock.notify=true"
 ```
+
+### Scheduling
+
+`live` and `watch` containers are polled on a fixed interval (`freshdock run --interval`, default 300 s). The calendar modes fire on a cron schedule:
+
+| Mode | Default schedule | When |
+|---|---|---|
+| `nightly` | `0 4 * * *` | 04:00 every day |
+| `weekly` | `0 4 * * 0` | 04:00 every Sunday |
+| `monthly` | `0 4 1 * *` | 04:00 on the 1st |
+
+Override any calendar mode's schedule with a `freshdock.schedule` label (ignored for `live`/`watch`/`off`):
+
+```yaml
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=weekly"
+      - "freshdock.schedule=0 2 * * 1"   # 02:00 every Monday
+```
+
+**Cron syntax.** Standard 5 fields: `minute hour day-of-month month day-of-week`. Each field accepts `*`, a value `N`, a range `A-B`, a step `*/n` or `A-B/n`, and comma-separated lists (e.g. `0,30`). Ranges: minute `0-59`, hour `0-23`, day-of-month `1-31`, month `1-12`, day-of-week `0-6` (**Sunday = 0**; names are not supported). When both day-of-month and day-of-week are restricted, a tick matches if **either** does (Vixie-cron behaviour).
+
+**Timezone.** Schedules are evaluated in the host's **system local time**. Across a DST spring-forward, a schedule that lands in the skipped hour (e.g. `30 2 * * *`) does not fire that day; behaviour inside a transition hour is timezone-dependent, so the 04:00 defaults steer clear of it. Schedule state is in memory only — a window missed while the daemon was down is **not** backfilled; it fires at the next occurrence.
 
 ### Notifications (v1 scope)
 

@@ -1,8 +1,11 @@
 pub mod commands;
+pub mod cron;
 pub mod docker;
 pub mod errors;
 pub mod health;
 pub mod labels;
+pub mod probe;
 pub mod registry;
 pub mod rollback;
+pub mod scheduler;
 pub mod updater;
