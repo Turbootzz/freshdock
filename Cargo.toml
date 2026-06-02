@@ -29,6 +29,15 @@ async-trait = "0.1"
 # scheduler loop are hand-rolled (PLAN §10 Q3: "hand-roll; less dependency
 # surface"); chrono owns only the calendar primitive. `clock` brings `Local`.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# SMTP notification backend (Phase 6). `default-features = false` drops lettre's
+# `native-tls`/OpenSSL default. The crypto provider must match reqwest's, which
+# uses `aws-lc-rs` (reqwest's `rustls` feature pulls `__rustls-aws-lc-rs`); the
+# convenience `tokio1-rustls-tls` feature would instead force `ring`, putting two
+# rustls providers in the tree and tripping `cargo deny`'s multiple-versions on
+# getrandom/windows-sys. So compose it by hand: rustls connector (`tokio1-rustls`)
+# + `aws-lc-rs` provider + `webpki-roots` (Mozilla CA bundle, no OS dep). `builder`
+# gives Message construction; `smtp-transport` gives STARTTLS + plain/login auth.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 
 [dev-dependencies]
 wiremock = "0.6"
