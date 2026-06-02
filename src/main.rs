@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -67,7 +66,8 @@ async fn main() -> Result<()> {
         .config
         .clone()
         .or_else(|| std::env::var_os("FRESHDOCK_CONFIG").map(PathBuf::from));
-    let credentials = Arc::new(Config::load(config_path.as_deref())?);
+    let config = Config::load(config_path.as_deref())?;
+    let credentials = config.credentials;
 
     match cli.cmd {
         Cmd::Check => commands::check::run(cli.no_color, credentials).await?,
@@ -76,7 +76,16 @@ async fn main() -> Result<()> {
             interval,
             tick,
             stop_timeout,
-        } => commands::run::run(interval, tick, stop_timeout, credentials).await?,
+        } => {
+            commands::run::run(
+                interval,
+                tick,
+                stop_timeout,
+                credentials,
+                config.notifications,
+            )
+            .await?
+        }
     }
     Ok(())
 }

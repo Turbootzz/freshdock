@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use tracing::warn;
@@ -53,12 +54,78 @@ pub struct RegistryCredentials {
     pub token: Secret,
 }
 
-/// The parsed `freshdock.toml`. Only the registry credential section exists in
-/// Phase 5; global defaults (poll intervals, notifications) land in later phases.
+/// The parsed `freshdock.toml`: registry credentials (Phase 5) and notification
+/// targets (Phase 6). Global poll-interval defaults land in a later phase.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub registry: HashMap<String, RegistryCredentials>,
+    #[serde(default)]
+    pub notifications: HashMap<String, NotificationTarget>,
+}
+
+/// One `[notifications.<name>]` table. The `type` field selects the backend; an
+/// unknown value is a clean parse error. `triggers` filters which lifecycle
+/// events reach this target — omitted means all of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum NotificationTarget {
+    Webhook {
+        // `Secret`: a webhook URL can embed a token (Discord's always does), and
+        // wrapping it keeps the derived `Debug` from ever leaking one.
+        url: Secret,
+        #[serde(default)]
+        triggers: Option<Vec<String>>,
+    },
+    Discord {
+        webhook_url: Secret,
+        #[serde(default)]
+        triggers: Option<Vec<String>>,
+    },
+    Telegram {
+        bot_token: Secret,
+        chat_id: String,
+        #[serde(default)]
+        triggers: Option<Vec<String>>,
+    },
+    Smtp {
+        host: String,
+        #[serde(default = "default_smtp_port")]
+        port: u16,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<Secret>,
+        from: String,
+        to: Vec<String>,
+        #[serde(default = "default_true")]
+        starttls: bool,
+        #[serde(default)]
+        triggers: Option<Vec<String>>,
+    },
+}
+
+/// SMTP submission port — STARTTLS on 587 is the modern default.
+fn default_smtp_port() -> u16 {
+    587
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Notification targets after the secret env-overlay, ready for the dispatcher.
+#[derive(Debug, Default)]
+pub struct NotificationConfig {
+    pub targets: HashMap<String, NotificationTarget>,
+}
+
+/// Everything loaded from `freshdock.toml` + environment, shared across the run.
+/// Credentials are `Arc` (shared with the registry and daemon pull); the
+/// notification config is consumed once when the daemon builds its dispatcher.
+pub struct LoadedConfig {
+    pub credentials: Arc<CredentialStore>,
+    pub notifications: NotificationConfig,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,18 +166,19 @@ impl Config {
         toml::from_str(input)
     }
 
-    /// Load credentials: read `path` (or the default `./freshdock.toml` when
-    /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` env vars on top.
+    /// Load the config: read `path` (or the default `./freshdock.toml` when
+    /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` /
+    /// `FRESHDOCK_NOTIFY_*` env vars on top.
     ///
     /// An *explicit* path that doesn't exist is an error; a missing *default*
-    /// file is not (it just yields env-only / empty credentials).
-    pub fn load(path: Option<&Path>) -> Result<CredentialStore, ConfigError> {
-        let config = match path {
+    /// file is not (it just yields env-only / empty config).
+    pub fn load(path: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+        let mut config = match path {
             Some(p) => Self::read_file(p)?,
             None => {
                 let default = Path::new(DEFAULT_CONFIG_FILE);
                 // `try_exists` surfaces a permission/IO error instead of
-                // silently treating it as "absent" and yielding empty creds.
+                // silently treating it as "absent" and yielding empty config.
                 match default.try_exists() {
                     Ok(true) => Self::read_file(default)?,
                     Ok(false) => Self::default(),
@@ -123,7 +191,15 @@ impl Config {
                 }
             }
         };
-        Ok(build_store(config, std::env::vars()))
+        // Take notifications out before `build_store` consumes the rest; both
+        // overlay the same process env (read twice — `vars()` is cheap).
+        let notifications =
+            build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
+        let credentials = Arc::new(build_store(config, std::env::vars()));
+        Ok(LoadedConfig {
+            credentials,
+            notifications,
+        })
     }
 
     fn read_file(path: &Path) -> Result<Self, ConfigError> {
@@ -145,7 +221,10 @@ pub const DEFAULT_CONFIG_FILE: &str = "freshdock.toml";
 pub const ENV_VAR_HELP: &str = "Registry credentials may also be supplied via environment, which \
 overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOCK_REGISTRY_GHCR_USERNAME\n  \
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
-lscr, or a registry host. FRESHDOCK_CONFIG sets the config file path.";
+lscr, or a registry host.\nNotification secrets may be overridden the same way (<NAME> is the \
+[notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
+FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names so two can't map to the \
+same variable (e.g. `ops-mail` and `ops_mail` collide).\nFRESHDOCK_CONFIG sets the config file path.";
 
 /// Fold a config key / image host onto its canonical registry host so a
 /// `[registry.dockerhub]` table, a `FRESHDOCK_REGISTRY_DOCKERHUB_TOKEN`, and an
@@ -218,6 +297,59 @@ where
     }
 
     CredentialStore { by_host }
+}
+
+/// Normalize a target name to its env-var form (upper-case, `-` → `_`), so
+/// `[notifications.ops-mail]` is overridden by `FRESHDOCK_NOTIFY_OPS_MAIL_*`.
+fn notify_env_name(key: &str) -> String {
+    key.to_ascii_uppercase().replace('-', "_")
+}
+
+/// Overlay `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` / `_PASSWORD` env vars onto the
+/// declared targets, so a Telegram token or SMTP password can stay out of the
+/// file. Env only *overrides a secret on an already-declared target* — it never
+/// creates a target (KISS). Injecting `env_vars` keeps this pure and testable.
+pub fn build_notifications<I>(
+    mut targets: HashMap<String, NotificationTarget>,
+    env_vars: I,
+) -> NotificationConfig
+where
+    I: Iterator<Item = (String, String)>,
+{
+    // Map each target's env-name back to its real key for O(1) lookup.
+    let index: HashMap<String, String> = targets
+        .keys()
+        .map(|k| (notify_env_name(k), k.clone()))
+        .collect();
+
+    for (key, value) in env_vars {
+        let Some(rest) = key.strip_prefix("FRESHDOCK_NOTIFY_") else {
+            continue;
+        };
+        if let Some(name) = rest.strip_suffix("_BOT_TOKEN") {
+            match index.get(name).and_then(|k| targets.get_mut(k)) {
+                Some(NotificationTarget::Telegram { bot_token, .. }) => {
+                    *bot_token = Secret::new(value);
+                }
+                _ => warn!(
+                    target = %name,
+                    "ignoring FRESHDOCK_NOTIFY_*_BOT_TOKEN: no matching telegram target"
+                ),
+            }
+        } else if let Some(name) = rest.strip_suffix("_PASSWORD") {
+            match index.get(name).and_then(|k| targets.get_mut(k)) {
+                Some(NotificationTarget::Smtp { password, .. }) => {
+                    *password = Some(Secret::new(value));
+                }
+                _ => warn!(
+                    target = %name,
+                    "ignoring FRESHDOCK_NOTIFY_*_PASSWORD: no matching smtp target"
+                ),
+            }
+        }
+    }
+
+    NotificationConfig { targets }
 }
 
 #[cfg(test)]
@@ -383,5 +515,144 @@ mod tests {
             out.contains("[REDACTED]"),
             "expected redaction marker: {out}"
         );
+    }
+
+    // --- notification config ---
+
+    fn notifications(toml: &str) -> HashMap<String, NotificationTarget> {
+        Config::from_toml(toml).unwrap().notifications
+    }
+
+    #[test]
+    fn parses_each_backend_type() {
+        let t = notifications(
+            r#"
+            [notifications.hook]
+            type = "webhook"
+            url = "https://example.com/h"
+
+            [notifications.chat]
+            type = "discord"
+            webhook_url = "https://discord.com/api/webhooks/1/a"
+
+            [notifications.tg]
+            type = "telegram"
+            bot_token = "123:abc"
+            chat_id = "42"
+
+            [notifications.mail]
+            type = "smtp"
+            host = "smtp.example.com"
+            from = "a@example.com"
+            to = ["b@example.com"]
+            "#,
+        );
+        assert!(matches!(t["hook"], NotificationTarget::Webhook { .. }));
+        assert!(matches!(t["chat"], NotificationTarget::Discord { .. }));
+        assert!(matches!(t["tg"], NotificationTarget::Telegram { .. }));
+        assert!(matches!(t["mail"], NotificationTarget::Smtp { .. }));
+    }
+
+    #[test]
+    fn unknown_backend_type_is_a_parse_error() {
+        let err = Config::from_toml(
+            "[notifications.x]\ntype = \"carrier-pigeon\"\nurl = \"https://e.com\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("carrier-pigeon") || err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn omitted_triggers_parse_to_none_and_smtp_defaults_apply() {
+        let t = notifications(
+            "[notifications.mail]\ntype = \"smtp\"\nhost = \"h\"\nfrom = \"a@e.com\"\nto = [\"b@e.com\"]\n",
+        );
+        match &t["mail"] {
+            NotificationTarget::Smtp {
+                port,
+                starttls,
+                triggers,
+                ..
+            } => {
+                assert_eq!(*port, 587, "default submission port");
+                assert!(*starttls, "starttls defaults on");
+                assert!(
+                    triggers.is_none(),
+                    "omitted triggers → None (subscribe all)"
+                );
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_overlays_telegram_token_and_smtp_password_onto_declared_targets() {
+        let targets = notifications(
+            r#"
+            [notifications.tg]
+            type = "telegram"
+            bot_token = "file-token"
+            chat_id = "42"
+
+            [notifications.mail]
+            type = "smtp"
+            host = "h"
+            from = "a@e.com"
+            to = ["b@e.com"]
+            "#,
+        );
+        let cfg = build_notifications(
+            targets,
+            env(&[
+                ("FRESHDOCK_NOTIFY_TG_BOT_TOKEN", "env-token"),
+                ("FRESHDOCK_NOTIFY_MAIL_PASSWORD", "env-pass"),
+            ]),
+        );
+        match &cfg.targets["tg"] {
+            NotificationTarget::Telegram { bot_token, .. } => {
+                assert_eq!(bot_token.expose(), "env-token", "env wins over file token");
+            }
+            _ => unreachable!(),
+        }
+        match &cfg.targets["mail"] {
+            NotificationTarget::Smtp { password, .. } => {
+                assert_eq!(password.as_ref().unwrap().expose(), "env-pass");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn env_overlay_ignores_a_type_mismatch() {
+        // A webhook target named like a telegram override must not be mutated.
+        let targets =
+            notifications("[notifications.tg]\ntype = \"webhook\"\nurl = \"https://e.com\"\n");
+        let cfg = build_notifications(
+            targets,
+            env(&[("FRESHDOCK_NOTIFY_TG_BOT_TOKEN", "env-token")]),
+        );
+        assert!(matches!(
+            cfg.targets["tg"],
+            NotificationTarget::Webhook { .. }
+        ));
+    }
+
+    #[test]
+    fn env_overlay_matches_a_hyphenated_target_name() {
+        // `[notifications.ops-mail]` must be overridden by
+        // FRESHDOCK_NOTIFY_OPS_MAIL_PASSWORD (`-` normalised to `_`).
+        let targets = notifications(
+            "[notifications.ops-mail]\ntype = \"smtp\"\nhost = \"h\"\nfrom = \"a@e.com\"\nto = [\"b@e.com\"]\n",
+        );
+        let cfg = build_notifications(
+            targets,
+            env(&[("FRESHDOCK_NOTIFY_OPS_MAIL_PASSWORD", "env-pass")]),
+        );
+        match &cfg.targets["ops-mail"] {
+            NotificationTarget::Smtp { password, .. } => {
+                assert_eq!(password.as_ref().unwrap().expose(), "env-pass");
+            }
+            _ => unreachable!(),
+        }
     }
 }

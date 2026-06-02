@@ -11,6 +11,9 @@ allow = [
     "Unicode-3.0",
     "ISC",
     "CDLA-Permissive-2.0",
+    # BSD Zero Clause (public-domain-equivalent, OSI-approved). Pulled in by
+    # `quoted_printable`, a transitive dep of lettre's `builder` feature.
+    "0BSD",
 ]
 exceptions = []
 

@@ -1,0 +1,16 @@
+# Minimal watch-only stack. freshdock notices when a newer `nginx` image is
+# published but never pulls or restarts it — `watch` is the default mode for an
+# enabled container. Validate: docker compose -f minimal-watch.yml config
+services:
+  web:
+    image: nginx:1.27
+    labels:
+      - "freshdock.enable=true" # opt in; mode defaults to watch
+
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    volumes:
+      # Read-only socket is enough for watch mode (it never recreates).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped

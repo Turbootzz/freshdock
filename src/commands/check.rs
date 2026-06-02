@@ -9,6 +9,7 @@ use crate::config::CredentialStore;
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
+use crate::format::short_digest;
 use crate::labels::{self, Mode};
 use crate::probe::{self, ProbeOutcome, pinned_digest};
 use crate::registry::Registry;
@@ -149,16 +150,6 @@ struct RowPrep {
     mode: Mode,
 }
 
-fn short_digest(d: &str) -> String {
-    if let Some(hex) = d.strip_prefix("sha256:") {
-        format!("sha256:{}…", &hex[..hex.len().min(12)])
-    } else if d.len() > 19 {
-        format!("{}…", &d[..19])
-    } else {
-        d.to_string()
-    }
-}
-
 fn build_table(no_color: bool) -> Table {
     let mut t = Table::new();
     t.load_preset(if no_color { NOTHING } else { UTF8_FULL });
@@ -176,17 +167,6 @@ fn build_table(no_color: bool) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn short_digest_truncates_sha256() {
-        let d = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        assert_eq!(short_digest(d), "sha256:abcdef012345…");
-    }
-
-    #[test]
-    fn short_digest_passes_through_non_sha() {
-        assert_eq!(short_digest("alpine:latest"), "alpine:latest");
-    }
 
     fn row(image: &str) -> RowPrep {
         RowPrep {

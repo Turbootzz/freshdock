@@ -174,9 +174,17 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
             tick: Duration::from_secs(1),
             health: HealthConfig::default(),
         };
-        scheduler::run_with(&fd, &registry, &cfg, &TokioClock, Local::now, rx)
-            .await
-            .expect("scheduler run");
+        scheduler::run_with(
+            &fd,
+            &registry,
+            &cfg,
+            &TokioClock,
+            Local::now,
+            rx,
+            &freshdock::notify::Dispatcher::noop(),
+        )
+        .await
+        .expect("scheduler run");
     });
 
     // Give the first tick time to list, probe Docker Hub, and decide.

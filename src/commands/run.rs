@@ -11,10 +11,11 @@ use chrono::Local;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::CredentialStore;
+use crate::config::{CredentialStore, NotificationConfig};
 use crate::docker::Docker;
 use crate::errors::AppError;
 use crate::health::{HealthConfig, TokioClock};
+use crate::notify::Dispatcher;
 use crate::registry::digest::OciRegistry;
 use crate::scheduler::{self, SchedulerConfig};
 
@@ -23,9 +24,14 @@ pub async fn run(
     tick: u64,
     stop_timeout: u64,
     credentials: Arc<CredentialStore>,
+    notifications: NotificationConfig,
 ) -> Result<(), AppError> {
     let docker = Docker::connect(credentials.clone())?;
     let registry = OciRegistry::new(credentials);
+    // Build the dispatcher once from config, sharing one HTTP client with the
+    // backends. A misconfigured target is skipped with a WARN (resilient): a
+    // notification typo must never stop the daemon from updating containers.
+    let dispatcher = Dispatcher::from_config(notifications, crate::http::client());
 
     // `tokio::time::interval` panics on a zero period, and a poll interval below
     // the tick can never be honoured (due is evaluated once per tick), so clamp:
@@ -50,7 +56,7 @@ pub async fn run(
     // drain so a hung recreate can't block shutdown indefinitely.
     let stop_timeout = Duration::from_secs(stop_timeout);
     tokio::select! {
-        res = scheduler::run_with(&docker, &registry, &cfg, &TokioClock, Local::now, rx) => res,
+        res = scheduler::run_with(&docker, &registry, &cfg, &TokioClock, Local::now, rx, &dispatcher) => res,
         _ = async {
             let _ = deadline_rx.wait_for(|v| *v).await;
             tokio::time::sleep(stop_timeout).await;

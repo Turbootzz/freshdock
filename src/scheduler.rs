@@ -29,6 +29,7 @@ use crate::docker::recreate::{DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe};
 use crate::labels::{self, Mode, Policy};
+use crate::notify::{Dispatcher, NotifyEvent};
 use crate::probe::{self, ProbeOutcome};
 use crate::registry::Registry;
 use crate::updater::RecreateOutcome;
@@ -68,6 +69,10 @@ struct ContainerState {
     next_fire: Option<DateTime<Local>>,
     /// Parsed effective cron, cached so it's parsed once.
     cron: Option<CronExpr>,
+    /// Upstream digest of the last `watch`-mode "update available" notification,
+    /// so the same available update isn't re-announced every poll (it would
+    /// otherwise notify every `poll_interval` until the user acts).
+    last_notified_digest: Option<String>,
 }
 
 /// Resolve the effective cron for a policy: explicit `freshdock.schedule`
@@ -99,6 +104,7 @@ fn seed_state(policy: &Policy, name: &str, now: DateTime<Local>) -> ContainerSta
         last_checked: None,
         next_fire,
         cron,
+        last_notified_digest: None,
     }
 }
 
@@ -153,6 +159,7 @@ pub async fn run_with<D, R>(
     clock: &impl Clock,
     now_provider: impl Fn() -> DateTime<Local>,
     mut shutdown: watch::Receiver<bool>,
+    dispatcher: &Dispatcher,
 ) -> Result<(), AppError>
 where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
@@ -175,7 +182,7 @@ where
                 if *tick_shutdown.borrow() {
                     break;
                 }
-                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &tick_shutdown).await;
+                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &tick_shutdown, dispatcher).await;
             }
             res = shutdown.changed() => {
                 if res.is_err() || *shutdown.borrow() {
@@ -200,6 +207,7 @@ async fn run_tick<D, R>(
     now_provider: &impl Fn() -> DateTime<Local>,
     states: &mut HashMap<String, ContainerState>,
     shutdown: &watch::Receiver<bool>,
+    dispatcher: &Dispatcher,
 ) where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
@@ -259,7 +267,19 @@ async fn run_tick<D, R>(
         }
 
         let image = c.image.as_deref().unwrap_or_default();
-        process_container(docker, registry, cfg, clock, now, &name, &policy, image).await;
+        process_container(
+            docker,
+            registry,
+            cfg,
+            clock,
+            now,
+            &name,
+            &policy,
+            image,
+            dispatcher,
+            &mut state.last_notified_digest,
+        )
+        .await;
     }
 
     states.retain(|k, _| live.contains(k));
@@ -277,6 +297,8 @@ async fn process_container<D, R>(
     name: &str,
     policy: &Policy,
     image: &str,
+    dispatcher: &Dispatcher,
+    last_notified: &mut Option<String>,
 ) where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
@@ -294,9 +316,21 @@ async fn process_container<D, R>(
             match policy.mode {
                 Mode::Watch => {
                     info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
+                    // Only notify once per distinct upstream digest, or a watched
+                    // update would re-alert every poll until the user acts.
+                    if policy.notify && last_notified.as_deref() != Some(latest.as_str()) {
+                        dispatcher
+                            .dispatch(&NotifyEvent::UpdateAvailable {
+                                container: name.to_string(),
+                                image: image.to_string(),
+                                latest_digest: latest.clone(),
+                            })
+                            .await;
+                        *last_notified = Some(latest.clone());
+                    }
                 }
                 Mode::Live | Mode::Nightly | Mode::Weekly | Mode::Monthly => {
-                    apply_update(docker, cfg, clock, now, name).await;
+                    apply_update(docker, cfg, clock, now, name, policy, image, dispatcher).await;
                 }
                 Mode::Off => {}
             }
@@ -316,13 +350,18 @@ async fn process_container<D, R>(
     }
 }
 
-/// Run the health-gated recreate and log its outcome.
+/// Run the health-gated recreate, log its outcome, and (when the container opts
+/// in via `policy.notify`) dispatch the matching notification.
+#[allow(clippy::too_many_arguments)]
 async fn apply_update<D>(
     docker: &D,
     cfg: &SchedulerConfig,
     clock: &impl Clock,
     now: DateTime<Local>,
     name: &str,
+    policy: &Policy,
+    image: &str,
+    dispatcher: &Dispatcher,
 ) where
     D: DockerOps + HealthProbe + Sync,
 {
@@ -330,9 +369,29 @@ async fn apply_update<D>(
     match recreate_with_health(docker, name, &cfg.health, clock, || ts).await {
         Ok(RecreateOutcome::Recreated { old_name, new_id }) => {
             info!(container = %name, archived = %old_name, %new_id, "scheduler: recreated");
+            if policy.notify {
+                dispatcher
+                    .dispatch(&NotifyEvent::UpdateSucceeded {
+                        container: name.to_string(),
+                        image: image.to_string(),
+                        new_id,
+                    })
+                    .await;
+            }
         }
         Ok(RecreateOutcome::RolledBack(ev)) => {
             warn!(container = %name, reason = ?ev.reason, "scheduler: update unhealthy, rolled back");
+            if policy.notify {
+                dispatcher
+                    .dispatch(&NotifyEvent::UpdateFailed {
+                        container: ev.container,
+                        reason: ev.reason,
+                        old_image_ref: ev.old_image_ref,
+                        new_image_ref: ev.new_image_ref,
+                        restored_from: ev.restored_from,
+                    })
+                    .await;
+            }
         }
         Err(e) => {
             warn!(container = %name, error = %e, "scheduler: recreate failed; daemon continues");
@@ -483,6 +542,9 @@ mod tests {
         local_digest: String,
         list_fails: bool,
         creates: AtomicUsize,
+        /// State the (recreated) container reports to the health gate. Default
+        /// healthy; `unhealthy()` makes it crash so the gate rolls back.
+        health_state: ContainerRuntimeState,
     }
 
     impl FakeNode {
@@ -492,6 +554,7 @@ mod tests {
                 local_digest: local_digest.to_owned(),
                 list_fails: false,
                 creates: AtomicUsize::new(0),
+                health_state: ContainerRuntimeState::HealthHealthy,
             }
         }
         fn failing() -> Self {
@@ -500,7 +563,13 @@ mod tests {
                 local_digest: DIG_A.to_owned(),
                 list_fails: true,
                 creates: AtomicUsize::new(0),
+                health_state: ContainerRuntimeState::HealthHealthy,
             }
+        }
+        /// Make the recreated container crash so the health gate rolls back.
+        fn unhealthy(mut self) -> Self {
+            self.health_state = ContainerRuntimeState::Exited { exit_code: 1 };
+            self
         }
         fn creates(&self) -> usize {
             self.creates.load(Ordering::SeqCst)
@@ -579,7 +648,7 @@ mod tests {
     #[async_trait]
     impl HealthProbe for FakeNode {
         async fn probe_state(&self, _id: &str) -> Result<ContainerRuntimeState, DockerError> {
-            Ok(ContainerRuntimeState::HealthHealthy)
+            Ok(self.health_state)
         }
     }
 
@@ -635,8 +704,36 @@ mod tests {
     async fn one_tick(node: &FakeNode, reg: &FakeRegistry) -> HashMap<String, ContainerState> {
         let (_tx, rx) = watch::channel(false);
         let mut states = HashMap::new();
-        run_tick(node, reg, &cfg(), &TokioClock, &now, &mut states, &rx).await;
+        run_tick(
+            node,
+            reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         states
+    }
+
+    /// Like [`one_tick`] but with a caller-supplied dispatcher, for asserting
+    /// which notifications a tick produces.
+    async fn one_tick_with(node: &FakeNode, reg: &FakeRegistry, dispatcher: &Dispatcher) {
+        let (_tx, rx) = watch::channel(false);
+        let mut states = HashMap::new();
+        run_tick(
+            node,
+            reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            dispatcher,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -805,12 +902,32 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let mut states = HashMap::new();
 
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert!(states.contains_key("web"));
 
         // Container disappears; next tick prunes it.
         node.containers.lock().unwrap().clear();
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert!(
             states.is_empty(),
             "pruned after vanishing from list_running"
@@ -830,7 +947,17 @@ mod tests {
         let reg = FakeRegistry::new(DIG_B);
         let (_tx, rx) = watch::channel(true); // already shutting down
         let mut states = HashMap::new();
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(
             node.creates(),
             0,
@@ -850,9 +977,17 @@ mod tests {
         );
         let reg = FakeRegistry::new(DIG_B);
         let (_tx, rx) = watch::channel(true);
-        run_with(&node, &reg, &cfg(), &TokioClock, now, rx)
-            .await
-            .unwrap();
+        run_with(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            now,
+            rx,
+            &Dispatcher::noop(),
+        )
+        .await
+        .unwrap();
         assert_eq!(node.creates(), 0, "a pre-set shutdown processes nothing");
     }
 
@@ -875,17 +1010,47 @@ mod tests {
         let now_fn = || clock.get();
 
         // 03:59 seeds the container (default `0 4 * * *`) → not yet due.
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 0, "not due before the window");
 
         // 04:00 → due → recreate, and next_fire advances to tomorrow.
         clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 0, 0).unwrap());
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 1, "fires at the window");
 
         // 04:01 → next_fire is tomorrow now, so it must not re-fire.
         clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 1, 0).unwrap());
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 1, "does not re-fire after firing");
     }
 
@@ -902,10 +1067,18 @@ mod tests {
             health: HealthConfig::default(),
         };
 
-        let handle =
-            tokio::spawn(
-                async move { run_with(&node, &reg, &big_cfg, &TokioClock, now, rx).await },
-            );
+        let handle = tokio::spawn(async move {
+            run_with(
+                &node,
+                &reg,
+                &big_cfg,
+                &TokioClock,
+                now,
+                rx,
+                &Dispatcher::noop(),
+            )
+            .await
+        });
 
         // Let the first immediate tick run and the loop park on `select!`.
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -917,5 +1090,176 @@ mod tests {
             .expect("run_with returns promptly after the signal")
             .expect("scheduler task joins")
             .expect("run_with ok");
+    }
+
+    // --- end-to-end: scheduler outcome → real dispatcher → mock HTTP target ---
+    //
+    // These drive the real `run_tick` → updater → health gate → rollback path
+    // with a real `Dispatcher` (one webhook target) pointed at a wiremock
+    // server, so the notification a given outcome produces is asserted on the
+    // wire. The only fake is the Docker trait surface (`FakeNode`).
+
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method as wm_method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A dispatcher with one webhook target (subscribed to all triggers) aimed
+    /// at `uri`.
+    fn webhook_dispatcher(uri: String) -> Dispatcher {
+        use crate::config::{NotificationConfig, NotificationTarget, Secret};
+        let mut targets = std::collections::HashMap::new();
+        targets.insert(
+            "hook".to_string(),
+            NotificationTarget::Webhook {
+                url: Secret::new(uri),
+                triggers: None,
+            },
+        );
+        Dispatcher::from_config(NotificationConfig { targets }, crate::http::client())
+    }
+
+    fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerSummary> {
+        vec![summary(
+            "web",
+            "alpine:3.19",
+            &[
+                ("freshdock.enable", "true"),
+                ("freshdock.mode", mode),
+                ("freshdock.notify", if notify { "true" } else { "false" }),
+            ],
+        )]
+    }
+
+    #[tokio::test]
+    async fn watch_update_available_notifies_when_opted_in() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "available", "container": "web"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", true), DIG_A);
+        let reg = FakeRegistry::new(DIG_B); // upstream differs → update available
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+        assert_eq!(node.creates(), 0, "watch never recreates");
+        // .expect(1) verified on server drop.
+    }
+
+    #[tokio::test]
+    async fn watch_up_to_date_sends_no_available_notification() {
+        // notify=true but the upstream digest matches local → no update → the
+        // "available" notification must NOT fire (guards against alert spam).
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", true), DIG_A);
+        let reg = FakeRegistry::new(DIG_A); // same digest → up to date
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[tokio::test]
+    async fn watch_available_notifies_once_until_the_digest_changes() {
+        // Two polls of the same available update must produce only one
+        // notification (no re-alert every poll_interval).
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", true), DIG_A);
+        let reg = FakeRegistry::new(DIG_B); // update available, unchanged across polls
+        let dispatcher = webhook_dispatcher(server.uri());
+        let (_tx, rx) = watch::channel(false);
+        let mut states = HashMap::new();
+
+        let clock = std::cell::Cell::new(Local.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap());
+        let now_fn = || clock.get();
+
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &dispatcher,
+        )
+        .await;
+        // 10 min later → past the 5 min poll interval, so watch is due again;
+        // same digest → must NOT re-notify.
+        clock.set(Local.with_ymd_and_hms(2026, 6, 2, 12, 10, 0).unwrap());
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &dispatcher,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn no_notification_when_notify_is_false() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0) // notify=false must suppress the dispatch entirely
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", false), DIG_A);
+        let reg = FakeRegistry::new(DIG_B);
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[tokio::test]
+    async fn live_success_notifies_updated() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "succeeded", "container": "web"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("live", true), DIG_A); // healthy by default
+        let reg = FakeRegistry::new(DIG_B);
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+        assert_eq!(node.creates(), 1, "live recreates on a changed digest");
+    }
+
+    #[tokio::test]
+    async fn live_rollback_notifies_failed() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "failed", "container": "web"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The recreated container crashes → real health gate rolls back → the
+        // real RollbackEvent flows into an UpdateFailed notification.
+        let node = FakeNode::new(notifying_container("live", true), DIG_A).unhealthy();
+        let reg = FakeRegistry::new(DIG_B);
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
     }
 }
