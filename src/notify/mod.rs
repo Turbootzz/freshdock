@@ -10,9 +10,15 @@
 //! only adapts the [`RenderedMessage`] to its wire format, so the three HTTP
 //! payloads and the email body can never drift apart (DRY).
 
+pub mod discord;
+pub mod smtp;
+pub mod telegram;
+pub mod webhook;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use serde::Serialize;
 use tracing::warn;
 
 use crate::format::short_digest;
@@ -181,6 +187,30 @@ pub enum NotifyError {
     Smtp(String),
     #[error("invalid notification config for `{name}`: {reason}")]
     Config { name: String, reason: String },
+}
+
+/// Shared POST-JSON path for the three HTTP backends (DRY). Strips the URL from
+/// any transport error via [`reqwest::Error::without_url`] so a webhook/Discord
+/// secret or a Telegram bot token embedded in the URL can never reach a log line
+/// (the [`crate::config::Secret`] invariant). A non-2xx becomes a typed
+/// [`NotifyError::Status`]; the dispatcher already logs which target failed.
+async fn post_json<B: Serialize + ?Sized>(
+    client: &reqwest::Client,
+    url: &str,
+    body: &B,
+) -> Result<(), NotifyError> {
+    let resp = client
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(NotifyError::Status(status))
+    }
 }
 
 /// One notification backend. `send` takes the already-rendered message so all
