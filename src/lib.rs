@@ -7,6 +7,7 @@ pub mod format;
 pub mod health;
 pub mod http;
 pub mod labels;
+pub mod notify;
 pub mod probe;
 pub mod registry;
 pub mod rollback;

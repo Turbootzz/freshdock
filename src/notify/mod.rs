@@ -1,0 +1,409 @@
+//! Notifications (Phase 6, PLAN §5.4).
+//!
+//! One [`Notifier`] trait, four backends (webhook / Discord / Telegram / SMTP),
+//! and a [`Dispatcher`] that renders each lifecycle event **once** and fans it
+//! out to every target subscribed to that event's [`Trigger`]. A send failure
+//! is logged and swallowed — notifications must never abort an update (the
+//! scheduler's "a tick never propagates an error" contract).
+//!
+//! Wording lives in exactly one place ([`NotifyEvent::render`]); each backend
+//! only adapts the [`RenderedMessage`] to its wire format, so the three HTTP
+//! payloads and the email body can never drift apart (DRY).
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use tracing::warn;
+
+use crate::format::short_digest;
+use crate::rollback::RollbackReason;
+
+/// Which lifecycle event fired. The config `triggers = [...]` list and the
+/// PLAN §5.4 matrix (update available / succeeded / failed) map onto these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Trigger {
+    /// A newer image exists but was not applied (watch mode).
+    Available,
+    /// A health-gated recreate succeeded.
+    Succeeded,
+    /// A recreate failed its health gate and was rolled back.
+    Failed,
+}
+
+impl Trigger {
+    /// Canonical lowercase token used in config and the generic webhook payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trigger::Available => "available",
+            Trigger::Succeeded => "succeeded",
+            Trigger::Failed => "failed",
+        }
+    }
+
+    /// Parse a config token. The error carries the bad token so the caller can
+    /// name the offending `[notifications.<name>]` table.
+    pub fn parse(token: &str) -> Result<Self, String> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "available" => Ok(Trigger::Available),
+            "succeeded" => Ok(Trigger::Succeeded),
+            "failed" => Ok(Trigger::Failed),
+            other => Err(other.to_string()),
+        }
+    }
+
+    /// Every trigger — the default subscription when a target omits `triggers`.
+    pub fn all() -> HashSet<Trigger> {
+        [Trigger::Available, Trigger::Succeeded, Trigger::Failed]
+            .into_iter()
+            .collect()
+    }
+}
+
+/// A notifiable lifecycle event with everything needed to render every backend.
+/// Built at the scheduler's existing log points; `UpdateFailed` mirrors
+/// [`crate::rollback::RollbackEvent`] so the rollback detail flows through.
+#[derive(Debug, Clone)]
+pub enum NotifyEvent {
+    UpdateAvailable {
+        container: String,
+        image: String,
+        latest_digest: String,
+    },
+    UpdateSucceeded {
+        container: String,
+        image: String,
+        new_id: String,
+    },
+    UpdateFailed {
+        container: String,
+        reason: RollbackReason,
+        old_image_ref: String,
+        new_image_ref: String,
+        restored_from: String,
+    },
+}
+
+impl NotifyEvent {
+    pub fn trigger(&self) -> Trigger {
+        match self {
+            NotifyEvent::UpdateAvailable { .. } => Trigger::Available,
+            NotifyEvent::UpdateSucceeded { .. } => Trigger::Succeeded,
+            NotifyEvent::UpdateFailed { .. } => Trigger::Failed,
+        }
+    }
+
+    pub fn container(&self) -> &str {
+        match self {
+            NotifyEvent::UpdateAvailable { container, .. }
+            | NotifyEvent::UpdateSucceeded { container, .. }
+            | NotifyEvent::UpdateFailed { container, .. } => container,
+        }
+    }
+
+    /// The single source of human-readable wording. Backends format the result;
+    /// none re-derives the text.
+    pub fn render(&self) -> RenderedMessage {
+        let (title, body) = match self {
+            NotifyEvent::UpdateAvailable {
+                container,
+                image,
+                latest_digest,
+            } => (
+                format!("Update available: {container}"),
+                format!(
+                    "A newer image is available for {image} ({}). \
+                     Not applied — this container is in watch mode.",
+                    short_digest(latest_digest)
+                ),
+            ),
+            NotifyEvent::UpdateSucceeded {
+                container,
+                image,
+                new_id,
+            } => (
+                format!("Updated: {container}"),
+                format!(
+                    "{container} was updated to {image} and passed its health check \
+                     (new container {}).",
+                    short_digest(new_id)
+                ),
+            ),
+            NotifyEvent::UpdateFailed {
+                container,
+                reason,
+                old_image_ref,
+                new_image_ref,
+                restored_from,
+            } => (
+                format!("Update failed: {container}"),
+                format!(
+                    "Updating {container} from {old_image_ref} to {new_image_ref} failed \
+                     the health gate ({}); rolled back to the previous container ({restored_from}).",
+                    reason_text(*reason)
+                ),
+            ),
+        };
+        RenderedMessage {
+            title,
+            body,
+            trigger: self.trigger(),
+            container: self.container().to_string(),
+        }
+    }
+}
+
+/// Human phrasing for a rollback reason. Kept here (presentation) rather than on
+/// the pure-data [`RollbackReason`].
+fn reason_text(reason: RollbackReason) -> &'static str {
+    match reason {
+        RollbackReason::HealthTimeout => "health check timed out",
+        RollbackReason::Crashed => "the new container crashed",
+    }
+}
+
+/// The one rendered form every backend consumes. `trigger` and `container` are
+/// carried as machine-readable fields for the generic webhook payload.
+#[derive(Debug, Clone)]
+pub struct RenderedMessage {
+    pub title: String,
+    pub body: String,
+    pub trigger: Trigger,
+    pub container: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NotifyError {
+    #[error("notification request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("notification target returned HTTP {0}")]
+    Status(reqwest::StatusCode),
+    #[error("smtp send failed: {0}")]
+    Smtp(String),
+    #[error("invalid notification config for `{name}`: {reason}")]
+    Config { name: String, reason: String },
+}
+
+/// One notification backend. `send` takes the already-rendered message so all
+/// wording stays centralized in [`NotifyEvent::render`].
+#[async_trait::async_trait]
+pub trait Notifier: Send + Sync {
+    /// The target's config name (`[notifications.<name>]`), used only in logs.
+    fn name(&self) -> &str;
+    async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError>;
+}
+
+/// A configured target: a backend plus the triggers it subscribes to.
+struct Target {
+    triggers: HashSet<Trigger>,
+    notifier: Box<dyn Notifier>,
+}
+
+/// Holds every configured target. Cheap to clone (shared `Arc`) so it can be
+/// passed by value into the scheduler. An empty dispatcher is a no-op.
+#[derive(Clone)]
+pub struct Dispatcher {
+    targets: Arc<Vec<Target>>,
+}
+
+impl Dispatcher {
+    /// A dispatcher with no targets — used when notifications are unconfigured
+    /// and in tests that don't care about sends.
+    pub fn noop() -> Self {
+        Self {
+            targets: Arc::new(Vec::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_targets(targets: Vec<Target>) -> Self {
+        Self {
+            targets: Arc::new(targets),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// Render the event once, then send to every subscribed target. Never fails:
+    /// a per-target error is logged at WARN and the next target still runs, so a
+    /// flaky notifier can neither block another target nor abort the caller.
+    pub async fn dispatch(&self, event: &NotifyEvent) {
+        if self.targets.is_empty() {
+            return;
+        }
+        let trigger = event.trigger();
+        let msg = event.render();
+        for target in self.targets.iter() {
+            if !target.triggers.contains(&trigger) {
+                continue;
+            }
+            if let Err(e) = target.notifier.send(&msg).await {
+                warn!(target = %target.notifier.name(), error = %e, "notification failed; continuing");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const DIG: &str = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    fn available() -> NotifyEvent {
+        NotifyEvent::UpdateAvailable {
+            container: "web".into(),
+            image: "nginx:latest".into(),
+            latest_digest: DIG.into(),
+        }
+    }
+    fn succeeded() -> NotifyEvent {
+        NotifyEvent::UpdateSucceeded {
+            container: "web".into(),
+            image: "nginx:latest".into(),
+            new_id: DIG.into(),
+        }
+    }
+    fn failed() -> NotifyEvent {
+        NotifyEvent::UpdateFailed {
+            container: "web".into(),
+            reason: RollbackReason::HealthTimeout,
+            old_image_ref: "nginx:1.0".into(),
+            new_image_ref: "nginx:1.1".into(),
+            restored_from: "web-old-1700000000".into(),
+        }
+    }
+
+    /// Records every message it's handed; can be told to fail.
+    struct RecordingNotifier {
+        name: String,
+        fail: bool,
+        seen: Arc<Mutex<Vec<RenderedMessage>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordingNotifier {
+        fn new(name: &str) -> (Self, Arc<Mutex<Vec<RenderedMessage>>>, Arc<AtomicUsize>) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name: name.into(),
+                    fail: false,
+                    seen: seen.clone(),
+                    calls: calls.clone(),
+                },
+                seen,
+                calls,
+            )
+        }
+        fn failing(name: &str) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name: name.into(),
+                    fail: true,
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Notifier for RecordingNotifier {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(NotifyError::Status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+            }
+            self.seen.lock().unwrap().push(msg.clone());
+            Ok(())
+        }
+    }
+
+    fn target(triggers: HashSet<Trigger>, notifier: impl Notifier + 'static) -> Target {
+        Target {
+            triggers,
+            notifier: Box::new(notifier),
+        }
+    }
+
+    #[test]
+    fn trigger_parse_roundtrips_and_rejects_junk() {
+        for t in [Trigger::Available, Trigger::Succeeded, Trigger::Failed] {
+            assert_eq!(Trigger::parse(t.as_str()), Ok(t));
+        }
+        assert_eq!(Trigger::parse("  FAILED "), Ok(Trigger::Failed));
+        assert_eq!(Trigger::parse("nope"), Err("nope".to_string()));
+    }
+
+    #[test]
+    fn render_maps_each_event_to_its_trigger_and_wording() {
+        let a = available().render();
+        assert_eq!(a.trigger, Trigger::Available);
+        assert!(a.title.contains("Update available"));
+        assert!(a.body.contains("watch mode"));
+        // Digest is truncated via the shared helper, not printed raw.
+        assert!(a.body.contains("sha256:abcdef012345…"));
+        assert!(!a.body.contains(DIG));
+
+        let s = succeeded().render();
+        assert_eq!(s.trigger, Trigger::Succeeded);
+        assert!(s.title.contains("Updated"));
+
+        let f = failed().render();
+        assert_eq!(f.trigger, Trigger::Failed);
+        assert!(f.title.contains("Update failed"));
+        assert!(f.body.contains("health check timed out"));
+        assert!(f.body.contains("web-old-1700000000"));
+    }
+
+    #[tokio::test]
+    async fn empty_dispatcher_is_a_noop() {
+        Dispatcher::noop().dispatch(&succeeded()).await; // must not panic
+        assert!(Dispatcher::noop().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_subscribed_targets_receive_an_event() {
+        let (failures_only, seen_f, calls_f) = RecordingNotifier::new("failures");
+        let (all, seen_a, calls_a) = RecordingNotifier::new("all");
+        let d = Dispatcher::from_targets(vec![
+            target([Trigger::Failed].into_iter().collect(), failures_only),
+            target(Trigger::all(), all),
+        ]);
+
+        d.dispatch(&succeeded()).await;
+        assert_eq!(calls_f.load(Ordering::SeqCst), 0, "failures-only skips success");
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1, "all-subscriber gets success");
+        assert!(seen_f.lock().unwrap().is_empty());
+        assert_eq!(seen_a.lock().unwrap().len(), 1);
+
+        d.dispatch(&failed()).await;
+        assert_eq!(calls_f.load(Ordering::SeqCst), 1, "failures-only gets failure");
+        assert_eq!(calls_a.load(Ordering::SeqCst), 2, "all-subscriber also gets failure");
+    }
+
+    #[tokio::test]
+    async fn a_failing_target_does_not_block_a_later_one() {
+        let (boom, boom_calls) = RecordingNotifier::failing("boom");
+        let (ok, seen_ok, ok_calls) = RecordingNotifier::new("ok");
+        let d = Dispatcher::from_targets(vec![
+            target(Trigger::all(), boom),
+            target(Trigger::all(), ok),
+        ]);
+
+        d.dispatch(&succeeded()).await; // boom errors; ok must still receive
+        assert_eq!(boom_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ok_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(seen_ok.lock().unwrap().len(), 1);
+    }
+}
