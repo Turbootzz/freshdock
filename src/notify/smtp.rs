@@ -11,7 +11,7 @@ use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use super::{NotifyError, Notifier, RenderedMessage};
+use super::{Notifier, NotifyError, RenderedMessage};
 use crate::config::Secret;
 
 pub struct SmtpNotifier {

@@ -11,9 +11,11 @@ A modern Docker container auto-updater, built in Rust as a successor to Watchtow
 
 ## Status
 
-**Pre-alpha — Phase 1 (read-only spike) is landing.**
+**Pre-alpha — Phases 1–6 implemented; polishing toward v1.0 (Phase 7).**
 
-The `0.0.1` crates.io release was a name reservation. The first working iteration is `freshdock check`: a read-only command that lists running containers, parses freshdock labels into a per-container policy, fetches the latest digest from Docker Hub anonymously, and prints a table showing which containers have updates available. It never touches container state.
+The `0.0.1` crates.io release was a name reservation; a versioned release lands with Phase 7 (#21). The working surface today:
+
+**`freshdock check`** — read-only. Lists running containers, parses freshdock labels into a per-container policy, resolves the latest digest from the registry, and prints a table of which containers have updates available. Never touches container state.
 
 ```bash
 freshdock check             # render the update-status table
@@ -21,7 +23,9 @@ freshdock --no-color check  # ANSI-free output, suitable for log files
 RUST_LOG=info freshdock check  # see registry rate-limit info etc.
 ```
 
-The scheduler daemon `freshdock run` (Phase 4) polls opted-in containers on their per-mode cadence and applies updates with the same health-gated rollback as `freshdock recreate`:
+**`freshdock recreate <name>`** — recreate one container against its current tag, health-gated with automatic rollback on failure.
+
+**`freshdock run`** — the scheduler daemon. Polls opted-in containers on their per-mode cadence and applies updates with the same health-gated rollback, emitting notifications on the configured triggers:
 
 ```bash
 freshdock run                  # poll live/watch every 5 min; cron modes on schedule
@@ -29,9 +33,9 @@ freshdock run --interval 600   # poll live/watch every 10 min instead
 RUST_LOG=info freshdock run    # see per-container scheduler events
 ```
 
-It runs in the foreground until SIGINT/SIGTERM, then finishes the in-flight container and exits. `watch` mode logs an `update_available` event but never pulls or recreates (notification backends land in Phase 6). See [Scheduling](#scheduling) for cron syntax.
+It runs in the foreground until SIGINT/SIGTERM, then finishes the in-flight container and exits. `watch` mode emits an *update available* notification but never pulls or recreates. See [Scheduling](#scheduling) for cron syntax and [Notifications](#notifications) for backends.
 
-Authenticated registries (GHCR, Quay, lscr.io, generic OCI bearer-token) are reported as "skipped: not yet supported (Phase 5)" and lift in Phase 5. Digest-pinned containers (`image@sha256:…`) are shown as `pinned (no check)` — there is no moving tag to follow.
+**Registries.** Docker Hub (anonymous or authenticated), GHCR, Quay, `lscr.io`, and any OCI bearer-token registry are supported; configure credentials in [`freshdock.toml`](#configuration-file-freshdocktoml). Digest-pinned containers (`image@sha256:…`) show as `pinned (no check)` — there is no moving tag to follow.
 
 ---
 
@@ -57,7 +61,7 @@ freshdock targets exactly that gap.
 
 ---
 
-## Planned features
+## Features
 
 ### Update modes (per container, via Docker labels)
 
@@ -107,13 +111,30 @@ Override any calendar mode's schedule with a `freshdock.schedule` label (ignored
 
 **Timezone.** Schedules are evaluated in the host's **system local time**. Across a DST spring-forward, a schedule that lands in the skipped hour (e.g. `30 2 * * *`) does not fire that day; behaviour inside a transition hour is timezone-dependent, so the 04:00 defaults steer clear of it. Schedule state is in memory only — a window missed while the daemon was down is **not** backfilled; it fires at the next occurrence.
 
-### Notifications (v1 scope)
+### Notifications
 
-Webhook, Discord, Telegram, and SMTP email. Triggers for: update available (watch mode), update succeeded, update failed (with rollback status).
+The scheduler (`freshdock run`) sends a notification when an opted-in container
+(`freshdock.notify=true`) hits one of three triggers:
 
-### Registry support (v1 scope)
+| Trigger | When | Modes |
+|---|---|---|
+| `available` | a newer image exists but was **not** applied | `watch` |
+| `succeeded` | a recreate passed its health gate | `live`/`nightly`/`weekly`/`monthly` |
+| `failed` | a recreate failed health and was **rolled back** | `live`/`nightly`/`weekly`/`monthly` |
 
-Docker Hub, GitHub Container Registry (GHCR), Quay.io, `lscr.io`, and any OCI-compliant registry with bearer-token auth. ECR/GCR/ACR coming post-v1.
+Backends are configured as `[notifications.<name>]` tables in
+[`freshdock.toml`](#configuration-file-freshdocktoml): **webhook** (generic JSON
+POST), **Discord** (embed via webhook URL), **Telegram** (bot `sendMessage`), and
+**SMTP** email. A target may subscribe to a subset of triggers with
+`triggers = [...]`; omitting it subscribes to all three. A send that fails is
+logged and skipped — notifications never block or abort an update.
+
+### Registry support
+
+Docker Hub, GitHub Container Registry (GHCR), Quay.io, `lscr.io`, and any
+OCI-compliant registry with bearer-token auth. Credentials live in
+`[registry.<name>]` tables (or `FRESHDOCK_REGISTRY_*` env vars). ECR/GCR/ACR
+coming post-v1.
 
 ### Compatibility targets
 
@@ -128,20 +149,113 @@ Docker Hub, GitHub Container Registry (GHCR), Quay.io, `lscr.io`, and any OCI-co
 
 ---
 
+## Label vocabulary
+
+Per-container behaviour is driven entirely by Docker labels. freshdock is
+**opt-in**: a container with no `freshdock.enable=true` is ignored.
+
+| Label | Values | Default | Meaning |
+|---|---|---|---|
+| `freshdock.enable` | `true` / `false` | `false` | Master switch. Without `true`, the container is ignored. |
+| `freshdock.mode` | `live` / `nightly` / `weekly` / `monthly` / `watch` / `off` | `watch` | Update mode (see [Update modes](#update-modes-per-container-via-docker-labels)). `watch` notifies only — it never pulls. |
+| `freshdock.schedule` | 5-field cron | mode default | Override the cron for a calendar mode. Ignored for `live`/`watch`/`off`. |
+| `freshdock.notify` | `true` / `false` | `false` | Send notifications for this container's update events. Requires a configured `[notifications.*]` target. |
+
+When `freshdock.enable=true` but no `freshdock.mode` is set, the mode is
+`watch` (detect-and-notify, never mutate) — an honest, non-destructive default.
+
+## Configuration file (`freshdock.toml`)
+
+Credentials and notification targets live in a `freshdock.toml`, resolved from
+`--config <path>`, then `$FRESHDOCK_CONFIG`, then `./freshdock.toml`. Secrets are
+redacted in all log output and can be supplied via the environment instead of the
+file. Runnable stacks are in [`examples/compose/`](examples/compose/).
+
+```toml
+# Registry credentials — keyed by registry alias or host. Env overrides:
+# FRESHDOCK_REGISTRY_<NAME>_USERNAME / _TOKEN.
+[registry.ghcr]
+username = "octocat"
+token    = "ghp_xxx"            # personal access token with read:packages
+
+# --- Notification targets ---------------------------------------------------
+
+[notifications.ops-webhook]
+type = "webhook"
+url  = "https://example.com/hooks/freshdock"
+# triggers omitted → all of available, succeeded, failed
+
+[notifications.discord]
+type        = "discord"
+webhook_url = "https://discord.com/api/webhooks/123/abc"
+triggers    = ["succeeded", "failed"]
+
+[notifications.tg]
+type      = "telegram"
+bot_token = "123456:ABC-DEF"   # or FRESHDOCK_NOTIFY_TG_BOT_TOKEN
+chat_id   = "987654321"
+triggers  = ["failed"]
+
+[notifications.email]
+type     = "smtp"
+host     = "smtp.example.com"
+port     = 587                 # default 587
+username = "freshdock@example.com"
+password = "s3cr3t"            # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
+from     = "freshdock@example.com"
+to       = ["admin@example.com"]
+starttls = true                # default true; set false for implicit TLS (465)
+triggers = ["succeeded", "failed"]
+```
+
+Notification secrets may also be supplied via the environment (the `<NAME>` is
+the table name, upper-cased, `-` → `_`):
+
+- `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` — overrides a Telegram target's `bot_token`.
+- `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` — overrides an SMTP target's `password`.
+
+## Troubleshooting
+
+**`permission denied` on the Docker socket.** freshdock talks to
+`/var/run/docker.sock`. Run it as a user in the `docker` group, or mount the
+socket into the container (`-v /var/run/docker.sock:/var/run/docker.sock`). The
+socket's group must match; on some hosts you must pass `--group-add` with the
+socket's GID.
+
+**Portainer (or another UI) shows a container as "out of sync" after an update.**
+A recreate replaces the container with a new ID, so a UI that pinned the old ID
+briefly shows a desync. It resolves on the UI's next refresh — freshdock does not
+edit your compose/stack files, only the running container.
+
+**`registry requires credentials` / `auth required`.** The image's registry
+needs auth that isn't configured. Add a `[registry.<name>]` table (or
+`FRESHDOCK_REGISTRY_*` env) for that host — see
+[Configuration](#configuration-file-freshdocktoml).
+
+**A notification logs `notification failed; continuing`.** Delivery is
+best-effort and **non-fatal** by design: a failed send never blocks or rolls back
+an update. Check the target's URL/credentials; tokens are redacted in logs.
+
+**Coming from Watchtower?** See the
+[migration guide](docs/migrating-from-watchtower.md) for a label/flag
+translation table.
+
+---
+
 ## Roadmap
 
 The full plan, including phased milestones and architecture, lives in [PLAN.md](PLAN.md).
 
 Short version:
 
-- **Phase 0** — Name reservation, repo scaffolding, CI.
-- **Phase 1** *(current)* — Read-only spike: list containers, check digests, print update status.
-- **Phase 2** — Single container recreate cycle.
-- **Phase 3** — Health-gating and rollback (the quality bar for v1.0).
-- **Phase 4** — Scheduling and per-container modes.
-- **Phase 5** — Multi-registry auth.
-- **Phase 6** — Notifications.
-- **Phase 7** — Polish, documentation, v1.0 release.
+- **Phase 0** — Name reservation, repo scaffolding, CI. ✅
+- **Phase 1** — Read-only spike: list containers, check digests, print update status. ✅
+- **Phase 2** — Single container recreate cycle. ✅
+- **Phase 3** — Health-gating and rollback (the quality bar for v1.0). ✅
+- **Phase 4** — Scheduling and per-container modes. ✅
+- **Phase 5** — Multi-registry auth. ✅
+- **Phase 6** — Notifications. ✅
+- **Phase 7** *(current)* — Polish, documentation, v1.0 release.
 
 Estimated total time to v1.0: roughly 12 weeks of part-time work.
 
@@ -149,15 +263,25 @@ Estimated total time to v1.0: roughly 12 weeks of part-time work.
 
 ## Installation
 
-> Not yet. Come back after Phase 1.
-
-When freshdock is ready, installation will be the standard options for a Rust binary:
+**From source** (works today):
 
 ```bash
-# Cargo (after first usable release)
-cargo install freshdock
+git clone https://github.com/Turbootzz/freshdock
+cd freshdock
+just build           # release binary at target/release/freshdock
+```
 
-# Docker (after first usable release)
+**Cargo** — installs the latest published crate (currently the `0.0.1` name
+reservation; the first feature release lands with v1.0, #21):
+
+```bash
+cargo install freshdock
+```
+
+**Docker / prebuilt binaries** — the multi-arch image and release binaries ship
+with the v1.0 release (#21). Once published:
+
+```bash
 docker run -d \
   --name freshdock \
   -v /var/run/docker.sock:/var/run/docker.sock \

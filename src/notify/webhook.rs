@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use super::{NotifyError, Notifier, RenderedMessage};
+use super::{Notifier, NotifyError, RenderedMessage};
 
 pub struct WebhookNotifier {
     name: String,

@@ -191,7 +191,8 @@ impl Config {
         };
         // Take notifications out before `build_store` consumes the rest; both
         // overlay the same process env (read twice — `vars()` is cheap).
-        let notifications = build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
+        let notifications =
+            build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
         let credentials = Arc::new(build_store(config, std::env::vars()));
         Ok(LoadedConfig {
             credentials,
@@ -572,7 +573,10 @@ mod tests {
             } => {
                 assert_eq!(*port, 587, "default submission port");
                 assert!(*starttls, "starttls defaults on");
-                assert!(triggers.is_none(), "omitted triggers → None (subscribe all)");
+                assert!(
+                    triggers.is_none(),
+                    "omitted triggers → None (subscribe all)"
+                );
             }
             other => panic!("expected smtp, got {other:?}"),
         }
@@ -624,6 +628,9 @@ mod tests {
             targets,
             env(&[("FRESHDOCK_NOTIFY_TG_BOT_TOKEN", "env-token")]),
         );
-        assert!(matches!(cfg.targets["tg"], NotificationTarget::Webhook { .. }));
+        assert!(matches!(
+            cfg.targets["tg"],
+            NotificationTarget::Webhook { .. }
+        ));
     }
 }

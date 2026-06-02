@@ -1,0 +1,30 @@
+# A fleet mixing update modes on one freshdock daemon: `app` updates live,
+# `api` nightly on a custom cron, and `cache` is watch-only.
+# Validate: docker compose -f mixed-modes.yml config
+services:
+  app:
+    image: ghcr.io/example/app:latest
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=live"
+
+  api:
+    image: ghcr.io/example/api:stable
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=nightly"
+      - "freshdock.schedule=0 3 * * *" # 03:00 daily, overriding the 04:00 default
+
+  cache:
+    image: redis:7
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=watch" # notice updates, never restart
+
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run", "--interval", "300"]
+    volumes:
+      # Writable socket: live/nightly modes recreate containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

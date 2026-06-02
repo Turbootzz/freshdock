@@ -166,7 +166,10 @@ impl NotifyEvent {
 /// Resolve a target's `triggers` config into a subscription set. Omitted
 /// (`None`) subscribes to all three; an unknown token fails with the target
 /// named so the operator can find it.
-fn parse_triggers(name: &str, triggers: Option<Vec<String>>) -> Result<HashSet<Trigger>, NotifyError> {
+fn parse_triggers(
+    name: &str,
+    triggers: Option<Vec<String>>,
+) -> Result<HashSet<Trigger>, NotifyError> {
     match triggers {
         None => Ok(Trigger::all()),
         Some(list) => list
@@ -289,7 +292,11 @@ impl Dispatcher {
                     triggers,
                 } => (
                     triggers,
-                    Box::new(DiscordNotifier::new(name.clone(), webhook_url, http.clone())),
+                    Box::new(DiscordNotifier::new(
+                        name.clone(),
+                        webhook_url,
+                        http.clone(),
+                    )),
                 ),
                 NotificationTarget::Telegram {
                     bot_token,
@@ -443,7 +450,9 @@ mod tests {
         async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                return Err(NotifyError::Status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+                return Err(NotifyError::Status(
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                ));
             }
             self.seen.lock().unwrap().push(msg.clone());
             Ok(())
@@ -503,14 +512,30 @@ mod tests {
         ]);
 
         d.dispatch(&succeeded()).await;
-        assert_eq!(calls_f.load(Ordering::SeqCst), 0, "failures-only skips success");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1, "all-subscriber gets success");
+        assert_eq!(
+            calls_f.load(Ordering::SeqCst),
+            0,
+            "failures-only skips success"
+        );
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            1,
+            "all-subscriber gets success"
+        );
         assert!(seen_f.lock().unwrap().is_empty());
         assert_eq!(seen_a.lock().unwrap().len(), 1);
 
         d.dispatch(&failed()).await;
-        assert_eq!(calls_f.load(Ordering::SeqCst), 1, "failures-only gets failure");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 2, "all-subscriber also gets failure");
+        assert_eq!(
+            calls_f.load(Ordering::SeqCst),
+            1,
+            "failures-only gets failure"
+        );
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "all-subscriber also gets failure"
+        );
     }
 
     #[tokio::test]

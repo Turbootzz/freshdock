@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use super::{NotifyError, Notifier, RenderedMessage, Trigger};
+use super::{Notifier, NotifyError, RenderedMessage, Trigger};
 
 pub struct DiscordNotifier {
     name: String,

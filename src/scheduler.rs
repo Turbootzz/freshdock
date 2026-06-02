@@ -262,7 +262,10 @@ async fn run_tick<D, R>(
         }
 
         let image = c.image.as_deref().unwrap_or_default();
-        process_container(docker, registry, cfg, clock, now, &name, &policy, image, dispatcher).await;
+        process_container(
+            docker, registry, cfg, clock, now, &name, &policy, image, dispatcher,
+        )
+        .await;
     }
 
     states.retain(|k, _| live.contains(k));
@@ -683,7 +686,17 @@ mod tests {
     async fn one_tick(node: &FakeNode, reg: &FakeRegistry) -> HashMap<String, ContainerState> {
         let (_tx, rx) = watch::channel(false);
         let mut states = HashMap::new();
-        run_tick(node, reg, &cfg(), &TokioClock, &now, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            node,
+            reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         states
     }
 
@@ -692,7 +705,17 @@ mod tests {
     async fn one_tick_with(node: &FakeNode, reg: &FakeRegistry, dispatcher: &Dispatcher) {
         let (_tx, rx) = watch::channel(false);
         let mut states = HashMap::new();
-        run_tick(node, reg, &cfg(), &TokioClock, &now, &mut states, &rx, dispatcher).await;
+        run_tick(
+            node,
+            reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            dispatcher,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -861,12 +884,32 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let mut states = HashMap::new();
 
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert!(states.contains_key("web"));
 
         // Container disappears; next tick prunes it.
         node.containers.lock().unwrap().clear();
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert!(
             states.is_empty(),
             "pruned after vanishing from list_running"
@@ -886,7 +929,17 @@ mod tests {
         let reg = FakeRegistry::new(DIG_B);
         let (_tx, rx) = watch::channel(true); // already shutting down
         let mut states = HashMap::new();
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(
             node.creates(),
             0,
@@ -906,9 +959,17 @@ mod tests {
         );
         let reg = FakeRegistry::new(DIG_B);
         let (_tx, rx) = watch::channel(true);
-        run_with(&node, &reg, &cfg(), &TokioClock, now, rx, &Dispatcher::noop())
-            .await
-            .unwrap();
+        run_with(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            now,
+            rx,
+            &Dispatcher::noop(),
+        )
+        .await
+        .unwrap();
         assert_eq!(node.creates(), 0, "a pre-set shutdown processes nothing");
     }
 
@@ -931,17 +992,47 @@ mod tests {
         let now_fn = || clock.get();
 
         // 03:59 seeds the container (default `0 4 * * *`) → not yet due.
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 0, "not due before the window");
 
         // 04:00 → due → recreate, and next_fire advances to tomorrow.
         clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 0, 0).unwrap());
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 1, "fires at the window");
 
         // 04:01 → next_fire is tomorrow now, so it must not re-fire.
         clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 1, 0).unwrap());
-        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx, &Dispatcher::noop()).await;
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now_fn,
+            &mut states,
+            &rx,
+            &Dispatcher::noop(),
+        )
+        .await;
         assert_eq!(node.creates(), 1, "does not re-fire after firing");
     }
 
@@ -958,10 +1049,18 @@ mod tests {
             health: HealthConfig::default(),
         };
 
-        let handle =
-            tokio::spawn(
-                async move { run_with(&node, &reg, &big_cfg, &TokioClock, now, rx, &Dispatcher::noop()).await },
-            );
+        let handle = tokio::spawn(async move {
+            run_with(
+                &node,
+                &reg,
+                &big_cfg,
+                &TokioClock,
+                now,
+                rx,
+                &Dispatcher::noop(),
+            )
+            .await
+        });
 
         // Let the first immediate tick run and the loop park on `select!`.
         tokio::time::sleep(Duration::from_millis(1)).await;

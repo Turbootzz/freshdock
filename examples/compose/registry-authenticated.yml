@@ -1,0 +1,20 @@
+# Updating an image from a private registry (GHCR). Credentials are passed via
+# environment, so no config file is needed — set GHCR_USER and GHCR_TOKEN in your
+# shell or an .env file beside this compose file.
+# Validate: docker compose -f registry-authenticated.yml config
+services:
+  private-app:
+    image: ghcr.io/example/private-app:latest
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=live"
+
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    environment:
+      FRESHDOCK_REGISTRY_GHCR_USERNAME: "${GHCR_USER:-}"
+      FRESHDOCK_REGISTRY_GHCR_TOKEN: "${GHCR_TOKEN:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

@@ -12,7 +12,7 @@ use freshdock::config::{NotificationConfig, NotificationTarget, Secret};
 use freshdock::notify::discord::DiscordNotifier;
 use freshdock::notify::telegram::TelegramNotifier;
 use freshdock::notify::webhook::WebhookNotifier;
-use freshdock::notify::{Dispatcher, NotifyError, NotifyEvent, Notifier};
+use freshdock::notify::{Dispatcher, Notifier, NotifyError, NotifyEvent};
 use freshdock::rollback::RollbackReason;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -166,8 +166,9 @@ async fn dispatch_hits_each_subscribed_target_once_and_skips_others() {
         },
     );
 
-    let dispatcher = Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client())
-        .expect("dispatcher builds from valid config");
+    let dispatcher =
+        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client())
+            .expect("dispatcher builds from valid config");
     dispatcher.dispatch(&failed()).await;
     // Per-server .expect(n) is verified when each MockServer drops here.
 }

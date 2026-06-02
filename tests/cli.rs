@@ -29,7 +29,10 @@ fn help_lists_the_subcommands() {
     assert!(out.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("check"), "help missing `check`: {stdout}");
-    assert!(stdout.contains("recreate"), "help missing `recreate`: {stdout}");
+    assert!(
+        stdout.contains("recreate"),
+        "help missing `recreate`: {stdout}"
+    );
     assert!(stdout.contains("run"), "help missing `run`: {stdout}");
 }
 
@@ -47,7 +50,10 @@ fn version_exits_zero() {
 fn malformed_config_fails_at_parse_before_docker() {
     let cfg = temp_config("malformed", "[unterminated\n");
     let out = run(&["--config", cfg.to_str().unwrap(), "check"]);
-    assert!(!out.status.success(), "malformed config must be a hard error");
+    assert!(
+        !out.status.success(),
+        "malformed config must be a hard error"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("parsing config file"),
@@ -58,11 +64,7 @@ fn malformed_config_fails_at_parse_before_docker() {
 
 #[test]
 fn explicit_missing_config_path_is_an_error() {
-    let out = run(&[
-        "--config",
-        "/no/such/dir/freshdock.toml",
-        "check",
-    ]);
+    let out = run(&["--config", "/no/such/dir/freshdock.toml", "check"]);
     assert!(!out.status.success(), "an explicit missing path must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
