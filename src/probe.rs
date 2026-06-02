@@ -3,9 +3,10 @@
 //! the registry, and returns a [`ProbeOutcome`] each caller renders or acts on.
 //!
 //! Routing: digest-pinned refs (`sha256:<id>` or `repo@sha256:<id>`) return
-//! [`ProbeOutcome::Pinned`] before any registry call (issue #27); non-Docker-Hub
-//! refs return [`ProbeOutcome::SkippedAuth`] (auth is Phase 5); Docker Hub refs
-//! fetch the upstream digest.
+//! [`ProbeOutcome::Pinned`] before any registry call (issue #27); every other
+//! ref goes to the registry, which resolves the host and runs the bearer-token
+//! flow. A registry that needs (or rejects) credentials surfaces as
+//! [`ProbeOutcome::AuthRequired`].
 
 use tracing::warn;
 
@@ -23,8 +24,9 @@ pub enum ProbeOutcome {
     },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
-    /// A non-Docker-Hub registry: skipped until Phase 5 registry auth lands.
-    SkippedAuth,
+    /// The registry needs credentials we don't have (or the configured ones
+    /// were rejected). Reported, not errored — set `[registry.<name>]` creds.
+    AuthRequired,
     /// The registry was unreachable; degrade gracefully (retry later).
     NetworkUnavailable,
     /// The fetch failed for some other reason; the message is for display/logs.
@@ -56,14 +58,16 @@ pub async fn probe_image(
     };
 
     let image_ref = ImageRef::parse(image);
-    if !is_docker_hub(&image_ref.repository) {
-        return ProbeOutcome::SkippedAuth;
-    }
     match registry.fetch_digest(&image_ref).await {
         Ok(d) => ProbeOutcome::Fetched { local, latest: d.0 },
         Err(RegistryError::NetworkUnavailable(reason)) => {
             warn!(repo = %image_ref.repository, %reason, "network unavailable");
             ProbeOutcome::NetworkUnavailable
+        }
+        // Distinct from a hard error: the registry simply needs credentials.
+        Err(RegistryError::Auth(reason)) => {
+            warn!(repo = %image_ref.repository, %reason, "registry requires credentials");
+            ProbeOutcome::AuthRequired
         }
         Err(e) => {
             warn!(repo = %image_ref.repository, error = %e, "digest fetch failed");
@@ -90,17 +94,6 @@ pub(crate) fn pinned_digest(image: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-/// Docker Hub references have a repo of `library/<name>` or `<owner>/<name>`.
-/// Anything containing a host (`ghcr.io/...`, `quay.io/...`, `lscr.io/...`,
-/// or a bare `localhost[/...]`) belongs to a private/non-Hub registry.
-pub(crate) fn is_docker_hub(repository: &str) -> bool {
-    let first = repository.split('/').next().unwrap_or("");
-    if first.eq_ignore_ascii_case("localhost") {
-        return false;
-    }
-    !(first.contains('.') || first.contains(':'))
 }
 
 /// Find the manifest digest for an image reference inside an `ImageInspect.RepoDigests`
@@ -140,24 +133,6 @@ mod tests {
 
     const DIG_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    // --- is_docker_hub ---
-
-    #[test]
-    fn docker_hub_namespacing() {
-        assert!(is_docker_hub("library/alpine"));
-        assert!(is_docker_hub("nginxinc/nginx-unprivileged"));
-        assert!(!is_docker_hub("ghcr.io/owner/repo"));
-        assert!(!is_docker_hub("quay.io/foo/bar"));
-        assert!(!is_docker_hub("lscr.io/linuxserver/sonarr"));
-    }
-
-    #[test]
-    fn localhost_is_not_docker_hub() {
-        assert!(!is_docker_hub("localhost/image"));
-        assert!(!is_docker_hub("LOCALHOST/repo"));
-        assert!(!is_docker_hub("localhost:5000/repo"));
-    }
 
     // --- manifest_digest_for / strip_tag ---
 
@@ -299,14 +274,21 @@ mod tests {
     }
 
     struct FakeRegistry {
-        digest: String,
+        /// `Some` digest to return, or `None` to simulate an auth failure.
+        digest: Option<String>,
         calls: AtomicUsize,
     }
 
     impl FakeRegistry {
         fn new(digest: &str) -> Self {
             Self {
-                digest: digest.to_owned(),
+                digest: Some(digest.to_owned()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+        fn auth_required() -> Self {
+            Self {
+                digest: None,
                 calls: AtomicUsize::new(0),
             }
         }
@@ -316,7 +298,10 @@ mod tests {
     impl Registry for FakeRegistry {
         async fn fetch_digest(&self, _image: &ImageRef) -> Result<Digest, RegistryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Digest(self.digest.clone()))
+            match &self.digest {
+                Some(d) => Ok(Digest(d.clone())),
+                None => Err(RegistryError::Auth("no credentials for registry".into())),
+            }
         }
     }
 
@@ -349,12 +334,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_hub_is_skipped_without_a_registry_call() {
+    async fn non_hub_image_is_fetched_via_the_registry() {
+        // Phase 5: non-Docker-Hub refs are no longer short-circuited — the
+        // registry resolves the host and runs the bearer-token flow.
         let docker = FakeDocker::new(&[]);
         let registry = FakeRegistry::new(DIG_A);
         let outcome = probe_image(&docker, &registry, "ghcr.io/owner/repo:v1").await;
-        assert_eq!(outcome, ProbeOutcome::SkippedAuth);
-        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Fetched {
+                local: None,
+                latest: DIG_A.to_owned(),
+            }
+        );
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn registry_auth_error_maps_to_auth_required() {
+        let docker = FakeDocker::new(&[]);
+        let registry = FakeRegistry::auth_required();
+        let outcome = probe_image(&docker, &registry, "ghcr.io/owner/private:v1").await;
+        assert_eq!(outcome, ProbeOutcome::AuthRequired);
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

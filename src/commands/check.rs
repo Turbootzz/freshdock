@@ -1,18 +1,20 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use comfy_table::Table;
 use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
 
+use crate::config::CredentialStore;
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
 use crate::labels::{self, Mode};
 use crate::probe::{self, ProbeOutcome, pinned_digest};
 use crate::registry::Registry;
-use crate::registry::digest::DockerHub;
+use crate::registry::digest::OciRegistry;
 
-const SKIPPED_AUTH: &str = "skipped: not yet supported (Phase 5)";
+const AUTH_REQUIRED: &str = "auth required (set credentials)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
 const PINNED: &str = "pinned (no check)";
 
@@ -23,10 +25,10 @@ const PINNED: &str = "pinned (no check)";
 /// issue #7's acceptance criteria. Errors that prevent the table from
 /// rendering at all (e.g. cannot reach the Docker socket) propagate up.
 ///
-pub async fn run(no_color: bool) -> Result<(), AppError> {
-    let docker = Docker::connect()?;
-    let hub = DockerHub::new();
-    let cells = collect_cells(&docker, &hub).await?;
+pub async fn run(no_color: bool, store: Arc<CredentialStore>) -> Result<(), AppError> {
+    let docker = Docker::connect(store.clone())?;
+    let registry = OciRegistry::new(store);
+    let cells = collect_cells(&docker, &registry).await?;
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));
@@ -123,7 +125,7 @@ fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String)
             let current = pinned_digest(image).map(short_digest).unwrap_or_else(dash);
             (current, PINNED.to_string(), dash())
         }
-        ProbeOutcome::SkippedAuth => (dash(), SKIPPED_AUTH.to_string(), dash()),
+        ProbeOutcome::AuthRequired => (dash(), AUTH_REQUIRED.to_string(), dash()),
         ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
         ProbeOutcome::Error(msg) => (dash(), format!("error: {msg}"), dash()),
     }
@@ -287,14 +289,20 @@ mod tests {
     /// lets the dedupe assertion verify exactly one fetch per unique image
     /// without standing up a wiremock server.
     struct FakeRegistry {
-        digest: String,
+        digest: Option<String>,
         calls: AtomicUsize,
     }
 
     impl FakeRegistry {
         fn new(digest: &str) -> Self {
             Self {
-                digest: digest.to_owned(),
+                digest: Some(digest.to_owned()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+        fn auth_required() -> Self {
+            Self {
+                digest: None,
                 calls: AtomicUsize::new(0),
             }
         }
@@ -304,7 +312,10 @@ mod tests {
     impl Registry for FakeRegistry {
         async fn fetch_digest(&self, _image: &ImageRef) -> Result<Digest, RegistryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Digest(self.digest.clone()))
+            match &self.digest {
+                Some(d) => Ok(Digest(d.clone())),
+                None => Err(RegistryError::Auth("no credentials".into())),
+            }
         }
     }
 
@@ -350,7 +361,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_hub_image_is_skipped_and_registry_not_called() {
+    async fn registry_without_credentials_renders_auth_required() {
+        // Phase 5: a non-Docker-Hub image is now probed. With no credentials the
+        // registry reports auth-required — a clean status cell, not an error row.
         let docker = FakeDocker::new(
             vec![summary(
                 "priv",
@@ -362,15 +375,15 @@ mod tests {
                 &format!("ghcr.io/owner/repo@{DIG_A}"),
             )],
         );
-        let registry = FakeRegistry::new(DIG_B);
+        let registry = FakeRegistry::auth_required();
 
         let cells = collect_cells(&docker, &registry).await.unwrap();
-        assert_eq!(cells[0][4], SKIPPED_AUTH);
+        assert_eq!(cells[0][4], AUTH_REQUIRED);
         assert_eq!(cells[0][5], "-");
         assert_eq!(
             registry.calls.load(Ordering::SeqCst),
-            0,
-            "non-Hub images must short-circuit before any registry call"
+            1,
+            "the image is probed now (no more Phase-5 short-circuit)"
         );
     }
 

@@ -304,8 +304,8 @@ async fn process_container<D, R>(
         ProbeOutcome::Pinned => {
             debug!(container = %name, "scheduler: image pinned to a digest (no check)");
         }
-        ProbeOutcome::SkippedAuth => {
-            debug!(container = %name, "scheduler: non-Docker-Hub registry skipped (Phase 5)");
+        ProbeOutcome::AuthRequired => {
+            warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
         }
         ProbeOutcome::NetworkUnavailable => {
             warn!(container = %name, "scheduler: registry network unavailable; will retry next tick");
@@ -586,6 +586,7 @@ mod tests {
     struct FakeRegistry {
         digest: String,
         network_down: bool,
+        auth_required: bool,
         calls: AtomicUsize,
     }
 
@@ -594,6 +595,7 @@ mod tests {
             Self {
                 digest: digest.to_owned(),
                 network_down: false,
+                auth_required: false,
                 calls: AtomicUsize::new(0),
             }
         }
@@ -601,6 +603,15 @@ mod tests {
             Self {
                 digest: DIG_B.to_owned(),
                 network_down: true,
+                auth_required: false,
+                calls: AtomicUsize::new(0),
+            }
+        }
+        fn auth_required() -> Self {
+            Self {
+                digest: DIG_B.to_owned(),
+                network_down: false,
+                auth_required: true,
                 calls: AtomicUsize::new(0),
             }
         }
@@ -612,6 +623,8 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.network_down {
                 Err(RegistryError::NetworkUnavailable("test".into()))
+            } else if self.auth_required {
+                Err(RegistryError::Auth("no credentials".into()))
             } else {
                 Ok(Digest(self.digest.clone()))
             }
@@ -680,7 +693,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_hub_image_is_skipped_without_a_registry_call_or_recreate() {
+    async fn registry_requiring_auth_is_probed_but_never_recreates() {
+        // Phase 5: a non-Docker-Hub image is now probed. With no credentials the
+        // registry reports AuthRequired, which must not trigger a recreate (and
+        // must not loop into a failing pull).
         let node = FakeNode::new(
             vec![summary(
                 "priv",
@@ -689,10 +705,14 @@ mod tests {
             )],
             DIG_A,
         );
-        let reg = FakeRegistry::new(DIG_B);
+        let reg = FakeRegistry::auth_required();
         one_tick(&node, &reg).await;
-        assert_eq!(node.creates(), 0);
-        assert_eq!(reg.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(node.creates(), 0, "auth-required must not recreate");
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            1,
+            "the image is probed now"
+        );
     }
 
     #[tokio::test]

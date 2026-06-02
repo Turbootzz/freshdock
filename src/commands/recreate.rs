@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
+use crate::config::CredentialStore;
 use crate::docker::Docker;
 use crate::docker::recreate::{DockerOps, recreate_with_health};
 use crate::errors::AppError;
@@ -30,8 +32,8 @@ use crate::updater::RecreateOutcome;
 ///
 /// Thin entry: wires the live daemon + default health timing, delegates to the
 /// testable [`run_with`].
-pub async fn run(name: String) -> Result<(), AppError> {
-    let docker = Docker::connect()?;
+pub async fn run(name: String, credentials: Arc<CredentialStore>) -> Result<(), AppError> {
+    let docker = Docker::connect(credentials)?;
     run_with(
         &docker,
         &name,

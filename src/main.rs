@@ -1,14 +1,23 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use freshdock::commands;
+use freshdock::config::{Config, ENV_VAR_HELP};
 
 #[derive(Parser)]
-#[command(name = "freshdock", version, about)]
+#[command(name = "freshdock", version, about, after_long_help = ENV_VAR_HELP)]
 struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
+    /// Path to the freshdock.toml credentials file. Defaults to
+    /// ./freshdock.toml if present; the FRESHDOCK_CONFIG env var sets it too
+    /// (this flag wins).
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -52,14 +61,22 @@ async fn main() -> Result<()> {
         .with_ansi(!cli.no_color)
         .init();
 
+    // Resolve credentials once (flag > FRESHDOCK_CONFIG env > default file) and
+    // share the store across the registry HEAD flow and the daemon pull.
+    let config_path = cli
+        .config
+        .clone()
+        .or_else(|| std::env::var_os("FRESHDOCK_CONFIG").map(PathBuf::from));
+    let credentials = Arc::new(Config::load(config_path.as_deref())?);
+
     match cli.cmd {
-        Cmd::Check => commands::check::run(cli.no_color).await?,
-        Cmd::Recreate { name } => commands::recreate::run(name).await?,
+        Cmd::Check => commands::check::run(cli.no_color, credentials).await?,
+        Cmd::Recreate { name } => commands::recreate::run(name, credentials).await?,
         Cmd::Run {
             interval,
             tick,
             stop_timeout,
-        } => commands::run::run(interval, tick, stop_timeout).await?,
+        } => commands::run::run(interval, tick, stop_timeout, credentials).await?,
     }
     Ok(())
 }
