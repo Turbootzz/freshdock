@@ -226,12 +226,19 @@ impl OciRegistry {
             );
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(classify_send_error)?
-            .error_for_status()
-            .map_err(|e| RegistryError::Auth(e.to_string()))?;
+        let resp = req.send().await.map_err(classify_send_error)?;
+        // Only an explicit rejection is an auth failure; 429/5xx are transient
+        // HTTP errors, not "wrong credentials", so don't mislabel them.
+        if matches!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(RegistryError::Auth(format!(
+                "token endpoint denied access (status {})",
+                resp.status()
+            )));
+        }
+        let resp = resp.error_for_status()?;
         let body: TokenResponse = resp.json().await?;
         let expires_in = body.expires_in;
         let token = body

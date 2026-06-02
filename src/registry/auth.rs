@@ -88,10 +88,12 @@ impl CachedToken {
     pub fn new(token: String, expires_in_secs: Option<u64>, now: Instant) -> Self {
         let ttl = expires_in_secs.map_or(DEFAULT_TTL, Duration::from_secs);
         let effective = ttl.saturating_sub(EXPIRY_SKEW).max(Duration::from_secs(1));
-        Self {
-            token,
-            expires_at: now + effective,
-        }
+        // A hostile/buggy registry could send a huge `expires_in`; `checked_add`
+        // avoids the `Instant` overflow panic, falling back to the default TTL.
+        let expires_at = now
+            .checked_add(effective)
+            .unwrap_or_else(|| now + DEFAULT_TTL);
+        Self { token, expires_at }
     }
 
     /// The token, if it hasn't expired as of `now`.

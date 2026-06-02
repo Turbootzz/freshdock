@@ -35,7 +35,7 @@ registry host; both fold onto the same registry as the matching image reference.
 Environment variables override the file **per field** (a lone `…_TOKEN` replaces
 the file token while keeping the file username):
 
-```
+```text
 FRESHDOCK_REGISTRY_<NAME>_USERNAME
 FRESHDOCK_REGISTRY_<NAME>_TOKEN
 ```
@@ -57,6 +57,11 @@ export FRESHDOCK_REGISTRY_GHCR_TOKEN=<a-PAT-with-read:packages>
 RUST_LOG=trace cargo run -- check
 # Confirm the token never appears in the trace output.
 ```
+
+Redaction is also enforced by automated tests
+(`config::tests::token_is_redacted_in_tracing_output` and
+`registry::auth::tests::cached_token_debug_redacts_the_token`); this manual run
+is just an extra end-to-end check.
 
 ## Out of scope (v1)
 

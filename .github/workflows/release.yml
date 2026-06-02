@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   IMAGE: ghcr.io/turbootzz/freshdock
 
+# Least privilege by default (covers the build job); the image job widens to
+# packages: write for the GHCR push.
+permissions:
+  contents: read
+
 jobs:
   # Reuse the CI cross-compile toolchain (houseabsolute/actions-rust-cross,
   # P0-2) to build one static-musl binary per target, then stage each under a

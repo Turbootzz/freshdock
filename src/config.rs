@@ -109,10 +109,17 @@ impl Config {
             Some(p) => Self::read_file(p)?,
             None => {
                 let default = Path::new(DEFAULT_CONFIG_FILE);
-                if default.exists() {
-                    Self::read_file(default)?
-                } else {
-                    Self::default()
+                // `try_exists` surfaces a permission/IO error instead of
+                // silently treating it as "absent" and yielding empty creds.
+                match default.try_exists() {
+                    Ok(true) => Self::read_file(default)?,
+                    Ok(false) => Self::default(),
+                    Err(source) => {
+                        return Err(ConfigError::Read {
+                            path: default.display().to_string(),
+                            source,
+                        });
+                    }
                 }
             }
         };

@@ -28,15 +28,6 @@ impl Match for NoAuthHeader {
     }
 }
 
-/// Matches any request carrying an `Authorization` header (basic-auth forwarded
-/// to the token endpoint).
-struct HasAuthHeader;
-impl Match for HasAuthHeader {
-    fn matches(&self, req: &Request) -> bool {
-        req.headers.contains_key("authorization")
-    }
-}
-
 fn anonymous_registry(server: &MockServer) -> OciRegistry {
     OciRegistry::with_base_url(Arc::new(CredentialStore::default()), &server.uri())
 }
@@ -147,10 +138,11 @@ async fn unauthorized_without_challenge_is_a_typed_auth_error() {
 async fn credentials_are_forwarded_to_the_token_endpoint() {
     let server = MockServer::start().await;
     mount_challenge(&server, "/v2/owner/repo/manifests/latest", None).await;
-    // The token request must carry HTTP Basic auth from the store.
+    // The token request must carry the exact HTTP Basic auth from the store:
+    // base64("u:pat") == "dTpwYXQ=".
     Mock::given(method("GET"))
         .and(path("/token"))
-        .and(HasAuthHeader)
+        .and(header("authorization", "Basic dTpwYXQ="))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "test-token"})))
         .expect(1)
         .mount(&server)
