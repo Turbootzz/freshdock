@@ -30,8 +30,11 @@ use chrono::Local;
 use futures::StreamExt;
 use tokio::sync::watch;
 
+use std::sync::Arc;
+
+use freshdock::config::CredentialStore;
 use freshdock::health::{HealthConfig, TokioClock};
-use freshdock::registry::digest::DockerHub;
+use freshdock::registry::digest::OciRegistry;
 use freshdock::scheduler::{self, SchedulerConfig};
 
 const IMAGE: &str = "alpine:latest";
@@ -162,14 +165,16 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
     // Run the scheduler for one immediate tick, then signal shutdown.
     let (tx, rx) = watch::channel(false);
     let handle = tokio::spawn(async move {
-        let fd = freshdock::docker::Docker::connect().expect("freshdock docker connect");
-        let hub = DockerHub::new();
+        let credentials = Arc::new(CredentialStore::default());
+        let fd = freshdock::docker::Docker::connect(credentials.clone())
+            .expect("freshdock docker connect");
+        let registry = OciRegistry::new(credentials);
         let cfg = SchedulerConfig {
             poll_interval: Duration::from_secs(1),
             tick: Duration::from_secs(1),
             health: HealthConfig::default(),
         };
-        scheduler::run_with(&fd, &hub, &cfg, &TokioClock, Local::now, rx)
+        scheduler::run_with(&fd, &registry, &cfg, &TokioClock, Local::now, rx)
             .await
             .expect("scheduler run");
     });

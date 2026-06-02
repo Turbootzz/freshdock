@@ -4,7 +4,10 @@ pub mod recreate;
 pub mod rename;
 pub mod spec;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use bollard::auth::DockerCredentials;
 use bollard::models::{
     ContainerState, ContainerStateStatusEnum, ContainerSummary, HealthStatusEnum,
 };
@@ -15,10 +18,12 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use tracing::debug;
 
+use crate::config::CredentialStore;
 use crate::docker::recreate::DockerOps;
 use crate::docker::spec::ContainerSpec;
 use crate::health::{ContainerRuntimeState, HealthProbe};
 use crate::registry::ImageRef;
+use crate::registry::digest::split_repository;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DockerError {
@@ -28,11 +33,14 @@ pub enum DockerError {
     Spec(crate::docker::spec::SpecError),
 }
 
-pub struct Docker(pub(crate) bollard::Docker);
+pub struct Docker(pub(crate) bollard::Docker, Arc<CredentialStore>);
 
 impl Docker {
-    pub fn connect() -> Result<Self, DockerError> {
-        Ok(Self(bollard::Docker::connect_with_local_defaults()?))
+    pub fn connect(credentials: Arc<CredentialStore>) -> Result<Self, DockerError> {
+        Ok(Self(
+            bollard::Docker::connect_with_local_defaults()?,
+            credentials,
+        ))
     }
 
     pub async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
@@ -47,14 +55,23 @@ impl Docker {
     /// progress stream. The orchestrator hands the original `spec.image_ref`
     /// (not a re-rendering) to `create_from_spec` so `Config.Image` round-trips
     /// byte-identical (#25); this only needs the side effect of getting the new
-    /// image into the local store. Phase 5 will widen the return type back when
-    /// explicit digest pinning lands.
+    /// image into the local store.
+    ///
+    /// Phase 5: when credentials are configured for the image's registry host,
+    /// they're passed as the daemon's `X-Registry-Auth` so private images pull
+    /// (the registry HEAD check and this pull share one [`CredentialStore`]).
     pub async fn pull_image(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
+        let (host, _) = split_repository(&image_ref.repository);
+        let credentials = self.1.get(host).map(|c| DockerCredentials {
+            username: c.username.clone(),
+            password: Some(c.token.expose().to_string()),
+            ..Default::default()
+        });
         let opts = CreateImageOptionsBuilder::new()
             .from_image(&image_ref.repository)
             .tag(&image_ref.tag)
             .build();
-        let mut stream = self.0.create_image(Some(opts), None, None);
+        let mut stream = self.0.create_image(Some(opts), None, credentials);
         while let Some(item) = stream.next().await {
             let info = item?;
             if let Some(status) = info.status {

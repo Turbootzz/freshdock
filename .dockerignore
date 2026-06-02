@@ -1,0 +1,4 @@
+# The image is assembled purely from prebuilt binaries staged under dist/ —
+# keep the build context tiny by excluding everything else.
+*
+!dist

@@ -19,6 +19,7 @@
 //! best-effort and prefix-scoped, so a panic mid-test never leaks containers.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bollard::Docker;
@@ -33,6 +34,7 @@ use bollard::query_parameters::{
 };
 use futures::StreamExt;
 
+use freshdock::config::CredentialStore;
 use freshdock::docker::recreate::recreate_one;
 
 const IMAGE: &str = "nginx:alpine";
@@ -289,7 +291,8 @@ async fn weird_config_recreate_roundtrip_is_byte_identical() {
         .await
         .expect("inspect before");
 
-    let fd = freshdock::docker::Docker::connect().expect("freshdock docker connect");
+    let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
+        .expect("freshdock docker connect");
     let cycle = recreate_one(&fd, &name, now_unix)
         .await
         .expect("recreate_one against live daemon");
@@ -419,7 +422,8 @@ async fn recreate_with_health_removes_archive_on_live_success() {
     };
     let (_network, name, _static_ip) = spawn_weird(&docker, &prefix, 78).await;
 
-    let fd = freshdock::docker::Docker::connect().expect("freshdock docker connect");
+    let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
+        .expect("freshdock docker connect");
     let outcome = recreate_with_health(&fd, &name, &HealthConfig::default(), &TokioClock, now_unix)
         .await
         .expect("recreate_with_health against live daemon");
