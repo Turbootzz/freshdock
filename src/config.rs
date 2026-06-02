@@ -635,4 +635,23 @@ mod tests {
             NotificationTarget::Webhook { .. }
         ));
     }
+
+    #[test]
+    fn env_overlay_matches_a_hyphenated_target_name() {
+        // `[notifications.ops-mail]` must be overridden by
+        // FRESHDOCK_NOTIFY_OPS_MAIL_PASSWORD (`-` normalised to `_`).
+        let targets = notifications(
+            "[notifications.ops-mail]\ntype = \"smtp\"\nhost = \"h\"\nfrom = \"a@e.com\"\nto = [\"b@e.com\"]\n",
+        );
+        let cfg = build_notifications(
+            targets,
+            env(&[("FRESHDOCK_NOTIFY_OPS_MAIL_PASSWORD", "env-pass")]),
+        );
+        match &cfg.targets["ops-mail"] {
+            NotificationTarget::Smtp { password, .. } => {
+                assert_eq!(password.as_ref().unwrap().expose(), "env-pass");
+            }
+            _ => unreachable!(),
+        }
+    }
 }

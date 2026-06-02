@@ -1133,6 +1133,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_up_to_date_sends_no_available_notification() {
+        // notify=true but the upstream digest matches local → no update → the
+        // "available" notification must NOT fire (guards against alert spam).
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(notifying_container("watch", true), DIG_A);
+        let reg = FakeRegistry::new(DIG_A); // same digest → up to date
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[tokio::test]
     async fn no_notification_when_notify_is_false() {
         let server = MockServer::start().await;
         Mock::given(wm_method("POST"))

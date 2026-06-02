@@ -123,6 +123,24 @@ async fn a_non_2xx_response_is_a_typed_status_error() {
 }
 
 #[tokio::test]
+async fn a_transport_error_never_leaks_the_telegram_token() {
+    // Point at a closed local port so the connect fails fast and deterministically
+    // (no external network). The bot token is in the URL path; the error must not
+    // expose it — post_json strips the URL via reqwest::Error::without_url.
+    const TOKEN: &str = "123456:SUPERSECRETBOTTOKEN";
+    let err = TelegramNotifier::new("tg", Secret::new(TOKEN), "42", freshdock::http::client())
+        .with_base_url("http://127.0.0.1:1")
+        .send(&succeeded().render())
+        .await
+        .expect_err("connect to a closed port must fail");
+    let shown = format!("{err}");
+    assert!(
+        !shown.contains("SUPERSECRETBOTTOKEN"),
+        "token leaked into the error: {shown}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_hits_each_subscribed_target_once_and_skips_others() {
     let fail_a = MockServer::start().await;
     let fail_b = MockServer::start().await;

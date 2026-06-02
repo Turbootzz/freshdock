@@ -556,4 +556,31 @@ mod tests {
         assert_eq!(ok_calls.load(Ordering::SeqCst), 1);
         assert_eq!(seen_ok.lock().unwrap().len(), 1);
     }
+
+    #[test]
+    fn omitted_triggers_subscribe_to_all_three() {
+        assert_eq!(parse_triggers("x", None).unwrap(), Trigger::all());
+    }
+
+    #[test]
+    fn empty_triggers_list_subscribes_to_nothing() {
+        // `triggers = []` is a valid "disable this target" — distinct from
+        // omitting the key (which subscribes to all).
+        assert!(parse_triggers("x", Some(vec![])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn from_config_rejects_an_unknown_trigger() {
+        use crate::config::{NotificationConfig, NotificationTarget, Secret};
+        let mut targets = std::collections::HashMap::new();
+        targets.insert(
+            "hook".to_string(),
+            NotificationTarget::Webhook {
+                url: Secret::new("https://example.com"),
+                triggers: Some(vec!["bogus".to_string()]),
+            },
+        );
+        let result = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
+        assert!(matches!(result, Err(NotifyError::Config { .. })));
+    }
 }

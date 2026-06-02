@@ -175,4 +175,32 @@ mod tests {
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
     }
+
+    #[test]
+    fn new_rejects_one_bad_recipient_among_valid_ones() {
+        let result = SmtpNotifier::new(SmtpParams {
+            name: "email".into(),
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: None,
+            password: None,
+            from: "freshdock@example.com".into(),
+            to: vec!["ok@example.com".into(), "not-an-email".into()],
+            starttls: true,
+        });
+        assert!(matches!(result, Err(NotifyError::Config { .. })));
+    }
+
+    #[test]
+    fn build_message_lists_every_recipient() {
+        let from: Mailbox = "freshdock@example.com".parse().unwrap();
+        let to: Vec<Mailbox> = vec![
+            "a@example.com".parse().unwrap(),
+            "b@example.com".parse().unwrap(),
+        ];
+        let raw =
+            String::from_utf8(build_message(&from, &to, &rendered()).unwrap().formatted()).unwrap();
+        assert!(raw.contains("a@example.com"));
+        assert!(raw.contains("b@example.com"));
+    }
 }
