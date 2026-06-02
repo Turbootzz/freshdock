@@ -217,6 +217,14 @@ async fn run_tick<D, R>(
     let mut live: HashSet<String> = HashSet::new();
 
     for c in &containers {
+        // Decline new work once shutdown is signalled; the previous container
+        // (if any) already finished, so this is the clean "finish in-flight,
+        // stop" point. Return without pruning — the daemon is exiting, and a
+        // partial pass would drop unvisited containers' schedule state.
+        if *shutdown.borrow() {
+            return;
+        }
+
         let name = container_name(c);
         if is_archive_name(&name) {
             continue;
@@ -232,12 +240,6 @@ async fn run_tick<D, R>(
             continue;
         }
         live.insert(name.clone());
-
-        // Shutdown declines new work; the current container (if any) already
-        // finished above, so this is the clean "finish in-flight, stop" point.
-        if *shutdown.borrow() {
-            break;
-        }
 
         let state = states
             .entry(name.clone())
@@ -832,5 +834,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(node.creates(), 0, "a pre-set shutdown processes nothing");
+    }
+
+    #[tokio::test]
+    async fn cron_container_fires_at_its_window_then_advances_without_refiring() {
+        let node = FakeNode::new(
+            vec![summary(
+                "nightly",
+                "alpine:3.19",
+                &[("freshdock.enable", "true"), ("freshdock.mode", "nightly")],
+            )],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B); // upstream differs → would recreate
+        let (_tx, rx) = watch::channel(false);
+        let mut states = HashMap::new();
+
+        // An injectable wall clock so we can step across the 04:00 window.
+        let clock = std::cell::Cell::new(Local.with_ymd_and_hms(2026, 6, 2, 3, 59, 0).unwrap());
+        let now_fn = || clock.get();
+
+        // 03:59 seeds the container (default `0 4 * * *`) → not yet due.
+        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        assert_eq!(node.creates(), 0, "not due before the window");
+
+        // 04:00 → due → recreate, and next_fire advances to tomorrow.
+        clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 0, 0).unwrap());
+        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        assert_eq!(node.creates(), 1, "fires at the window");
+
+        // 04:01 → next_fire is tomorrow now, so it must not re-fire.
+        clock.set(Local.with_ymd_and_hms(2026, 6, 2, 4, 1, 0).unwrap());
+        run_tick(&node, &reg, &cfg(), &TokioClock, &now_fn, &mut states, &rx).await;
+        assert_eq!(node.creates(), 1, "does not re-fire after firing");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_with_breaks_promptly_on_a_mid_park_shutdown_signal() {
+        // No containers → ticks are cheap; a long tick proves the loop wakes on
+        // the signal itself, not by waiting out the interval.
+        let node = FakeNode::new(vec![], DIG_A);
+        let reg = FakeRegistry::new(DIG_A);
+        let (tx, rx) = watch::channel(false);
+        let big_cfg = SchedulerConfig {
+            poll_interval: Duration::from_secs(3600),
+            tick: Duration::from_secs(3600),
+            health: HealthConfig::default(),
+        };
+
+        let handle =
+            tokio::spawn(
+                async move { run_with(&node, &reg, &big_cfg, &TokioClock, now, rx).await },
+            );
+
+        // Let the first immediate tick run and the loop park on `select!`.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tx.send(true).unwrap();
+
+        // Must return well within the 3600 s tick interval.
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("run_with returns promptly after the signal")
+            .expect("scheduler task joins")
+            .expect("run_with ok");
     }
 }

@@ -72,8 +72,9 @@ pub async fn probe_image(
     }
 }
 
-/// Is this reference pinned to an immutable digest (`sha256:<id>` directly, or
-/// `repo@sha256:<id>`)?
+/// Is this reference pinned to an immutable digest? Either a bare `sha256:<id>`
+/// or any `name@<algo>:<hex>` form — `@` only appears in a Docker reference as
+/// the digest separator.
 pub(crate) fn is_pinned(image: &str) -> bool {
     image.starts_with("sha256:") || image.contains('@')
 }
