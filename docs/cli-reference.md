@@ -31,7 +31,8 @@ freshdock check
 
 Read-only. Lists every opted-in container (`freshdock.enable=true`), resolves the
 latest digest **once per unique image** (deduped to conserve Docker Hub's anonymous
-rate budget of 100 requests / 6 h), and prints a status table. It **never** pulls,
+budget of 100 pulls / 6 h — manifest fetches count as pulls), and prints a status
+table. It **never** pulls,
 stops, or recreates anything.
 
 The table has six columns: `container`, `image`, `mode`, `current digest`,
