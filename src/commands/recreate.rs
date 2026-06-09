@@ -4,12 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use crate::config::CredentialStore;
+use crate::config::{CredentialStore, ResolvedSettings};
 use crate::docker::Docker;
-use crate::docker::recreate::{DockerOps, recreate_with_health};
+use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe, TokioClock};
-use crate::labels::{self, Mode};
+use crate::labels::{self, Mode, PolicyDefaults};
 use crate::updater::RecreateOutcome;
 
 /// Recreate a single container by name, health-gated: inspect → pull → stop →
@@ -32,13 +32,19 @@ use crate::updater::RecreateOutcome;
 ///
 /// Thin entry: wires the live daemon + default health timing, delegates to the
 /// testable [`run_with`].
-pub async fn run(name: String, credentials: Arc<CredentialStore>) -> Result<(), AppError> {
+pub async fn run(
+    name: String,
+    credentials: Arc<CredentialStore>,
+    settings: ResolvedSettings,
+) -> Result<(), AppError> {
     let docker = Docker::connect(credentials)?;
     run_with(
         &docker,
         &name,
         &HealthConfig::default(),
         &TokioClock,
+        settings.policy_defaults(),
+        settings.prune_dangling,
         current_unix_timestamp,
     )
     .await
@@ -46,18 +52,22 @@ pub async fn run(name: String, credentials: Arc<CredentialStore>) -> Result<(), 
 
 /// Testable core of `recreate`: parameterised over the daemon ops, health
 /// timing, clock, and timestamp source so unit tests can exercise the policy
-/// gate without a live socket.
+/// gate without a live socket. `defaults`/`prune_dangling` come from
+/// `[settings]`; the per-container `freshdock.cleanup` label still wins.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with(
     docker: &(impl DockerOps + HealthProbe),
     name: &str,
     health: &HealthConfig,
     clock: &impl Clock,
+    defaults: PolicyDefaults,
+    prune_dangling: bool,
     ts_provider: impl Fn() -> i64,
 ) -> Result<(), AppError> {
     let spec = docker.inspect(name).await?;
 
     let empty: HashMap<String, String> = HashMap::new();
-    let policy = labels::parse_policy(spec.config.labels.as_ref().unwrap_or(&empty), None)?;
+    let policy = labels::parse_policy(spec.config.labels.as_ref().unwrap_or(&empty), defaults)?;
     if !policy.enabled || policy.mode == Mode::Off {
         warn!(
             container = %name,
@@ -70,7 +80,11 @@ pub async fn run_with(
         return Ok(());
     }
 
-    let outcome = recreate_with_health(docker, name, health, clock, ts_provider).await?;
+    let cleanup = Cleanup {
+        remove_replaced: policy.cleanup,
+        prune_dangling,
+    };
+    let outcome = recreate_with_health(docker, name, health, clock, cleanup, ts_provider).await?;
     // Exhaustive match (no wildcard) on purpose: a new `RecreateOutcome`
     // variant forces this site to decide what to print.
     match outcome {
@@ -148,6 +162,7 @@ mod tests {
             Ok(ContainerSpec {
                 name: name.to_owned(),
                 image_ref: "nginx:alpine".to_owned(),
+                image_id: None,
                 config: ContainerConfig {
                     labels: self.labels.clone(),
                     ..Default::default()
@@ -187,6 +202,12 @@ mod tests {
         async fn rename_to(&self, _from: &str, _to: &str) -> Result<(), DockerError> {
             panic!("policy gate must refuse before rename_to");
         }
+        async fn remove_image(&self, _id: &str, _force: bool) -> Result<(), DockerError> {
+            panic!("policy gate must refuse before remove_image");
+        }
+        async fn prune_dangling_images(&self) -> Result<(), DockerError> {
+            panic!("policy gate must refuse before prune_dangling_images");
+        }
     }
 
     #[async_trait]
@@ -197,9 +218,17 @@ mod tests {
     }
 
     async fn assert_refused(ops: GateOps) {
-        run_with(&ops, "c", &HealthConfig::default(), &TokioClock, || 0)
-            .await
-            .expect("a refused recreate is a graceful no-op, not an error");
+        run_with(
+            &ops,
+            "c",
+            &HealthConfig::default(),
+            &TokioClock,
+            PolicyDefaults::default(),
+            false,
+            || 0,
+        )
+        .await
+        .expect("a refused recreate is a graceful no-op, not an error");
     }
 
     #[tokio::test]

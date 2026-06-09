@@ -18,6 +18,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tracing::warn;
 
+use crate::labels::{Mode, PolicyDefaults};
+
 /// A credential value (password / personal access token) that must never appear
 /// in logs. `Debug` prints `Secret("[REDACTED]")`; there is deliberately no
 /// `Display` impl, so `tracing`'s `%field` can't stringify it and `?field` goes
@@ -54,14 +56,80 @@ pub struct RegistryCredentials {
     pub token: Secret,
 }
 
-/// The parsed `freshdock.toml`: registry credentials (Phase 5) and notification
-/// targets (Phase 6). Global poll-interval defaults land in a later phase.
+/// The parsed `freshdock.toml`: registry credentials (Phase 5), notification
+/// targets (Phase 6), and fleet-wide `[settings]` defaults.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub registry: HashMap<String, RegistryCredentials>,
     #[serde(default)]
     pub notifications: HashMap<String, NotificationTarget>,
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+/// The `[settings]` table: fleet-wide defaults a container can override with a
+/// `freshdock.*` label. Kept as raw strings here; [`Config::load`] validates
+/// them into [`ResolvedSettings`] so a bad value warns instead of aborting.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Settings {
+    /// Mode for an enabled container with no `freshdock.mode` label. An
+    /// unrecognised value is warned about and ignored (falls back to `watch`).
+    #[serde(default)]
+    pub default_mode: Option<String>,
+    /// Default for the per-container `freshdock.cleanup` toggle: remove the
+    /// superseded image after a healthy update. Off by default (PLAN §5.2).
+    #[serde(default)]
+    pub cleanup: bool,
+    /// Additionally run a daemon-wide dangling-image prune after a successful
+    /// update. Daemon-wide, so global-only (no per-container override).
+    #[serde(default)]
+    pub prune_dangling: bool,
+}
+
+/// Validated [`Settings`], ready for the commands. `Copy` so it threads cheaply
+/// through the scheduler chain alongside the other borrowed config.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResolvedSettings {
+    pub default_mode: Option<Mode>,
+    pub cleanup: bool,
+    pub prune_dangling: bool,
+}
+
+impl ResolvedSettings {
+    /// The label-parsing defaults this implies (mode + cleanup). `prune_dangling`
+    /// is not a label concept, so it is not part of [`PolicyDefaults`].
+    pub fn policy_defaults(&self) -> PolicyDefaults {
+        PolicyDefaults {
+            mode: self.default_mode,
+            cleanup: self.cleanup,
+        }
+    }
+}
+
+/// Validate the raw `[settings]` table. An invalid `default_mode` is a warning,
+/// not a hard error — mirrors the resilient env-overlay handling so one typo
+/// can't stop the daemon from starting.
+fn resolve_settings(settings: Settings) -> ResolvedSettings {
+    let default_mode = match settings.default_mode.as_deref() {
+        None => None,
+        Some(raw) => match raw.parse::<Mode>() {
+            Ok(mode) => Some(mode),
+            Err(_) => {
+                warn!(
+                    value = %raw,
+                    "ignoring invalid [settings] default_mode (expected one of \
+                     live, nightly, weekly, monthly, watch, off); falling back to watch"
+                );
+                None
+            }
+        },
+    };
+    ResolvedSettings {
+        default_mode,
+        cleanup: settings.cleanup,
+        prune_dangling: settings.prune_dangling,
+    }
 }
 
 /// One `[notifications.<name>]` table. The `type` field selects the backend; an
@@ -126,6 +194,7 @@ pub struct NotificationConfig {
 pub struct LoadedConfig {
     pub credentials: Arc<CredentialStore>,
     pub notifications: NotificationConfig,
+    pub settings: ResolvedSettings,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -191,14 +260,16 @@ impl Config {
                 }
             }
         };
-        // Take notifications out before `build_store` consumes the rest; both
-        // overlay the same process env (read twice — `vars()` is cheap).
+        // Take notifications + settings out before `build_store` consumes the
+        // rest; both env overlays read the same process env (`vars()` is cheap).
         let notifications =
             build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
+        let settings = resolve_settings(std::mem::take(&mut config.settings));
         let credentials = Arc::new(build_store(config, std::env::vars()));
         Ok(LoadedConfig {
             credentials,
             notifications,
+            settings,
         })
     }
 
@@ -654,5 +725,48 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // --- [settings] table ---
+
+    #[test]
+    fn settings_table_parses_and_resolves() {
+        let cfg = Config::from_toml(
+            r#"
+            [settings]
+            default_mode = "nightly"
+            cleanup = true
+            prune_dangling = true
+            "#,
+        )
+        .unwrap();
+        let resolved = resolve_settings(cfg.settings);
+        assert_eq!(resolved.default_mode, Some(Mode::Nightly));
+        assert!(resolved.cleanup);
+        assert!(resolved.prune_dangling);
+        assert_eq!(
+            resolved.policy_defaults().mode,
+            Some(Mode::Nightly),
+            "policy_defaults forwards the resolved mode"
+        );
+        assert!(resolved.policy_defaults().cleanup);
+    }
+
+    #[test]
+    fn missing_settings_table_yields_all_defaults() {
+        let cfg = Config::from_toml("[registry.ghcr]\ntoken = \"t\"\n").unwrap();
+        let resolved = resolve_settings(cfg.settings);
+        assert_eq!(resolved.default_mode, None);
+        assert!(!resolved.cleanup);
+        assert!(!resolved.prune_dangling);
+    }
+
+    #[test]
+    fn invalid_default_mode_is_ignored_not_an_error() {
+        // A bad mode must not abort load — it warns and falls back to None
+        // (which downstream resolves to `watch`).
+        let cfg = Config::from_toml("[settings]\ndefault_mode = \"hourly\"\n").unwrap();
+        let resolved = resolve_settings(cfg.settings);
+        assert_eq!(resolved.default_mode, None);
     }
 }

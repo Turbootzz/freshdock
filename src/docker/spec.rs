@@ -16,6 +16,12 @@ pub enum SpecError {
 pub struct ContainerSpec {
     pub name: String,
     pub image_ref: String,
+    /// Resolved local image **ID** (`ContainerInspectResponse.image`) the
+    /// container was created from — the handle image cleanup removes. Captured
+    /// at the pre-pull inspect so it is the *superseded* image even if the pull
+    /// retags an unchanged `:latest`. `None` for a container with no resolved
+    /// image (cleanup then no-ops).
+    pub image_id: Option<String>,
     pub config: ContainerConfig,
     pub host_config: Option<HostConfig>,
     pub network_endpoints: Option<HashMap<String, EndpointSettings>>,
@@ -41,6 +47,7 @@ impl ContainerSpec {
         Ok(Self {
             name,
             image_ref,
+            image_id: resp.image,
             config,
             host_config: resp.host_config,
             network_endpoints,

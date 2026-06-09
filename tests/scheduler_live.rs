@@ -182,6 +182,7 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
             Local::now,
             rx,
             &freshdock::notify::Dispatcher::noop(),
+            freshdock::config::ResolvedSettings::default(),
         )
         .await
         .expect("scheduler run");

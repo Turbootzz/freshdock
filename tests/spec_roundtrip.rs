@@ -32,6 +32,11 @@ fn captures_identity_and_image_from_inspect() {
         spec.image_ref, "nginx:alpine",
         "image_ref should come from Config.Image (the original ref), not the resolved digest in Image"
     );
+    assert_eq!(
+        spec.image_id.as_deref(),
+        Some("sha256:1111111111111111111111111111111111111111111111111111111111111111"),
+        "image_id should capture the top-level resolved Image ID — the handle cleanup removes"
+    );
 }
 
 #[test]

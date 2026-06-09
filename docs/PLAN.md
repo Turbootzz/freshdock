@@ -116,7 +116,7 @@ For each eligible container, on each scheduled tick:
    5. Create new container with captured config + new image.
    6. Start new container.
    7. Wait for healthcheck to become `healthy` (or grace period if no check).
-   8. On success: remove `-old-` container, optionally prune old image (configurable, off by default).
+   8. On success: remove `-old-` container, optionally prune old image (configurable, off by default). *Implemented: `[settings] cleanup` / per-container `freshdock.cleanup` removes the replaced image; `[settings] prune_dangling` adds a daemon-wide dangling prune.*
    9. On failure: stop and remove new container, rename `-old-` back, restart it. Send failure notification.
 
 ### 5.3 Scheduling

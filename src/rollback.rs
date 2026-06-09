@@ -170,6 +170,14 @@ mod tests {
                 .push(format!("rename_to:{from}->{to}"));
             Ok(())
         }
+        async fn remove_image(&self, _id: &str, _force: bool) -> Result<(), DockerError> {
+            unreachable!(
+                "rollback must never remove an image — the restored container still needs it"
+            )
+        }
+        async fn prune_dangling_images(&self) -> Result<(), DockerError> {
+            unreachable!("rollback never prunes images")
+        }
     }
 
     #[tokio::test]

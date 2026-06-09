@@ -5,12 +5,12 @@ use comfy_table::Table;
 use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
 
-use crate::config::CredentialStore;
+use crate::config::{CredentialStore, ResolvedSettings};
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
 use crate::format::short_digest;
-use crate::labels::{self, Mode};
+use crate::labels::{self, Mode, PolicyDefaults};
 use crate::probe::{self, ProbeOutcome, pinned_digest};
 use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
@@ -26,10 +26,14 @@ const PINNED: &str = "pinned (no check)";
 /// issue #7's acceptance criteria. Errors that prevent the table from
 /// rendering at all (e.g. cannot reach the Docker socket) propagate up.
 ///
-pub async fn run(no_color: bool, store: Arc<CredentialStore>) -> Result<(), AppError> {
+pub async fn run(
+    no_color: bool,
+    store: Arc<CredentialStore>,
+    settings: ResolvedSettings,
+) -> Result<(), AppError> {
     let docker = Docker::connect(store.clone())?;
     let registry = OciRegistry::new(store);
-    let cells = collect_cells(&docker, &registry).await?;
+    let cells = collect_cells(&docker, &registry, settings.policy_defaults()).await?;
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));
@@ -46,6 +50,7 @@ pub async fn run(no_color: bool, store: Arc<CredentialStore>) -> Result<(), AppE
 async fn collect_cells(
     docker: &impl DockerCheck,
     registry: &impl Registry,
+    defaults: PolicyDefaults,
 ) -> Result<Vec<[String; 6]>, AppError> {
     let containers = docker.list_running().await?;
 
@@ -54,7 +59,7 @@ async fn collect_cells(
     let mut rows: Vec<RowPrep> = Vec::new();
     for c in containers {
         let lbls = c.labels.as_ref().unwrap_or(&empty);
-        let policy = labels::parse_policy(lbls, None)?;
+        let policy = labels::parse_policy(lbls, defaults)?;
         if !policy.enabled {
             continue;
         }
@@ -311,7 +316,9 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry).await.unwrap();
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0][0], "web");
         assert_eq!(
@@ -333,7 +340,9 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_B);
 
-        let cells = collect_cells(&docker, &registry).await.unwrap();
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
         assert_eq!(
             cells[0][5], "yes",
             "differing digests must report an update"
@@ -357,7 +366,9 @@ mod tests {
         );
         let registry = FakeRegistry::auth_required();
 
-        let cells = collect_cells(&docker, &registry).await.unwrap();
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
         assert_eq!(cells[0][4], AUTH_REQUIRED);
         assert_eq!(cells[0][5], "-");
         assert_eq!(
@@ -378,9 +389,41 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry).await.unwrap();
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
         assert_eq!(cells.len(), 1, "only the opted-in container gets a row");
         assert_eq!(cells[0][0], "on");
+    }
+
+    #[tokio::test]
+    async fn global_default_mode_applies_when_container_omits_mode_label() {
+        // enable=true with no freshdock.mode: the [settings] default_mode wins
+        // over the built-in `watch` fallback.
+        let docker = FakeDocker::new(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[("freshdock.enable", "true")],
+            )],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(
+            &docker,
+            &registry,
+            PolicyDefaults {
+                mode: Some(Mode::Live),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cells[0][2], "live",
+            "the global default_mode applies when no freshdock.mode label is set"
+        );
     }
 
     #[tokio::test]
@@ -394,7 +437,9 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry).await.unwrap();
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
         assert_eq!(cells.len(), 2, "both containers still get their own row");
         assert_eq!(
             registry.calls.load(Ordering::SeqCst),

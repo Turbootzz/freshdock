@@ -68,10 +68,11 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var_os("FRESHDOCK_CONFIG").map(PathBuf::from));
     let config = Config::load(config_path.as_deref())?;
     let credentials = config.credentials;
+    let settings = config.settings;
 
     match cli.cmd {
-        Cmd::Check => commands::check::run(cli.no_color, credentials).await?,
-        Cmd::Recreate { name } => commands::recreate::run(name, credentials).await?,
+        Cmd::Check => commands::check::run(cli.no_color, credentials, settings).await?,
+        Cmd::Recreate { name } => commands::recreate::run(name, credentials, settings).await?,
         Cmd::Run {
             interval,
             tick,
@@ -83,6 +84,7 @@ async fn main() -> Result<()> {
                 stop_timeout,
                 credentials,
                 config.notifications,
+                settings,
             )
             .await?
         }
