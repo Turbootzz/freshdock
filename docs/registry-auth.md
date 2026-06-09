@@ -1,48 +1,46 @@
-# Registry authentication (Phase 5)
+# Registry authentication
 
 freshdock checks digests against any OCI-compliant registry that uses the Docker
 registry v2 bearer-token flow — Docker Hub, GHCR, Quay.io, lscr.io, and others.
 Public images resolve anonymously; private images need credentials.
 
-## Configuring credentials
+> **Syntax lives in one place.** The exact `[registry.<name>]` table and the
+> `FRESHDOCK_REGISTRY_*` environment variables are documented in the
+> [configuration reference](configuration.md#registryname). This page covers the
+> registry-specific *guidance* — what credentials each registry wants, the alias
+> list, a smoke test, and what's out of scope.
 
-Credentials live in `freshdock.toml` (default: `./freshdock.toml`, or set
-`--config <path>` / `FRESHDOCK_CONFIG`). One table per registry:
+## Per-registry notes
 
-```toml
-[registry.dockerhub]
-username = "myuser"      # required for Docker Hub
-token    = "dckr_pat_…"  # password or personal access token
+| Registry | `username` | `token` |
+|---|---|---|
+| Docker Hub | the real account name (required) | password or access token |
+| GHCR (`ghcr.io`) | any non-empty value | a PAT with `read:packages` |
+| Quay.io | optional | robot-account token / password |
+| lscr.io | optional | as the registry requires |
+| Other OCI + bearer | as the registry requires | as the registry requires |
 
-[registry.ghcr]
-username = "myuser"      # any non-empty value works for a GHCR PAT
-token    = "ghp_…"
+Anonymous Docker Hub is rate-limited (≈100 requests / 6 h); adding credentials
+raises the budget. freshdock dedupes to one request per unique image to stay well
+under it.
 
-[registry.quay]
-token    = "…"           # username optional
+## Aliases
 
-# A literal host also works as the table key:
-[registry."registry.example.com"]
-username = "svc"
-token    = "…"
-```
+A `[registry.<name>]` table key — and the `<NAME>` in the env-var form — may be a
+friendly alias or a literal host; both fold onto the same registry as the matching
+image reference:
 
-The table key may be a friendly alias (`dockerhub`, `ghcr`, `quay`, `lscr`) or a
-registry host; both fold onto the same registry as the matching image reference.
+| Alias | Registry |
+|---|---|
+| `dockerhub`, `docker`, `docker.io`, `registry-1.docker.io`, `index.docker.io` | `docker.io` |
+| `ghcr` | `ghcr.io` |
+| `quay` | `quay.io` |
+| `lscr` | `lscr.io` |
 
-## Environment overrides
-
-Environment variables override the file **per field** (a lone `…_TOKEN` replaces
-the file token while keeping the file username):
-
-```text
-FRESHDOCK_REGISTRY_<NAME>_USERNAME
-FRESHDOCK_REGISTRY_<NAME>_TOKEN
-```
-
-`<NAME>` is `DOCKERHUB`, `GHCR`, `QUAY`, `LSCR` (the friendly aliases). Hosts
-containing dots can't be expressed as an env name unambiguously — configure
-those in the file. Tokens never appear in logs, even at `RUST_LOG=trace`.
+A literal host (`"registry.example.com"`) works as a table key too. Hosts
+containing dots can't be expressed unambiguously as an environment variable name —
+configure those in the file. Tokens never appear in logs, even at
+`RUST_LOG=trace`.
 
 ## Manual PAT smoke test
 
@@ -65,6 +63,8 @@ is just an extra end-to-end check.
 
 ## Out of scope (v1)
 
-ECR / GCR / ACR / Harbor custom auth schemes; insecure (plain-HTTP) and
-`localhost:port` registries; reusing `~/.docker/config.json`. Rate-limit headers
-are logged but freshdock does not yet throttle proactively.
+ECR / GCR / ACR / Harbor custom auth schemes; insecure (plain-HTTP) registries —
+freshdock always talks HTTPS, so a registry reachable only over plain HTTP (the
+common case for a `localhost:5000` dev registry) won't work; and reusing
+`~/.docker/config.json`. Rate-limit headers are logged but freshdock does not yet
+throttle proactively.

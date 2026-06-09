@@ -1,13 +1,20 @@
 [package]
 name = "freshdock"
-version = "0.0.1"
+version = "1.0.0-rc.1"
 edition = "2024"
-description = "A modern Rust-based Docker container auto-updater. Successor to Watchtower with health-gated rollback. Work in progress — placeholder release."
+rust-version = "1.95.0"
+authors = ["Turbootzz <thijs@bendy.nl>"]
+description = "A modern Rust-based Docker container auto-updater: a maintained, health-gated, single-binary successor to Watchtower."
 license = "Apache-2.0"
 repository = "https://github.com/Turbootzz/freshdock"
+homepage = "https://github.com/Turbootzz/freshdock"
+documentation = "https://docs.rs/freshdock"
 readme = "README.md"
 keywords = ["docker", "container", "watchtower", "auto-update", "devops"]
 categories = ["command-line-utilities", "development-tools"]
+# Keep the published crate to code + README/LICENSE; repo guides and CI plumbing
+# add weight without helping a `cargo install`.
+exclude = [".github/", "docs/", "examples/", "RELEASE.md", "RELEASE_NOTES.md"]
 
 [dependencies]
 bollard = "0.21"

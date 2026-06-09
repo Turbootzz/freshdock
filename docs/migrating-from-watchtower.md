@@ -33,7 +33,7 @@ ask for it with a mode like `live` or `nightly`.
 | `--cleanup` / `WATCHTOWER_CLEANUP` | `[settings] cleanup = true` (or `freshdock.cleanup=true` per container) | Off by default. Removes the *replaced image* after a healthy update; add `[settings] prune_dangling = true` for a daemon-wide dangling prune. The replaced container archive is always removed regardless. |
 | `--remove-volumes` / `WATCHTOWER_REMOVE_VOLUMES` | *(no equivalent)* | freshdock never removes volumes; recreate preserves all mounts. |
 | `--rolling-restart` / `WATCHTOWER_ROLLING_RESTART` | *(not applicable)* | freshdock recreates one container at a time and health-gates each. |
-| `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | `[notifications.<name>]` tables in `freshdock.toml` | Webhook / Discord / Telegram / SMTP. See [the README](../README.md#notifications). |
+| `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | `[notifications.<name>]` tables in `freshdock.toml` | Webhook / Discord / Telegram / SMTP. See [notifications](notifications.md). |
 | `WATCHTOWER_NOTIFICATIONS_LEVEL` / per-event config | per-target `triggers = ["available","succeeded","failed"]` | Subscribe each target to the events it cares about. |
 | `REPO_USER` / `REPO_PASS` (registry auth) | `[registry.<name>]` table or `FRESHDOCK_REGISTRY_*` env | Per-registry credentials. |
 | `DOCKER_HOST` | `DOCKER_HOST` | Same — bollard honours the standard Docker env. |

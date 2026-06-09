@@ -1,0 +1,43 @@
+# Changelog
+
+All notable changes to freshdock are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.0-rc.1] - 2026-06-09
+
+First release candidate. Closes Phases 0–7 of the [roadmap](docs/PLAN.md); the
+final `1.0.0` tag follows a community beta (see [RELEASE.md](RELEASE.md)).
+
+### Added
+- `freshdock check` — read-only update-status table. Lists opted-in containers,
+  resolves the latest registry digest per unique image (deduped to respect Docker
+  Hub's anonymous rate budget), and reports which have updates. Never mutates state.
+- `freshdock recreate <name>` — manual single-container update: inspect → pull →
+  stop → rename → create → start, health-gated with automatic rollback on failure.
+- `freshdock run` — scheduler daemon polling opted-in containers on their per-mode
+  cadence (`--interval`, `--tick`, `--stop-timeout`); graceful SIGINT/SIGTERM drain.
+- Per-container update modes via Docker labels: `live`, `nightly`, `weekly`,
+  `monthly`, `watch`, `off`. Opt-in by default (`freshdock.enable=true`).
+- Per-container cron override (`freshdock.schedule`) with a hand-rolled 5-field
+  parser; calendar modes evaluated in system local time with DST-gap handling.
+- Health-gated rollback: a new container must pass its healthcheck (or a grace
+  period) before the old one is removed; otherwise it is restored.
+- Multi-registry digest checks: Docker Hub (anonymous + authenticated), GHCR,
+  Quay.io, lscr.io, and any OCI bearer-token registry. Per-registry credentials
+  via `[registry.<name>]` tables or `FRESHDOCK_REGISTRY_*` env overrides.
+- Notifications: webhook, Discord, Telegram, and SMTP backends, each subscribable
+  to a subset of the `available` / `succeeded` / `failed` triggers.
+- Image cleanup: remove the superseded image after a healthy update
+  (`[settings] cleanup` / `freshdock.cleanup`); optional daemon-wide dangling
+  prune (`[settings] prune_dangling`).
+- Global default mode (`[settings] default_mode`) for enabled containers with no
+  explicit `freshdock.mode` label.
+- Multi-arch container image (amd64, arm64, armv7) on GHCR and static-musl release
+  binaries for the same three architectures.
+
+[Unreleased]: https://github.com/Turbootzz/freshdock/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/Turbootzz/freshdock/releases/tag/v1.0.0-rc.1
