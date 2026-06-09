@@ -11,7 +11,7 @@ use chrono::Local;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{CredentialStore, NotificationConfig};
+use crate::config::{CredentialStore, NotificationConfig, ResolvedSettings};
 use crate::docker::Docker;
 use crate::errors::AppError;
 use crate::health::{HealthConfig, TokioClock};
@@ -19,12 +19,14 @@ use crate::notify::Dispatcher;
 use crate::registry::digest::OciRegistry;
 use crate::scheduler::{self, SchedulerConfig};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     interval: u64,
     tick: u64,
     stop_timeout: u64,
     credentials: Arc<CredentialStore>,
     notifications: NotificationConfig,
+    settings: ResolvedSettings,
 ) -> Result<(), AppError> {
     let docker = Docker::connect(credentials.clone())?;
     let registry = OciRegistry::new(credentials);
@@ -56,7 +58,7 @@ pub async fn run(
     // drain so a hung recreate can't block shutdown indefinitely.
     let stop_timeout = Duration::from_secs(stop_timeout);
     tokio::select! {
-        res = scheduler::run_with(&docker, &registry, &cfg, &TokioClock, Local::now, rx, &dispatcher) => res,
+        res = scheduler::run_with(&docker, &registry, &cfg, &TokioClock, Local::now, rx, &dispatcher, settings) => res,
         _ = async {
             let _ = deadline_rx.wait_for(|v| *v).await;
             tokio::time::sleep(stop_timeout).await;

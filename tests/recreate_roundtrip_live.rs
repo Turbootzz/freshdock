@@ -424,9 +424,18 @@ async fn recreate_with_health_removes_archive_on_live_success() {
 
     let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
         .expect("freshdock docker connect");
-    let outcome = recreate_with_health(&fd, &name, &HealthConfig::default(), &TokioClock, now_unix)
-        .await
-        .expect("recreate_with_health against live daemon");
+    // `Cleanup::default()` is fully qualified: this file has a local `Cleanup`
+    // (a test Drop-guard) that would otherwise shadow the recreate type.
+    let outcome = recreate_with_health(
+        &fd,
+        &name,
+        &HealthConfig::default(),
+        &TokioClock,
+        freshdock::docker::recreate::Cleanup::default(),
+        now_unix,
+    )
+    .await
+    .expect("recreate_with_health against live daemon");
 
     let old_name = match outcome {
         RecreateOutcome::Recreated { old_name, .. } => old_name,

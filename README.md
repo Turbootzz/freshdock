@@ -160,9 +160,24 @@ Per-container behaviour is driven entirely by Docker labels. freshdock is
 | `freshdock.mode` | `live` / `nightly` / `weekly` / `monthly` / `watch` / `off` | `watch` | Update mode (see [Update modes](#update-modes-per-container-via-docker-labels)). `watch` notifies only — it never pulls. |
 | `freshdock.schedule` | 5-field cron | mode default | Override the cron for a calendar mode. Ignored for `live`/`watch`/`off`. |
 | `freshdock.notify` | `true` / `false` | `false` | Send notifications for this container's update events. Requires a configured `[notifications.*]` target. |
+| `freshdock.cleanup` | `true` / `false` | `[settings] cleanup` (default `false`) | After a successful update, remove the image the *old* container ran. Overrides the global `[settings] cleanup`. |
 
 When `freshdock.enable=true` but no `freshdock.mode` is set, the mode is
 `watch` (detect-and-notify, never mutate) — an honest, non-destructive default.
+Change this fleet-wide fallback with `[settings] default_mode` (see
+[Configuration](#configuration-file-freshdocktoml)); a `freshdock.mode` label
+always wins over it.
+
+### Image cleanup
+
+A successful, health-passed update always removes the replaced **container**
+archive (`<name>-old-<ts>`). The superseded **image** is left in place by
+default. Opt into removing it with `[settings] cleanup = true` (or per container
+with `freshdock.cleanup=true`); add `[settings] prune_dangling = true` to also
+run a daemon-wide dangling-image prune after each successful update. Cleanup is
+best-effort: an image still used by another container is kept (the daemon refuses
+to remove it), and a cleanup failure never fails the update or triggers a
+rollback.
 
 ## Configuration file (`freshdock.toml`)
 
@@ -172,6 +187,15 @@ redacted in all log output and can be supplied via the environment instead of th
 file. Runnable stacks are in [`examples/compose/`](examples/compose/).
 
 ```toml
+# --- Fleet-wide defaults (all optional) -------------------------------------
+[settings]
+default_mode   = "watch"   # fallback mode for an enabled container with no
+                           # freshdock.mode label (default: watch). An invalid
+                           # value is warned about and ignored.
+cleanup        = false     # remove the replaced image after a healthy update;
+                           # per container via freshdock.cleanup
+prune_dangling = false     # additionally prune dangling images after a success
+
 # Registry credentials — keyed by registry alias or host. Env overrides:
 # FRESHDOCK_REGISTRY_<NAME>_USERNAME / _TOKEN.
 [registry.ghcr]

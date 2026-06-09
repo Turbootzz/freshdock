@@ -12,8 +12,9 @@ use bollard::models::{
     ContainerState, ContainerStateStatusEnum, ContainerSummary, HealthStatusEnum,
 };
 use bollard::query_parameters::{
-    CreateImageOptionsBuilder, ListContainersOptions, RemoveContainerOptionsBuilder,
-    RenameContainerOptionsBuilder, StopContainerOptionsBuilder,
+    CreateImageOptionsBuilder, ListContainersOptions, PruneImagesOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RenameContainerOptionsBuilder,
+    StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
 use tracing::debug;
@@ -231,6 +232,25 @@ impl DockerOps for Docker {
     async fn rename_to(&self, from: &str, to: &str) -> Result<(), DockerError> {
         debug!(from = %from, to = %to, "rename_to");
         self.rename_container_to(from, to).await
+    }
+
+    async fn remove_image(&self, id: &str, force: bool) -> Result<(), DockerError> {
+        debug!(image = %id, force, "remove_image");
+        // `force=false`: the daemon refuses (409) an image still referenced by
+        // another container — the caller treats that refusal as a guard, not a
+        // failure. `noprune` defaults false, so now-dangling parent layers are
+        // also dropped (the intent of "prune the old image").
+        let opts = RemoveImageOptionsBuilder::new().force(force).build();
+        self.0.remove_image(id, Some(opts), None).await?;
+        Ok(())
+    }
+
+    async fn prune_dangling_images(&self) -> Result<(), DockerError> {
+        debug!("prune_dangling_images");
+        let filters = std::collections::HashMap::from([("dangling", vec!["true"])]);
+        let opts = PruneImagesOptionsBuilder::new().filters(&filters).build();
+        self.0.prune_images(Some(opts)).await?;
+        Ok(())
     }
 }
 

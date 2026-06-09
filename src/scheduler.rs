@@ -23,9 +23,10 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
+use crate::config::ResolvedSettings;
 use crate::cron::CronExpr;
 use crate::docker::check::DockerCheck;
-use crate::docker::recreate::{DockerOps, recreate_with_health};
+use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe};
 use crate::labels::{self, Mode, Policy};
@@ -152,6 +153,7 @@ fn is_archive_name(name: &str) -> bool {
 /// Run the scheduler until `shutdown` flips to `true` (or its sender drops).
 /// Generic over the combined Docker trait surface + a [`Registry`], with an
 /// injected wall clock (`now_provider`) so cron evaluation is testable.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with<D, R>(
     docker: &D,
     registry: &R,
@@ -160,6 +162,7 @@ pub async fn run_with<D, R>(
     now_provider: impl Fn() -> DateTime<Local>,
     mut shutdown: watch::Receiver<bool>,
     dispatcher: &Dispatcher,
+    settings: ResolvedSettings,
 ) -> Result<(), AppError>
 where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
@@ -182,7 +185,7 @@ where
                 if *tick_shutdown.borrow() {
                     break;
                 }
-                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &tick_shutdown, dispatcher).await;
+                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &tick_shutdown, dispatcher, settings).await;
             }
             res = shutdown.changed() => {
                 if res.is_err() || *shutdown.borrow() {
@@ -208,6 +211,7 @@ async fn run_tick<D, R>(
     states: &mut HashMap<String, ContainerState>,
     shutdown: &watch::Receiver<bool>,
     dispatcher: &Dispatcher,
+    settings: ResolvedSettings,
 ) where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
@@ -237,7 +241,10 @@ async fn run_tick<D, R>(
         if is_archive_name(&name) {
             continue;
         }
-        let policy = match labels::parse_policy(c.labels.as_ref().unwrap_or(&empty), None) {
+        let policy = match labels::parse_policy(
+            c.labels.as_ref().unwrap_or(&empty),
+            settings.policy_defaults(),
+        ) {
             Ok(p) => p,
             Err(e) => {
                 warn!(container = %name, error = %e, "scheduler: invalid freshdock labels; skipping");
@@ -278,6 +285,7 @@ async fn run_tick<D, R>(
             image,
             dispatcher,
             &mut state.last_notified_digest,
+            settings.prune_dangling,
         )
         .await;
     }
@@ -299,6 +307,7 @@ async fn process_container<D, R>(
     image: &str,
     dispatcher: &Dispatcher,
     last_notified: &mut Option<String>,
+    prune_dangling: bool,
 ) where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
@@ -330,7 +339,18 @@ async fn process_container<D, R>(
                     }
                 }
                 Mode::Live | Mode::Nightly | Mode::Weekly | Mode::Monthly => {
-                    apply_update(docker, cfg, clock, now, name, policy, image, dispatcher).await;
+                    apply_update(
+                        docker,
+                        cfg,
+                        clock,
+                        now,
+                        name,
+                        policy,
+                        image,
+                        dispatcher,
+                        prune_dangling,
+                    )
+                    .await;
                 }
                 Mode::Off => {}
             }
@@ -362,11 +382,16 @@ async fn apply_update<D>(
     policy: &Policy,
     image: &str,
     dispatcher: &Dispatcher,
+    prune_dangling: bool,
 ) where
     D: DockerOps + HealthProbe + Sync,
 {
     let ts = now.timestamp();
-    match recreate_with_health(docker, name, &cfg.health, clock, || ts).await {
+    let cleanup = Cleanup {
+        remove_replaced: policy.cleanup,
+        prune_dangling,
+    };
+    match recreate_with_health(docker, name, &cfg.health, clock, cleanup, || ts).await {
         Ok(RecreateOutcome::Recreated { old_name, new_id }) => {
             info!(container = %name, archived = %old_name, %new_id, "scheduler: recreated");
             if policy.notify {
@@ -433,6 +458,7 @@ mod tests {
             mode,
             notify: false,
             schedule: schedule.map(str::to_owned),
+            cleanup: false,
         }
     }
 
@@ -606,6 +632,7 @@ mod tests {
             Ok(ContainerSpec {
                 name: name.to_owned(),
                 image_ref: "alpine:3.19".to_owned(),
+                image_id: Some("sha256:oldimg".to_owned()),
                 config: ContainerConfig::default(),
                 host_config: None,
                 network_endpoints: None,
@@ -641,6 +668,12 @@ mod tests {
             Ok(())
         }
         async fn rename_to(&self, _from: &str, _to: &str) -> Result<(), DockerError> {
+            Ok(())
+        }
+        async fn remove_image(&self, _id: &str, _force: bool) -> Result<(), DockerError> {
+            Ok(())
+        }
+        async fn prune_dangling_images(&self) -> Result<(), DockerError> {
             Ok(())
         }
     }
@@ -713,6 +746,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         states
@@ -732,6 +766,7 @@ mod tests {
             &mut states,
             &rx,
             dispatcher,
+            ResolvedSettings::default(),
         )
         .await;
     }
@@ -911,6 +946,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert!(states.contains_key("web"));
@@ -926,6 +962,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert!(
@@ -956,6 +993,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert_eq!(
@@ -985,6 +1023,7 @@ mod tests {
             now,
             rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await
         .unwrap();
@@ -1019,6 +1058,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert_eq!(node.creates(), 0, "not due before the window");
@@ -1034,6 +1074,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert_eq!(node.creates(), 1, "fires at the window");
@@ -1049,6 +1090,7 @@ mod tests {
             &mut states,
             &rx,
             &Dispatcher::noop(),
+            ResolvedSettings::default(),
         )
         .await;
         assert_eq!(node.creates(), 1, "does not re-fire after firing");
@@ -1076,6 +1118,7 @@ mod tests {
                 now,
                 rx,
                 &Dispatcher::noop(),
+                ResolvedSettings::default(),
             )
             .await
         });
@@ -1194,6 +1237,7 @@ mod tests {
             &mut states,
             &rx,
             &dispatcher,
+            ResolvedSettings::default(),
         )
         .await;
         // 10 min later → past the 5 min poll interval, so watch is due again;
@@ -1208,6 +1252,7 @@ mod tests {
             &mut states,
             &rx,
             &dispatcher,
+            ResolvedSettings::default(),
         )
         .await;
     }
