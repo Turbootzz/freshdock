@@ -164,12 +164,31 @@ pub async fn recreate_with_health(
 /// longer referenced by it). Every step is best-effort: a failure — notably a
 /// 409 from removing an image still used by another container, which is the
 /// desired guard — is logged and swallowed, never failing the completed update.
+/// A 409 from `remove_image` means another container still references the image
+/// — the intended guard against deleting a shared base, not a real failure. Any
+/// other error (network, daemon, not-found) is a genuine cleanup error.
+fn is_image_in_use(e: &DockerError) -> bool {
+    matches!(
+        e,
+        DockerError::Bollard(bollard::errors::Error::DockerResponseServerError {
+            status_code: 409,
+            ..
+        })
+    )
+}
+
 async fn run_cleanup(ops: &impl DockerOps, cleanup: Cleanup, old_image_id: Option<&str>) {
     if cleanup.remove_replaced {
         match old_image_id {
             Some(id) => {
                 if let Err(e) = ops.remove_image(id, false).await {
-                    warn!(image = %id, error = %e, "update applied but the superseded image was not removed (still in use or shared); leaving it in place");
+                    // Distinguish the expected "still in use" guard from a real
+                    // failure so the log reflects what actually happened.
+                    if is_image_in_use(&e) {
+                        warn!(image = %id, "superseded image still in use by another container; leaving it in place");
+                    } else {
+                        warn!(image = %id, error = %e, "failed to remove superseded image; leaving it in place");
+                    }
                 }
             }
             // No resolved image id (locally-built image, or the daemon omitted
@@ -206,6 +225,9 @@ mod tests {
         /// When set, `remove_image` errors — exercises the best-effort contract
         /// (a cleanup failure must not fail the update).
         image_remove_fails: bool,
+        /// When set, `prune_dangling_images` errors — same best-effort contract
+        /// for the prune path.
+        prune_fails: bool,
         /// When set, `inspect` reports no image id — exercises the safe-skip
         /// path (cleanup requested but nothing safe to target).
         omit_image_id: bool,
@@ -222,6 +244,13 @@ mod tests {
         fn with_failing_image_remove() -> Self {
             Self {
                 image_remove_fails: true,
+                ..Default::default()
+            }
+        }
+
+        fn with_failing_prune() -> Self {
+            Self {
+                prune_fails: true,
                 ..Default::default()
             }
         }
@@ -318,6 +347,11 @@ mod tests {
 
         async fn prune_dangling_images(&self) -> Result<(), DockerError> {
             self.record("prune_dangling_images".to_owned());
+            if self.prune_fails {
+                return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                    "prune",
+                )));
+            }
             Ok(())
         }
     }
@@ -490,6 +524,30 @@ mod tests {
             "the dangling prune runs last, after the targeted image removal"
         );
         assert!(calls.contains(&"remove_image:sha256:oldimg:false".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prune_failure_does_not_fail_the_update() {
+        use crate::health::TokioClock;
+
+        // The dangling prune errors, but the update already succeeded — the
+        // outcome must still be `Recreated` (best-effort contract, prune path).
+        let ops = RecordingOps::with_failing_prune();
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup {
+                remove_replaced: false,
+                prune_dangling: true,
+            },
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a prune failure must not surface as a recreate error");
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
     }
 
     #[tokio::test(start_paused = true)]
