@@ -1,0 +1,9 @@
+# release-plz keeps a version-bump + CHANGELOG PR open (see
+# .github/workflows/release-plz.yml). Everything irreversible — tagging, the
+# GitHub Release, and the crates.io publish — stays in release.yml, driven by a
+# human-pushed tag and the `release` environment approval. So release-plz must
+# NOT tag, release, or publish; it only authors the release PR.
+[workspace]
+git_tag_enable = false
+git_release_enable = false
+publish = false

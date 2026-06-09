@@ -15,14 +15,32 @@ On a `v*.*.*` tag it runs:
 4. `release` — create the GitHub Release and attach the binaries + `SHA256SUMS`.
 5. `publish` — **pauses on the `release` environment**; publishes to crates.io only after approval.
 
+## The version bump is automated (release-plz)
+
+You don't hand-edit the version or changelog. [release-plz](https://release-plz.dev)
+([`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml)) watches
+`main` and keeps a **"chore: release vX.Y.Z" PR** open that bumps `Cargo.toml` and
+rewrites `CHANGELOG.md` from the commit history. Releasing is then:
+
+1. Review and **merge the release PR** (edit the version in it first if you want a
+   different bump — e.g. set `1.0.0` for the 1.0 milestone; release-plz follows
+   semver from the last published version otherwise).
+2. Continue with [Cut the release](#cut-the-release-manual) below — tag + approve.
+
+release-plz here runs `release-pr` **only**; it never tags, releases, or publishes
+(see [`release-plz.toml`](release-plz.toml)). Those stay in `release.yml`.
+
 ## One-time setup (maintainer, MANUAL)
 
 1. Create a [crates.io API token](https://crates.io/settings/tokens) and add it as
-   a repository secret named `CARGO_REGISTRY_TOKEN`
-   (Settings → Secrets and variables → Actions).
+   the `CARGO_REGISTRY_TOKEN` secret (an **environment secret on `release`** keeps
+   it behind the approval gate; a repository secret also works).
 2. Create the approval gate: Settings → Environments → **New environment** named
    `release` → add yourself under **Required reviewers**. Without this, the
    `publish` job would run unattended.
+3. Let release-plz open PRs: Settings → Actions → General → **Workflow
+   permissions** → "Read and write permissions" **and** check "Allow GitHub Actions
+   to create and approve pull requests".
 
 ## Pre-flight checklist (every release)
 
@@ -33,9 +51,9 @@ On a `v*.*.*` tag it runs:
 - [ ] **Community beta sign-off** recorded (PLAN §8, risk row 1): at least one
       external user ran it on a real homelab and reported back. *Required before a
       final `1.0.0`* — not required for an `-rc` candidate.
-- [ ] `Cargo.toml` `version` equals the tag you are about to push (the `publish`
-      job hard-fails on a mismatch).
-- [ ] `CHANGELOG.md` has an entry for this version.
+- [ ] The release-plz PR is merged, so `Cargo.toml` `version` and `CHANGELOG.md`
+      are updated. The tag you push must equal that version (the `publish` job
+      hard-fails on a mismatch).
 - [ ] `RELEASE_NOTES.md` is updated for this version, including the `blob/<tag>`
       links (they must point at the tag being released).
 
