@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.svg" alt="freshdock logo" width="160">
+
 # freshdock
 
 **A modern, health-gated Docker container auto-updater — a maintained successor to Watchtower, in a single Rust binary.**
