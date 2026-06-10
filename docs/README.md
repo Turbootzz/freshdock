@@ -1,0 +1,29 @@
+# freshdock documentation
+
+Everything beyond the [project README](../README.md). Start with the quickstart, then
+dive into the reference pages.
+
+## Getting started
+
+- [**Quickstart**](quickstart.md) — opt a container in and run the daemon in ~1 minute.
+- [**Coming from Watchtower?**](migrating-from-watchtower.md) — label/flag translation.
+
+## Reference
+
+- [**Configuration**](configuration.md) — the single source of truth for labels, `freshdock.toml`, and environment variables.
+- [**CLI reference**](cli-reference.md) — `check`, `recreate`, `run`, and every flag.
+- [**Scheduling & modes**](scheduling.md) — update modes and cron syntax.
+- [**Notifications**](notifications.md) — webhook, Discord, Telegram, SMTP.
+- [**Health gating & rollback**](health-and-rollback.md) — the recreate lifecycle and image cleanup.
+- [**Registry authentication**](registry-auth.md) — private registries and credentials.
+- [**Deployment**](deployment.md) — container, systemd, socket permissions, compatibility.
+
+## Project & process
+
+- [Architecture & roadmap](PLAN.md) — design, phases, goals, risks.
+- [Release runbook](../RELEASE.md) — how a release is cut.
+- [Changelog](../CHANGELOG.md)
+- [Contributing](../CONTRIBUTING.md)
+- [Manual test playbooks](manual-tests/) — maintainer smoke tests.
+
+Runnable example stacks: [`examples/compose/`](../examples/compose/).

@@ -29,6 +29,12 @@ deny:
 build:
     cargo build --release --locked
 
+# Rehearse the crates.io publish exactly as CI does, without uploading anything.
+# Run this before tagging a release (see RELEASE.md).
+release-dry-run:
+    cargo publish --dry-run --locked
+    cargo package --list
+
 # One-time per-clone setup: enable the tracked pre-push hook.
 install-hooks:
     git config core.hooksPath .githooks

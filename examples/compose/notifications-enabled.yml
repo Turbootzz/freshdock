@@ -1,7 +1,7 @@
 # Health-gated updates with notifications. `web` updates live and notifies on
 # success/failure; freshdock reads its notification targets from a mounted
-# freshdock.toml (see ../../README.md#configuration-file-freshdocktoml for the
-# format). The SMTP password is supplied via the environment, not the file.
+# freshdock.toml (see ../../docs/configuration.md for the format). The SMTP
+# password is supplied via the environment, not the file.
 # Validate: docker compose -f notifications-enabled.yml config
 services:
   web:

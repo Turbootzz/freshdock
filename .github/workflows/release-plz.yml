@@ -1,0 +1,38 @@
+name: release-plz
+
+# Keep a "release" PR open that bumps the version and updates CHANGELOG.md from
+# the commit history, so a release is just: merge that PR, then push the tag.
+# Tagging, binaries, the multi-arch image, the GitHub Release, and the crates.io
+# publish all stay in release.yml (human-pushed tag + `release` environment
+# approval). This workflow runs `release-pr` ONLY — it never tags or publishes.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write        # push the release branch
+  pull-requests: write   # open/update the release PR
+
+# Don't pile up overlapping release-PR runs on rapid merges.
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0          # release-plz reads full history for the changelog
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr     # PR only; release.yml owns tag/image/publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
