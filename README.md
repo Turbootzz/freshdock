@@ -140,10 +140,10 @@ community has forks, but none combine what matters for a small homelab:
 
 ## Status & roadmap
 
-Phases 0–7 are complete; freshdock is at its first release candidate
-(`1.0.0-rc.1`) ahead of a community beta and the `1.0.0` tag. The full plan and
-architecture live in [docs/PLAN.md](docs/PLAN.md); release mechanics in
-[RELEASE.md](RELEASE.md); per-version notes in [CHANGELOG.md](CHANGELOG.md).
+Phases 0–7 are complete and freshdock is at its first stable release, `1.0.0`.
+The full plan and architecture live in [docs/PLAN.md](docs/PLAN.md); release
+mechanics in [RELEASE.md](RELEASE.md); per-version notes in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 
