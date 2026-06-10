@@ -200,4 +200,6 @@ webhook_url = "https://discord.com/api/webhooks/123/abc"
 triggers    = ["succeeded", "failed"]
 ```
 
+A copy-paste starting point with every section commented out lives at
+[`freshdock.toml.example`](../freshdock.toml.example) in the repository root.
 Runnable compose stacks live in [`examples/compose/`](../examples/compose/).

@@ -111,10 +111,12 @@ and [**Scheduling**](docs/scheduling.md).
 | [Health & rollback](docs/health-and-rollback.md) | The recreate lifecycle and image cleanup. |
 | [Registry auth](docs/registry-auth.md) | Private registries and credentials. |
 | [Deployment](docs/deployment.md) | Container, systemd, socket permissions, compatibility. |
+| [Troubleshooting](docs/troubleshooting.md) | Symptom-first fixes for common first-run issues. |
 | [Migrating from Watchtower](docs/migrating-from-watchtower.md) | Label/flag translation. |
 | [Architecture & roadmap](docs/PLAN.md) | Design, phases, goals, risks. |
 
-Runnable example stacks: [`examples/compose/`](examples/compose/).
+Runnable example stacks: [`examples/compose/`](examples/compose/). A commented
+config template: [`freshdock.toml.example`](freshdock.toml.example).
 
 ## Why freshdock
 
