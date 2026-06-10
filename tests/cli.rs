@@ -15,6 +15,17 @@ fn run(args: &[&str]) -> Output {
         .expect("spawn freshdock binary")
 }
 
+/// Like [`run`], with extra environment variables on the child (per-child env,
+/// so parallel tests can't interfere with each other).
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_freshdock"));
+    cmd.args(args);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd.output().expect("spawn freshdock binary")
+}
+
 /// Write a throwaway config and return its path. Distinct name per test so
 /// parallel runs don't collide.
 fn temp_config(name: &str, body: &str) -> std::path::PathBuf {
@@ -43,6 +54,35 @@ fn version_exits_zero() {
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("freshdock"),
         "version output should name the binary"
+    );
+}
+
+#[test]
+fn run_help_documents_flag_env_vars() {
+    let out = run(&["run", "--help"]);
+    assert!(out.status.success(), "run --help should exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Assert on the var names only — clap's `[env: NAME=value]` rendering
+    // embeds ambient values, which would make this flaky.
+    for var in [
+        "FRESHDOCK_INTERVAL",
+        "FRESHDOCK_TICK",
+        "FRESHDOCK_STOP_TIMEOUT",
+    ] {
+        assert!(stdout.contains(var), "run --help missing {var}: {stdout}");
+    }
+}
+
+#[test]
+fn invalid_interval_env_is_a_clap_error() {
+    // Flag-shaped env vars fail fast at parse — they *are* the flag — unlike
+    // the warn-and-fall-back [settings] overlay.
+    let out = run_with_env(&["run"], &[("FRESHDOCK_INTERVAL", "abc")]);
+    assert!(!out.status.success(), "a non-numeric interval must error");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value"),
+        "expected a clap parse error, got: {stderr}"
     );
 }
 

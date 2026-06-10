@@ -1,0 +1,68 @@
+# freshdock.toml — example configuration.
+#
+# The file is OPTIONAL: freshdock runs without it (public images need no
+# credentials, notifications are simply off). Copy this next to where you run
+# freshdock and uncomment what you need:
+#
+#   cp freshdock.toml.example freshdock.toml
+#
+# Resolution order: --config <path> flag > $FRESHDOCK_CONFIG > ./freshdock.toml.
+# Every value here can also come from environment variables — see
+# docs/configuration.md#environment-variables or `freshdock --help`.
+# Secrets are redacted in all log output, even at RUST_LOG=trace.
+
+# ── Fleet-wide defaults ──────────────────────────────────────────────────────
+# Env alternatives: FRESHDOCK_DEFAULT_MODE, FRESHDOCK_CLEANUP,
+# FRESHDOCK_PRUNE_DANGLING (env wins over the file).
+
+# [settings]
+# default_mode   = "watch"   # mode for enabled containers without a freshdock.mode
+#                            # label: live | nightly | weekly | monthly | watch | off
+# cleanup        = false     # remove the replaced image after a healthy update;
+#                            # per-container override: freshdock.cleanup label
+# prune_dangling = false     # daemon-wide dangling-image prune after each success
+
+# ── Registry credentials (private images) ────────────────────────────────────
+# <name> is an alias (dockerhub, ghcr, quay, lscr) or a literal host.
+# Env alternatives: FRESHDOCK_REGISTRY_<NAME>_USERNAME / _TOKEN.
+
+# [registry.ghcr]
+# username = "octocat"          # any non-empty value works for a GHCR PAT
+# token    = "ghp_xxx"          # PAT with read:packages
+
+# [registry.dockerhub]
+# username = "myuser"           # Docker Hub needs the real account name
+# token    = "dckr_pat_xxx"
+
+# [registry."registry.example.com"]
+# token    = "..."              # username optional
+
+# ── Notification targets ─────────────────────────────────────────────────────
+# One table per target, selected by `type`. `triggers` is an optional subset of
+# ["available", "succeeded", "failed"]; omit it to receive all three.
+# Secrets can stay out of the file: FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN (telegram),
+# FRESHDOCK_NOTIFY_<NAME>_PASSWORD (smtp).
+
+# [notifications.ops-webhook]
+# type = "webhook"
+# url  = "https://example.com/hooks/freshdock"
+
+# [notifications.discord]
+# type        = "discord"
+# webhook_url = "https://discord.com/api/webhooks/123/abc"
+# triggers    = ["succeeded", "failed"]
+
+# [notifications.tg]
+# type      = "telegram"
+# bot_token = "123456:ABC-DEF"          # or FRESHDOCK_NOTIFY_TG_BOT_TOKEN
+# chat_id   = "987654321"
+
+# [notifications.email]
+# type     = "smtp"
+# host     = "smtp.example.com"
+# port     = 587                        # default 587
+# username = "freshdock@example.com"    # username + password together, or neither
+# password = "s3cr3t"                   # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
+# from     = "freshdock@example.com"
+# to       = ["admin@example.com"]
+# starttls = true                       # default true; false → implicit TLS (465)

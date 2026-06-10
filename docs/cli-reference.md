@@ -11,7 +11,7 @@ Available on every subcommand.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--no-color` | colour on a TTY | Disable ANSI colour. Use for log files / non-interactive output. |
+| `--no-color` | colour on a TTY | Disable ANSI colour. Use for log files / non-interactive output. Setting `NO_COLOR` to any non-empty value does the same. |
 | `--config <PATH>` | see below | Path to `freshdock.toml`. |
 
 Config resolution order: `--config <PATH>` → `$FRESHDOCK_CONFIG` →
@@ -92,11 +92,13 @@ and acts on the ones that are due: `live`/`nightly`/`weekly`/`monthly` are updat
 `SIGINT`/`SIGTERM`, then finishes the in-flight container and exits. See
 [scheduling](scheduling.md) for the timing model.
 
-| Option | Default | Meaning |
-|---|---|---|
-| `--interval <SECS>` | `300` | Poll cadence for `live` and `watch` containers. |
-| `--tick <SECS>` | `60` | Scheduler loop granularity. Calendar (cron) modes are evaluated once per tick, so this bounds how late a fire can be. |
-| `--stop-timeout <SECS>` | `30` | Max seconds to drain in-flight work after a shutdown signal before force-exit. |
+| Option | Env var | Default | Meaning |
+|---|---|---|---|
+| `--interval <SECS>` | `FRESHDOCK_INTERVAL` | `300` | Poll cadence for `live` and `watch` containers. |
+| `--tick <SECS>` | `FRESHDOCK_TICK` | `60` | Scheduler loop granularity. Calendar (cron) modes are evaluated once per tick, so this bounds how late a fire can be. |
+| `--stop-timeout <SECS>` | `FRESHDOCK_STOP_TIMEOUT` | `30` | Max seconds to drain in-flight work after a shutdown signal before force-exit. |
+
+The flag wins over its env var; an invalid env value is a startup error.
 
 Examples:
 

@@ -10,6 +10,9 @@ use freshdock::config::{Config, ENV_VAR_HELP};
 #[derive(Parser)]
 #[command(name = "freshdock", version, about, after_long_help = ENV_VAR_HELP)]
 struct Cli {
+    /// Disable ANSI colors. The NO_COLOR env var (any non-empty value) does
+    /// the same; it's checked by hand because the convention is
+    /// presence-based, not value-parsed like clap's env attribute.
     #[arg(long, global = true)]
     no_color: bool,
     /// Path to the freshdock.toml credentials file. Defaults to
@@ -37,14 +40,14 @@ enum Cmd {
     /// available. Runs until SIGINT/SIGTERM.
     Run {
         /// Poll cadence for live/watch containers, in seconds.
-        #[arg(long, default_value_t = 300)]
+        #[arg(long, env = "FRESHDOCK_INTERVAL", default_value_t = 300)]
         interval: u64,
         /// Scheduler loop tick granularity, in seconds. Cron modes are
         /// evaluated once per tick, so this bounds how late a calendar fire is.
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, env = "FRESHDOCK_TICK", default_value_t = 60)]
         tick: u64,
         /// Max seconds to drain in-flight work after a shutdown signal.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, env = "FRESHDOCK_STOP_TIMEOUT", default_value_t = 30)]
         stop_timeout: u64,
     },
 }
@@ -52,12 +55,13 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
 
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_ansi(!cli.no_color)
+        .with_ansi(!no_color)
         .init();
 
     // Resolve credentials once (flag > FRESHDOCK_CONFIG env > default file) and
@@ -71,7 +75,7 @@ async fn main() -> Result<()> {
     let settings = config.settings;
 
     match cli.cmd {
-        Cmd::Check => commands::check::run(cli.no_color, credentials, settings).await?,
+        Cmd::Check => commands::check::run(no_color, credentials, settings).await?,
         Cmd::Recreate { name } => commands::recreate::run(name, credentials, settings).await?,
         Cmd::Run {
             interval,
