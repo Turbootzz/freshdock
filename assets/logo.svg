@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">freshdock — fresh barge</title>
+
+  <!-- sprout on the top container -->
+  <path d="M64 40 C64 36 64 33 64 29" fill="none" stroke="#16a34a" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M64 33 C58 33 50 30 48 22 C55 21 62 25 64 33 Z" fill="#22c55e"/>
+  <path d="M64 30 C66 23 72 19 79 20 C78 27 71 31 64 30 Z" fill="#4ade80"/>
+
+  <!-- containers -->
+  <g>
+    <rect x="54" y="40" width="20" height="22" rx="3" fill="#4ade80"/>
+    <rect x="30" y="62" width="20" height="22" rx="3" fill="#14b8a6"/>
+    <rect x="54" y="62" width="20" height="22" rx="3" fill="#22c55e"/>
+    <rect x="78" y="62" width="20" height="22" rx="3" fill="#2dd4bf"/>
+  </g>
+  <g stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" opacity="0.3">
+    <line x1="60" y1="45" x2="60" y2="57"/>
+    <line x1="68" y1="45" x2="68" y2="57"/>
+    <line x1="36" y1="67" x2="36" y2="79"/>
+    <line x1="44" y1="67" x2="44" y2="79"/>
+    <line x1="60" y1="67" x2="60" y2="79"/>
+    <line x1="68" y1="67" x2="68" y2="79"/>
+    <line x1="84" y1="67" x2="84" y2="79"/>
+    <line x1="92" y1="67" x2="92" y2="79"/>
+  </g>
+
+  <!-- hull -->
+  <path d="M20 84 L108 84 L100 104 Q98 110 90 110 L38 110 Q30 110 28 104 Z" fill="#0f766e"/>
+  <circle cx="64" cy="96" r="4.5" fill="#f97316"/>
+
+  <!-- water -->
+  <path d="M22 118 q6 -5 12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0" fill="none" stroke="#5eead4" stroke-width="3.5" stroke-linecap="round" opacity="0.8"/>
+</svg>
