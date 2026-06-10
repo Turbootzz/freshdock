@@ -25,12 +25,12 @@ ask for it with a mode like `live` or `nightly`.
 
 | Watchtower flag / env | freshdock equivalent | Notes |
 |---|---|---|
-| `--interval` / `WATCHTOWER_POLL_INTERVAL` | `freshdock run --interval <seconds>` | Cadence for `live`/`watch` containers. |
+| `--interval` / `WATCHTOWER_POLL_INTERVAL` | `freshdock run --interval <seconds>` or `FRESHDOCK_INTERVAL` | Cadence for `live`/`watch` containers. |
 | `--schedule` / `WATCHTOWER_SCHEDULE` (global cron) | per-container `freshdock.mode` + `freshdock.schedule` | freshdock schedules each container on its own mode. |
 | `--monitor-only` / `WATCHTOWER_MONITOR_ONLY` | `freshdock.mode=watch` | Per container, not global. |
 | `--label-enable` / `WATCHTOWER_LABEL_ENABLE` | *(always on)* | freshdock is always label-gated; `freshdock.enable=true` is required. |
-| *(no global default mode)* | `[settings] default_mode` in `freshdock.toml` | Sets the fallback mode for enabled containers with no `freshdock.mode` label. A `freshdock.mode` label still wins per container. |
-| `--cleanup` / `WATCHTOWER_CLEANUP` | `[settings] cleanup = true` (or `freshdock.cleanup=true` per container) | Off by default. Removes the *replaced image* after a healthy update; add `[settings] prune_dangling = true` for a daemon-wide dangling prune. The replaced container archive is always removed regardless. |
+| *(no global default mode)* | `[settings] default_mode` or `FRESHDOCK_DEFAULT_MODE` | Sets the fallback mode for enabled containers with no `freshdock.mode` label. A `freshdock.mode` label still wins per container. |
+| `--cleanup` / `WATCHTOWER_CLEANUP` | `[settings] cleanup = true`, `FRESHDOCK_CLEANUP=true`, or `freshdock.cleanup=true` per container | Off by default. Removes the *replaced image* after a healthy update; add `[settings] prune_dangling = true` (or `FRESHDOCK_PRUNE_DANGLING=true`) for a daemon-wide dangling prune. The replaced container archive is always removed regardless. |
 | `--remove-volumes` / `WATCHTOWER_REMOVE_VOLUMES` | *(no equivalent)* | freshdock never removes volumes; recreate preserves all mounts. |
 | `--rolling-restart` / `WATCHTOWER_ROLLING_RESTART` | *(not applicable)* | freshdock recreates one container at a time and health-gates each. |
 | `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | `[notifications.<name>]` tables in `freshdock.toml` | Webhook / Discord / Telegram / SMTP. See [notifications](notifications.md). |

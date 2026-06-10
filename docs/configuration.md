@@ -41,6 +41,16 @@ When `freshdock.enable=true` but `freshdock.mode` is absent, the mode is `watch`
 fleet-wide fallback with [`[settings] default_mode`](#settings); an explicit
 `freshdock.mode` label always wins.
 
+> **Mode vs. schedule.** `freshdock.schedule` only refines the *calendar* modes
+> (`nightly` / `weekly` / `monthly`). `live` and `watch` are polled on the
+> daemon's `run --interval` instead and ignore the label. See
+> [scheduling](scheduling.md).
+
+> **Health-gate timings.** The post-update health timeout and the grace period
+> for containers without a healthcheck are currently hardcoded — not
+> label/config/env-configurable. See
+> [health & rollback: timings](health-and-rollback.md#timings).
+
 > **Pinned images.** A container whose image is pinned to a digest
 > (`repo@sha256:…`) has no moving tag to follow. freshdock reports it as
 > `pinned (no check)` and never updates it.
@@ -174,6 +184,11 @@ upper-cased, with `-` → `_`.
 | `FRESHDOCK_REGISTRY_<NAME>_TOKEN` | `[registry.<name>] token` | |
 | `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | |
 | `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | |
+| `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
+| `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
+| `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
+| `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
+| `NO_COLOR` | `--no-color` | Any non-empty value disables colored output. |
 | `RUST_LOG` | log verbosity | e.g. `info`, `freshdock=debug`, `trace`. Default `info`. |
 | `DOCKER_HOST` | Docker daemon endpoint | Honoured by the underlying Docker client (bollard). |
 
