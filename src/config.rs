@@ -107,10 +107,61 @@ impl ResolvedSettings {
     }
 }
 
-/// Validate the raw `[settings]` table. An invalid `default_mode` is a warning,
-/// not a hard error — mirrors the resilient env-overlay handling so one typo
-/// can't stop the daemon from starting.
-fn resolve_settings(settings: Settings) -> ResolvedSettings {
+/// Parse an env-var boolean. Env vars accept `1`/`0` alongside `true`/`false`
+/// (labels stay strict `true`/`false`) because `VAR=1` is the dominant idiom in
+/// compose files and Watchtower configs.
+fn parse_env_bool(var: &str, raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => {
+            warn!(
+                var = %var,
+                value = %raw,
+                "ignoring invalid boolean (expected true/false/1/0)"
+            );
+            None
+        }
+    }
+}
+
+/// Overlay `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
+/// `FRESHDOCK_PRUNE_DANGLING` onto the `[settings]` table (env wins per field,
+/// like the registry overlay), then validate. An invalid value is a warning,
+/// not a hard error — the next layer (file value, then built-in default)
+/// applies, so one typo can't stop the daemon from starting.
+fn resolve_settings<I>(mut settings: Settings, env_vars: I) -> ResolvedSettings
+where
+    I: Iterator<Item = (String, String)>,
+{
+    for (key, value) in env_vars {
+        match key.as_str() {
+            // Validate eagerly so a bad env mode keeps the *file* value rather
+            // than clobbering it with a string the resolution below rejects.
+            "FRESHDOCK_DEFAULT_MODE" => {
+                if value.parse::<Mode>().is_ok() {
+                    settings.default_mode = Some(value);
+                } else {
+                    warn!(
+                        value = %value,
+                        "ignoring invalid FRESHDOCK_DEFAULT_MODE (expected one of \
+                         live, nightly, weekly, monthly, watch, off)"
+                    );
+                }
+            }
+            "FRESHDOCK_CLEANUP" => {
+                if let Some(flag) = parse_env_bool(&key, &value) {
+                    settings.cleanup = flag;
+                }
+            }
+            "FRESHDOCK_PRUNE_DANGLING" => {
+                if let Some(flag) = parse_env_bool(&key, &value) {
+                    settings.prune_dangling = flag;
+                }
+            }
+            _ => {}
+        }
+    }
     let default_mode = match settings.default_mode.as_deref() {
         None => None,
         Some(raw) => match raw.parse::<Mode>() {
@@ -237,7 +288,8 @@ impl Config {
 
     /// Load the config: read `path` (or the default `./freshdock.toml` when
     /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` /
-    /// `FRESHDOCK_NOTIFY_*` env vars on top.
+    /// `FRESHDOCK_NOTIFY_*` / `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
+    /// `FRESHDOCK_PRUNE_DANGLING` env vars on top.
     ///
     /// An *explicit* path that doesn't exist is an error; a missing *default*
     /// file is not (it just yields env-only / empty config).
@@ -261,10 +313,11 @@ impl Config {
             }
         };
         // Take notifications + settings out before `build_store` consumes the
-        // rest; both env overlays read the same process env (`vars()` is cheap).
+        // rest; all three env overlays read the same process env (`vars()` is
+        // cheap).
         let notifications =
             build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
-        let settings = resolve_settings(std::mem::take(&mut config.settings));
+        let settings = resolve_settings(std::mem::take(&mut config.settings), std::env::vars());
         let credentials = Arc::new(build_store(config, std::env::vars()));
         Ok(LoadedConfig {
             credentials,
@@ -288,14 +341,19 @@ impl Config {
 /// Default config search path, relative to the working directory.
 pub const DEFAULT_CONFIG_FILE: &str = "freshdock.toml";
 
-/// Documentation of the recognised credential env vars, surfaced in `--help`.
+/// Documentation of the recognised env vars, surfaced in `--help`.
 pub const ENV_VAR_HELP: &str = "Registry credentials may also be supplied via environment, which \
 overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOCK_REGISTRY_GHCR_USERNAME\n  \
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
 lscr, or a registry host.\nNotification secrets may be overridden the same way (<NAME> is the \
 [notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
 FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names so two can't map to the \
-same variable (e.g. `ops-mail` and `ops_mail` collide).\nFRESHDOCK_CONFIG sets the config file path.";
+same variable (e.g. `ops-mail` and `ops_mail` collide).\n[settings] defaults may be supplied or overridden \
+the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthly|watch|off\n  \
+FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n\
+Run flags have env forms too, the flag winning: FRESHDOCK_INTERVAL, FRESHDOCK_TICK, FRESHDOCK_STOP_TIMEOUT \
+(see `freshdock run --help`).\nNO_COLOR (any non-empty value) disables colored output.\nFRESHDOCK_CONFIG \
+sets the config file path.";
 
 /// Fold a config key / image host onto its canonical registry host so a
 /// `[registry.dockerhub]` table, a `FRESHDOCK_REGISTRY_DOCKERHUB_TOKEN`, and an
@@ -740,7 +798,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let resolved = resolve_settings(cfg.settings);
+        let resolved = resolve_settings(cfg.settings, env(&[]));
         assert_eq!(resolved.default_mode, Some(Mode::Nightly));
         assert!(resolved.cleanup);
         assert!(resolved.prune_dangling);
@@ -755,7 +813,7 @@ mod tests {
     #[test]
     fn missing_settings_table_yields_all_defaults() {
         let cfg = Config::from_toml("[registry.ghcr]\ntoken = \"t\"\n").unwrap();
-        let resolved = resolve_settings(cfg.settings);
+        let resolved = resolve_settings(cfg.settings, env(&[]));
         assert_eq!(resolved.default_mode, None);
         assert!(!resolved.cleanup);
         assert!(!resolved.prune_dangling);
@@ -766,7 +824,67 @@ mod tests {
         // A bad mode must not abort load — it warns and falls back to None
         // (which downstream resolves to `watch`).
         let cfg = Config::from_toml("[settings]\ndefault_mode = \"hourly\"\n").unwrap();
-        let resolved = resolve_settings(cfg.settings);
+        let resolved = resolve_settings(cfg.settings, env(&[]));
         assert_eq!(resolved.default_mode, None);
+    }
+
+    #[test]
+    fn env_default_mode_overrides_file_mode() {
+        let cfg = Config::from_toml("[settings]\ndefault_mode = \"nightly\"\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_DEFAULT_MODE", "weekly")]));
+        assert_eq!(resolved.default_mode, Some(Mode::Weekly));
+    }
+
+    #[test]
+    fn env_invalid_default_mode_keeps_file_value() {
+        // A bad env mode must not clobber a valid file mode — warn and keep
+        // the file layer.
+        let cfg = Config::from_toml("[settings]\ndefault_mode = \"nightly\"\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_DEFAULT_MODE", "hourly")]));
+        assert_eq!(resolved.default_mode, Some(Mode::Nightly));
+    }
+
+    #[test]
+    fn env_bools_accept_true_false_1_0_case_insensitive() {
+        for (raw, expected) in [
+            ("1", true),
+            ("0", false),
+            ("TRUE", true),
+            (" false ", false),
+        ] {
+            let resolved = resolve_settings(
+                Settings::default(),
+                env(&[
+                    ("FRESHDOCK_CLEANUP", raw),
+                    ("FRESHDOCK_PRUNE_DANGLING", raw),
+                ]),
+            );
+            assert_eq!(resolved.cleanup, expected, "cleanup: {raw:?}");
+            assert_eq!(resolved.prune_dangling, expected, "prune_dangling: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn env_invalid_bool_keeps_file_value() {
+        let cfg = Config::from_toml("[settings]\ncleanup = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_CLEANUP", "maybe")]));
+        assert!(resolved.cleanup);
+    }
+
+    #[test]
+    fn env_settings_apply_with_no_file_table() {
+        // Unlike notification targets, env alone can establish settings — there
+        // is no per-name declaration to anchor to.
+        let resolved = resolve_settings(
+            Settings::default(),
+            env(&[
+                ("FRESHDOCK_DEFAULT_MODE", "live"),
+                ("FRESHDOCK_CLEANUP", "true"),
+                ("FRESHDOCK_PRUNE_DANGLING", "1"),
+            ]),
+        );
+        assert_eq!(resolved.default_mode, Some(Mode::Live));
+        assert!(resolved.cleanup);
+        assert!(resolved.prune_dangling);
     }
 }
