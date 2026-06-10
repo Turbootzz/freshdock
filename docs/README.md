@@ -7,6 +7,7 @@ dive into the reference pages.
 
 - [**Quickstart**](quickstart.md) — opt a container in and run the daemon in ~1 minute.
 - [**Coming from Watchtower?**](migrating-from-watchtower.md) — label/flag translation.
+- [**Troubleshooting**](troubleshooting.md) — symptom-first fixes for common first-run issues.
 
 ## Reference
 

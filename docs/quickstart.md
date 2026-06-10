@@ -69,4 +69,5 @@ new image is reverted, not left running.
 - [Notifications](notifications.md) — webhook, Discord, Telegram, SMTP.
 - [Registry authentication](registry-auth.md) — private images.
 - [Deployment](deployment.md) — systemd, socket permissions, compatibility.
+- [Troubleshooting](troubleshooting.md) — something not behaving? Start here.
 - [Coming from Watchtower?](migrating-from-watchtower.md)
