@@ -11,6 +11,7 @@
 [![docs](https://img.shields.io/badge/docs-guide-blue.svg)](docs/)
 [![GHCR image](https://img.shields.io/badge/ghcr.io-turbootzz%2Ffreshdock-2496ED.svg)](https://github.com/Turbootzz/freshdock/pkgs/container/freshdock)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Turbootzz)
 
 [Quickstart](docs/quickstart.md) · [Docs](docs/) · [Configuration](docs/configuration.md) · [From Watchtower](docs/migrating-from-watchtower.md)
 
@@ -153,6 +154,12 @@ mechanics in [RELEASE.md](RELEASE.md); per-version notes in
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for local setup,
 the quality gates, and dependency hygiene. Security reports: [SECURITY.md](SECURITY.md).
+
+## Support
+
+freshdock is free and open source. If it keeps your homelab up to date, you can
+support its development through [**GitHub Sponsors**](https://github.com/sponsors/Turbootzz).
+Sponsoring is entirely optional — stars, bug reports, and pull requests help just as much.
 
 ## License
 
