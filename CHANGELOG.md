@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1](https://github.com/Turbootzz/freshdock/compare/v1.2.0...v1.2.1) - 2026-06-16
+
+### Other
+
+- *(deps)* bump toml from 0.8.23 to 1.1.2+spec-1.1.0 ([#50](https://github.com/Turbootzz/freshdock/pull/50))
+
 ## [1.2.0](https://github.com/Turbootzz/freshdock/compare/v1.1.0...v1.2.0) - 2026-06-16
 
 ### Added
