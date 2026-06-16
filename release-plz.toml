@@ -7,10 +7,6 @@
 git_tag_enable = false
 git_release_enable = false
 publish = false
-# freshdock is a binary; `lib.rs` re-exports modules as `pub` only so integration
-# tests can reach internals — nothing consumes it as a library crate. Without this,
-# cargo-semver-checks flags internal API changes (e.g. a new enum variant) as
-# "breaking" and release-plz bumps the major version, which misleads CLI users.
-# Disabled so version bumps follow conventional-commit types (feat -> minor,
-# fix -> patch); write `feat!`/`BREAKING CHANGE` deliberately for a real major.
+# Binary crate: the lib API is public only for tests, not a real contract. Off so
+# version bumps follow commit types instead of cargo-semver-checks.
 semver_check = false

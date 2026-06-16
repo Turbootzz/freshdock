@@ -1,10 +1,7 @@
 version: 2
 
 updates:
-  # Rust crates. PRs must pass `just ci` (clippy -D warnings + cargo deny);
-  # grouping minor+patch batches Cargo.lock churn so cargo-deny's
-  # multiple-versions=deny stays satisfiable in a single review. Major bumps
-  # stay ungrouped so each breaking upgrade gets its own PR.
+  # Group minor+patch to keep Cargo.lock churn reviewable; majors stay separate.
   - package-ecosystem: cargo
     directory: "/"
     schedule:
@@ -33,8 +30,5 @@ updates:
         patterns:
           - "*"
 
-  # NOTE: no `docker` ecosystem here on purpose. The Dockerfile base is
-  # gcr.io/distroless/static-debian12:latest (a floating tag with no digest),
-  # which Dependabot's docker updater cannot track — it would never open a PR.
-  # To enable base-image updates, pin a digest (FROM ...:latest@sha256:<digest>)
-  # and add a `docker` update block here.
+  # No `docker` ecosystem: the base is a floating `:latest` tag with no digest,
+  # which Dependabot can't track. Pin a digest to enable it.
