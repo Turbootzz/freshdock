@@ -18,12 +18,12 @@ docker run -d \
 ```
 
 Or with compose — see the runnable stacks in
-[`examples/compose/`](../examples/compose/):
+[`examples/compose/`](https://github.com/Turbootzz/freshdock/tree/main/examples/compose):
 
-- [`minimal-watch.yml`](../examples/compose/minimal-watch.yml) — watch-only, read-only socket.
-- [`mixed-modes.yml`](../examples/compose/mixed-modes.yml) — live + nightly + watch on one daemon.
-- [`notifications-enabled.yml`](../examples/compose/notifications-enabled.yml) — mounts a `freshdock.toml`.
-- [`registry-authenticated.yml`](../examples/compose/registry-authenticated.yml) — private registry via env.
+- [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml) — watch-only, read-only socket.
+- [`mixed-modes.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/mixed-modes.yml) — live + nightly + watch on one daemon.
+- [`notifications-enabled.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/notifications-enabled.yml) — mounts a `freshdock.toml`.
+- [`registry-authenticated.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/registry-authenticated.yml) — private registry via env.
 
 ### Socket: read-only vs writable
 

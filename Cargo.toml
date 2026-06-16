@@ -14,7 +14,7 @@ keywords = ["docker", "container", "watchtower", "auto-update", "devops"]
 categories = ["command-line-utilities", "development-tools"]
 # Keep the published crate to code + README/LICENSE; repo guides and CI plumbing
 # add weight without helping a `cargo install`.
-exclude = [".github/", "docs/", "examples/", "RELEASE.md", "RELEASE_NOTES.md", "freshdock.toml.example"]
+exclude = [".github/", "docs/", "examples/", "RELEASE.md", "RELEASE_NOTES.md", "freshdock.toml.example", "book.toml", "book/"]
 
 [dependencies]
 bollard = "0.21"

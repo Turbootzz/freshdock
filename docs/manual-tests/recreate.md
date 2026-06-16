@@ -8,7 +8,7 @@ health is **rolled back** to the previous container.
 
 > **Canonical automated gate.** The authoritative "is the tool safe to ship"
 > check is the live round-trip test
-> [tests/recreate_roundtrip_live.rs](../../tests/recreate_roundtrip_live.rs)
+> [tests/recreate_roundtrip_live.rs](https://github.com/Turbootzz/freshdock/blob/main/tests/recreate_roundtrip_live.rs)
 > (PLAN §6.3, P3-3). It creates a kitchen-sink container, recreates it, and
 > asserts the inspected config round-trips byte-identical. Run it with a daemon
 > available:

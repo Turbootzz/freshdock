@@ -8,12 +8,12 @@
 
 [![CI](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml/badge.svg)](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml)
 [![Crate](https://img.shields.io/crates/v/freshdock.svg)](https://crates.io/crates/freshdock)
-[![docs](https://img.shields.io/badge/docs-guide-blue.svg)](docs/)
+[![docs](https://img.shields.io/badge/docs-guide-blue.svg)](https://turbootzz.github.io/freshdock/)
 [![GHCR image](https://img.shields.io/badge/ghcr.io-turbootzz%2Ffreshdock-2496ED.svg)](https://github.com/Turbootzz/freshdock/pkgs/container/freshdock)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Turbootzz)
 
-[Quickstart](docs/quickstart.md) · [Docs](docs/) · [Configuration](docs/configuration.md) · [From Watchtower](docs/migrating-from-watchtower.md)
+[Quickstart](docs/quickstart.md) · [Docs](https://turbootzz.github.io/freshdock/) · [Configuration](docs/configuration.md) · [From Watchtower](docs/migrating-from-watchtower.md)
 
 </div>
 

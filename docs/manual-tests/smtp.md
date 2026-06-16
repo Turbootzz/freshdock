@@ -2,7 +2,7 @@
 
 The SMTP backend talks a real mail protocol, so CI can't exercise it without a
 relay. Message construction is covered automatically by the `build_message`
-unit tests in [src/notify/smtp.rs](../../src/notify/smtp.rs); this procedure
+unit tests in [src/notify/smtp.rs](https://github.com/Turbootzz/freshdock/blob/main/src/notify/smtp.rs); this procedure
 verifies the transport (connection, STARTTLS, auth) against a local catcher.
 
 ## Prerequisites

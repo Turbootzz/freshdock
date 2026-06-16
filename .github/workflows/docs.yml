@@ -1,0 +1,55 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "book.toml", ".github/workflows/docs.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["docs/**", "book.toml", ".github/workflows/docs.yml"]
+
+# Read-only by default; the deploy job widens to the Pages-publish scopes.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build book
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Pin mdbook so local `just docs` and CI render identically; bump deliberately.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.3
+      - name: Build (create-missing=false fails on broken chapter links)
+        run: mdbook build
+      # Only stage the Pages artifact on main; PRs just validate the build.
+      - if: github.event_name == 'push'
+        uses: actions/configure-pages@v5
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: book
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
+    # Job-scoped so PR builds don't queue here; don't cancel an in-flight publish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

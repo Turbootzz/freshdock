@@ -39,3 +39,11 @@ release-dry-run:
 install-hooks:
     git config core.hooksPath .githooks
     @echo "Pre-push hook enabled. Disable with: git config --unset core.hooksPath"
+
+# Build the documentation site into ./book (requires `cargo install mdbook`).
+docs:
+    mdbook build
+
+# Serve the docs locally with live reload and open a browser.
+docs-serve:
+    mdbook serve --open

@@ -4,7 +4,7 @@ Get freshdock watching a container in about a minute.
 
 ## 1. Install
 
-Pick one (full options in the [README](../README.md#install)):
+Pick one (full options in the [README](https://github.com/Turbootzz/freshdock/blob/main/README.md#install)):
 
 ```bash
 cargo install freshdock                          # from crates.io
@@ -45,7 +45,7 @@ docker run -d \
   ghcr.io/turbootzz/freshdock:latest run
 ```
 
-This is the [`minimal-watch.yml`](../examples/compose/minimal-watch.yml) example. A
+This is the [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml) example. A
 read-only socket is enough for `watch`.
 
 ## 4. Let it actually update something
