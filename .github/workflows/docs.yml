@@ -41,8 +41,7 @@ jobs:
       pages: write
       id-token: write
       contents: read
-    # Serialize deploys and never cancel an in-flight publish. Scoped to this
-    # job so PR-validation builds never queue against a production deploy.
+    # Job-scoped so PR builds don't queue here; don't cancel an in-flight publish.
     concurrency:
       group: pages
       cancel-in-progress: false
