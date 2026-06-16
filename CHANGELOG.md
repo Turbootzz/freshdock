@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/Turbootzz/freshdock/compare/v1.1.0...v1.2.0) - 2026-06-16
+
+### Added
+
+- credential observability and survive rejected tokens ([#45](https://github.com/Turbootzz/freshdock/pull/45))
+
+### Other
+
+- add monthly Dependabot for cargo and GitHub Actions ([#47](https://github.com/Turbootzz/freshdock/pull/47))
+- publish documentation as an mdBook site on GitHub Pages ([#46](https://github.com/Turbootzz/freshdock/pull/46))
+- Added funding option ([#44](https://github.com/Turbootzz/freshdock/pull/44))
+- add project logo and embed in README header ([#41](https://github.com/Turbootzz/freshdock/pull/41))
+
 ## [1.1.0](https://github.com/Turbootzz/freshdock/compare/v1.0.0...v1.1.0) - 2026-06-10
 
 ### Added
