@@ -82,5 +82,5 @@ triggers    = ["succeeded", "failed"]
 freshdock run        # foreground daemon; or run it as the freshdock container
 ```
 
-See [`examples/compose/`](../examples/compose/) for complete, `docker compose
+See [`examples/compose/`](https://github.com/Turbootzz/freshdock/tree/main/examples/compose) for complete, `docker compose
 config`-valid stacks.

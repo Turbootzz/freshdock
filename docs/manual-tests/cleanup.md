@@ -13,7 +13,7 @@ There are two knobs:
 - `[settings] prune_dangling = true` — additionally run a daemon-wide
   dangling-image prune after each successful update.
 
-The unit tests in [src/docker/recreate.rs](../../src/docker/recreate.rs)
+The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdock/blob/main/src/docker/recreate.rs)
 (`recreate_with_health_removes_old_image_when_cleanup_enabled`,
 `recreate_with_health_prunes_dangling_when_enabled`,
 `cleanup_failure_does_not_fail_the_update`) are the authoritative checks; this

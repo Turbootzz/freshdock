@@ -1,9 +1,13 @@
 # freshdock — A Modern Rust-based Watchtower Successor
 
 > **Project name:** `freshdock` — verified available on crates.io, GitHub, Docker Hub, npm, PyPI.
-> **Status:** Planning.
+> **Status:** Shipped — v1.1.0 (Phases 0–7 complete).
 > **Author:** Thijs (Turboot).
-> **Date:** May 2026.
+> **Date:** May 2026 (original plan).
+
+> *This is the original planning document, kept for design rationale and history. Every
+> phase below has shipped; see the [CHANGELOG](https://github.com/Turbootzz/freshdock/blob/main/CHANGELOG.md)
+> for the released state.*
 
 > *A fresh dock where containers come to renew themselves.* Modern Docker, health-gated rollback, single static binary.
 
@@ -232,9 +236,13 @@ This test is the project's quality gate — if it passes, the tool is safe to sh
 
 ## 7. Phased Roadmap
 
+> **✅ All phases (0–7) have shipped.** The tool reached v1.0.0 and is now at v1.1.0. The
+> estimates and "cut if pacing slips" caveats below are preserved as the original plan; in
+> the end nothing was cut. Phase-by-phase status is noted inline.
+
 Estimates assume part-time evening/weekend work alongside the dual study programme.
 
-### Phase 0 — Reserve the name & scaffolding (1 week)
+### Phase 0 — Reserve the name & scaffolding (1 week) — ✅ shipped
 
 - **Reserve `freshdock` everywhere before anything else.** Crate names on crates.io are permanent and first-come-first-served. Order: (a) publish a 0.0.1 placeholder crate with a minimal `Cargo.toml` and a stub `main.rs`; (b) create the GitHub repo under your account or a `freshdock` org — this also reserves the GHCR namespace (`ghcr.io/<owner>/freshdock`) for free, since GHCR uses the GitHub namespace automatically; (c) optional — register `freshdock.dev` or `.io` if still available. Docker Hub is intentionally skipped: v1 publishes to GHCR only (revisit post-v1 if discoverability matters).
 - Pick licence: AGPL-3.0 (like Cup, protects against commercial appropriation) or MIT/Apache-2.0 dual (maximum adoption). Decide before first real commit.
@@ -242,7 +250,7 @@ Estimates assume part-time evening/weekend work alongside the dual study program
 - Set up cargo-deny for license/dependency hygiene.
 - Repo skeleton, README stub with the three differentiators (modern Docker, health-gated rollback, Rust footprint) front and centre.
 
-### Phase 1 — Read-only spike (2 weeks)
+### Phase 1 — Read-only spike (2 weeks) — ✅ shipped
 
 Goal: prove the concept end-to-end without touching containers.
 
@@ -253,37 +261,37 @@ Goal: prove the concept end-to-end without touching containers.
 
 This becomes the watch-only mode for free.
 
-### Phase 2 — Single recreate (2 weeks)
+### Phase 2 — Single recreate (2 weeks) — ✅ shipped
 
 - Implement the `inspect → stop → rename → create → start` cycle for one container.
 - Handle the basic config preservation (env, mounts, networks, restart policy).
 - Manual testing only at this stage.
 
-### Phase 3 — Health gating + rollback (1–2 weeks)
+### Phase 3 — Health gating + rollback (1–2 weeks) — ✅ shipped
 
 - Wait-for-healthy logic.
 - Grace period for containers without healthchecks.
 - Rollback path on failure.
 - The "weird config" integration test mentioned in §6.3.
 
-### Phase 4 — Scheduling (1 week)
+### Phase 4 — Scheduling (1 week) — ✅ shipped
 
 - The five modes (`live`, `nightly`, `weekly`, `monthly`, `watch`).
 - Cron expression parsing.
 - Per-container override via labels.
 
-### Phase 5 — Multi-registry + auth (2 weeks)
+### Phase 5 — Multi-registry + auth (2 weeks) — ✅ shipped
 
 - GHCR, Quay, lscr.io, generic bearer-token registries.
 - Credentials from config file + env.
 - Rate-limit-aware checking (the Cup approach: HEAD requests, not pulls).
 
-### Phase 6 — Notifications (1 week)
+### Phase 6 — Notifications (1 week) — ✅ shipped
 
 - Webhook, Discord, Telegram, SMTP.
 - Trigger matrix: success / failure / available-only.
 
-### Phase 7 — Polish and v1.0 release (2 weeks)
+### Phase 7 — Polish and v1.0 release (2 weeks) — ✅ shipped
 
 - Documentation site (mdBook or just a thorough README).
 - Docker image (multi-arch: amd64, arm64, armv7).
@@ -328,12 +336,12 @@ This becomes the watch-only mode for free.
 
 ## 10. Open Questions
 
-These are intentionally left open until Phase 0 kickoff:
+These were left open at Phase 0 kickoff; all four are now resolved:
 
-1. AGPL-3.0 (like Cup) vs MIT/Apache-2.0 dual licence?
-2. Should v1 ship a CLI subcommand (`freshdock check`) like Cup, or stay daemon-only?
-3. Scheduling: bring in `tokio-cron-scheduler` or hand-roll? (Likely hand-roll; less dependency surface.)
-4. Label prefix shorthand: support `fd.*` as alias for `freshdock.*` to save typing in long compose files? (Decide late — easy to add, hard to remove.)
+1. ~~AGPL-3.0 (like Cup) vs MIT/Apache-2.0 dual licence?~~ → **Apache-2.0** (`Cargo.toml` / `LICENSE`).
+2. ~~CLI subcommand vs daemon-only?~~ → **CLI subcommands shipped**: `check`, `recreate`, `run`.
+3. ~~`tokio-cron-scheduler` or hand-roll?~~ → **Hand-rolled** (`src/cron.rs` + `src/scheduler.rs`); `chrono` is used only for DST-correct local-time calendar math, not scheduling.
+4. ~~`fd.*` alias for `freshdock.*`?~~ → **Not adopted.** Only the full `freshdock.*` prefix is parsed (`src/labels.rs`).
 
 ---
 

@@ -1,6 +1,6 @@
 # freshdock documentation
 
-Everything beyond the [project README](../README.md). Start with the quickstart, then
+Everything beyond the [project README](https://github.com/Turbootzz/freshdock/blob/main/README.md). Start with the quickstart, then
 dive into the reference pages.
 
 ## Getting started
@@ -22,9 +22,9 @@ dive into the reference pages.
 ## Project & process
 
 - [Architecture & roadmap](PLAN.md) — design, phases, goals, risks.
-- [Release runbook](../RELEASE.md) — how a release is cut.
-- [Changelog](../CHANGELOG.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Manual test playbooks](manual-tests/) — maintainer smoke tests.
+- [Release runbook](https://github.com/Turbootzz/freshdock/blob/main/RELEASE.md) — how a release is cut.
+- [Changelog](https://github.com/Turbootzz/freshdock/blob/main/CHANGELOG.md)
+- [Contributing](https://github.com/Turbootzz/freshdock/blob/main/CONTRIBUTING.md)
+- [Manual test playbooks](https://github.com/Turbootzz/freshdock/tree/main/docs/manual-tests) — maintainer smoke tests.
 
-Runnable example stacks: [`examples/compose/`](../examples/compose/).
+Runnable example stacks: [`examples/compose/`](https://github.com/Turbootzz/freshdock/tree/main/examples/compose).

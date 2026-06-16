@@ -216,5 +216,5 @@ triggers    = ["succeeded", "failed"]
 ```
 
 A copy-paste starting point with every section commented out lives at
-[`freshdock.toml.example`](../freshdock.toml.example) in the repository root.
-Runnable compose stacks live in [`examples/compose/`](../examples/compose/).
+[`freshdock.toml.example`](https://github.com/Turbootzz/freshdock/blob/main/freshdock.toml.example) in the repository root.
+Runnable compose stacks live in [`examples/compose/`](https://github.com/Turbootzz/freshdock/tree/main/examples/compose).
