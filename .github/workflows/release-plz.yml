@@ -8,6 +8,7 @@ name: release-plz
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}   # allow manual runs (e.g. after a registry publish lands)
 
 permissions:
   contents: write        # push the release branch
