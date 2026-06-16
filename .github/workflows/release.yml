@@ -76,7 +76,7 @@ jobs:
 
       # Collect every per-arch binary back into a single dist/ tree the
       # Dockerfile COPYs from.
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: freshdock-*
@@ -140,7 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: freshdock-*
