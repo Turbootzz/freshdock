@@ -21,7 +21,9 @@
 # Project & development
 
 - [Architecture & roadmap](PLAN.md)
-- [Manual test playbooks]()
-  - [Recreate round-trip](manual-tests/recreate.md)
-  - [Image cleanup](manual-tests/cleanup.md)
-  - [SMTP notifications](manual-tests/smtp.md)
+
+# Manual test playbooks
+
+- [Recreate round-trip](manual-tests/recreate.md)
+- [Image cleanup](manual-tests/cleanup.md)
+- [SMTP notifications](manual-tests/smtp.md)
