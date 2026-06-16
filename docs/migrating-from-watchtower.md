@@ -10,6 +10,12 @@ container unless you exclude it; freshdock ignores every container unless you se
 to `watch` (detect-and-notify, never restart) — nothing is recreated until you
 ask for it with a mode like `live` or `nightly`.
 
+> **Config is environment-first, like Watchtower.** freshdock's fleet-wide
+> settings, registry credentials, and `run` flags are all environment variables —
+> a container deployment needs no config file. The only thing that still wants a
+> `freshdock.toml` is *declaring* a notification target (its secret can stay in the
+> environment). See the [configuration reference](configuration.md).
+
 ## Label translation
 
 | Watchtower label | freshdock label | Notes |
@@ -33,9 +39,9 @@ ask for it with a mode like `live` or `nightly`.
 | `--cleanup` / `WATCHTOWER_CLEANUP` | `[settings] cleanup = true`, `FRESHDOCK_CLEANUP=true`, or `freshdock.cleanup=true` per container | Off by default. Removes the *replaced image* after a healthy update; add `[settings] prune_dangling = true` (or `FRESHDOCK_PRUNE_DANGLING=true`) for a daemon-wide dangling prune. The replaced container archive is always removed regardless. |
 | `--remove-volumes` / `WATCHTOWER_REMOVE_VOLUMES` | *(no equivalent)* | freshdock never removes volumes; recreate preserves all mounts. |
 | `--rolling-restart` / `WATCHTOWER_ROLLING_RESTART` | *(not applicable)* | freshdock recreates one container at a time and health-gates each. |
-| `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | `[notifications.<name>]` tables in `freshdock.toml` | Webhook / Discord / Telegram / SMTP. See [notifications](notifications.md). |
+| `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | a `[notifications.<name>]` table in `freshdock.toml` | The one thing that needs a file — env vars can carry the *secret* (`FRESHDOCK_NOTIFY_<NAME>_*`) but can't declare the target. Webhook / Discord / Telegram / SMTP. See [notifications](notifications.md). |
 | `WATCHTOWER_NOTIFICATIONS_LEVEL` / per-event config | per-target `triggers = ["available","succeeded","failed"]` | Subscribe each target to the events it cares about. |
-| `REPO_USER` / `REPO_PASS` (registry auth) | `[registry.<name>]` table or `FRESHDOCK_REGISTRY_*` env | Per-registry credentials. |
+| `REPO_USER` / `REPO_PASS` (registry auth) | `FRESHDOCK_REGISTRY_*` env (or a `[registry.<name>]` table) | Per-registry credentials. An env token alone is enough; no file needed. |
 | `DOCKER_HOST` | `DOCKER_HOST` | Same — bollard honours the standard Docker env. |
 
 ## A worked example
@@ -56,8 +62,9 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 ```
 
-The freshdock equivalent — schedule and notify-opt-in move onto the containers,
-notifications move into `freshdock.toml`:
+The freshdock equivalent — schedule and notify-opt-in move onto the containers as
+labels. The only file you need is a `freshdock.toml` to *declare* the Discord
+target (everything else is labels and environment):
 
 ```yaml
 services:

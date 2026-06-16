@@ -5,6 +5,12 @@ an opted-in container (`freshdock.notify=true`) reaches one of three events. Tar
 are configured as [`[notifications.<name>]`](configuration.md#notificationsname)
 tables in `freshdock.toml`.
 
+> **This is the one feature that needs a config file.** Everything else in freshdock
+> is configurable through labels and environment variables, but a notification
+> *target* must be declared in a `freshdock.toml` — env vars can only supply its
+> [secret](#secrets), not create the target. Mount the file read-only and keep the
+> secret in the environment (see [deployment](deployment.md#mounting-a-config-file-for-notifications)).
+
 ## Events (triggers)
 
 | Trigger | When | Applies to modes |

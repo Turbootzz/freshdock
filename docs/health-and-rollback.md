@@ -69,8 +69,8 @@ A successful, health-passed update always removes the replaced **container** arc
 The superseded **image** is kept by default; opt into removing it:
 
 - per container: `freshdock.cleanup=true`
-- fleet-wide default: `[settings] cleanup = true`
-- plus a daemon-wide dangling-image prune: `[settings] prune_dangling = true`
+- fleet-wide default: `[settings] cleanup = true` (or `FRESHDOCK_CLEANUP=true`)
+- plus a daemon-wide dangling-image prune: `[settings] prune_dangling = true` (or `FRESHDOCK_PRUNE_DANGLING=true`)
 
 Cleanup is **best-effort**:
 

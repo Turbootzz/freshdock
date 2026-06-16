@@ -32,21 +32,46 @@ Or with compose — see the runnable stacks in
 | `watch` / `check` only (never recreates) | `:ro` is enough — `-v /var/run/docker.sock:/var/run/docker.sock:ro` |
 | Any updating mode (`live`/`nightly`/`weekly`/`monthly`, or `recreate`) | writable — `-v /var/run/docker.sock:/var/run/docker.sock` |
 
-### Mounting a config file
+### Configuration: environment first
+
+Most deployments need no config file. Fleet-wide settings, registry credentials,
+and the `run` flags are all environment variables — pass them under `environment:`
+in compose (or `Environment=` in a systemd unit):
+
+```yaml
+services:
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    environment:
+      FRESHDOCK_DEFAULT_MODE: "nightly"
+      FRESHDOCK_REGISTRY_GHCR_USERNAME: "${GHCR_USER:-}"
+      FRESHDOCK_REGISTRY_GHCR_TOKEN: "${GHCR_TOKEN:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+```
+
+The full list is the [env-var table](configuration.md#environment-variables).
+
+### Mounting a config file (for notifications)
+
+You only need a `freshdock.toml` to *declare* a notification target (see
+[notifications](notifications.md)). Mount it read-only and keep its secrets in the
+environment:
 
 ```yaml
 services:
   freshdock:
     image: ghcr.io/turbootzz/freshdock:latest
     command: ["run", "--config", "/config/freshdock.toml"]
+    environment:
+      FRESHDOCK_NOTIFY_EMAIL_PASSWORD: "${SMTP_PASSWORD:-}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./freshdock.toml:/config/freshdock.toml:ro
     restart: unless-stopped
 ```
-
-Keep secrets out of the file by supplying them via the environment instead — see the
-[env-var table](configuration.md#environment-variables).
 
 ## As a host binary (systemd)
 

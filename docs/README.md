@@ -11,7 +11,7 @@ dive into the reference pages.
 
 ## Reference
 
-- [**Configuration**](configuration.md) — the single source of truth for labels, `freshdock.toml`, and environment variables.
+- [**Configuration**](configuration.md) — the single source of truth: labels, environment variables (the primary path), and the optional `freshdock.toml`.
 - [**CLI reference**](cli-reference.md) — `check`, `recreate`, `run`, and every flag.
 - [**Scheduling & modes**](scheduling.md) — update modes and cron syntax.
 - [**Notifications**](notifications.md) — webhook, Discord, Telegram, SMTP.
