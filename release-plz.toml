@@ -7,3 +7,6 @@
 git_tag_enable = false
 git_release_enable = false
 publish = false
+# Binary crate: the lib API is public only for tests, not a real contract. Off so
+# version bumps follow commit types instead of cargo-semver-checks.
+semver_check = false
