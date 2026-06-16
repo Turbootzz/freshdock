@@ -28,6 +28,24 @@ impl Match for NoAuthHeader {
     }
 }
 
+/// Matches a request that *carries* an `Authorization` header — the complement of
+/// [`NoAuthHeader`], so a token endpoint can reject the authenticated attempt and
+/// grant the anonymous one without depending on the exact basic-auth value.
+struct HasAuthHeader;
+impl Match for HasAuthHeader {
+    fn matches(&self, req: &Request) -> bool {
+        req.headers.contains_key("authorization")
+    }
+}
+
+/// A store with a single, deliberately wrong Docker Hub credential, keyed so it
+/// resolves for `docker.io` images.
+fn store_with_bad_dockerhub_creds() -> Arc<CredentialStore> {
+    let config = Config::from_toml("[registry.dockerhub]\nusername = \"u\"\ntoken = \"wrong\"\n")
+        .expect("valid toml");
+    Arc::new(build_store(config, std::iter::empty::<(String, String)>()))
+}
+
 fn anonymous_registry(server: &MockServer) -> OciRegistry {
     OciRegistry::with_base_url(Arc::new(CredentialStore::default()), &server.uri())
 }
@@ -303,6 +321,68 @@ async fn token_endpoint_failure_maps_to_auth_error() {
         .await
         .expect_err("a 401 from the realm should surface as an auth error");
     assert!(matches!(err, RegistryError::Auth(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn rejected_creds_on_public_image_falls_back_to_anonymous() {
+    // A stale/wrong Docker Hub token must NOT break a public image: the token
+    // endpoint rejects the authenticated attempt, the client retries anonymously,
+    // and the digest still resolves.
+    let server = MockServer::start().await;
+    mount_challenge(&server, "/v2/library/alpine/manifests/latest", None).await;
+    // Authenticated token request → rejected.
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(HasAuthHeader)
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    // Anonymous token request → granted.
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(NoAuthHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "anon-token"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/alpine/manifests/latest"))
+        .and(header("authorization", "Bearer anon-token"))
+        .respond_with(
+            ResponseTemplate::new(200).insert_header("docker-content-digest", SAMPLE_DIGEST),
+        )
+        .mount(&server)
+        .await;
+
+    let registry = OciRegistry::with_base_url(store_with_bad_dockerhub_creds(), &server.uri());
+    let digest = registry
+        .fetch_digest(&ImageRef::parse("alpine"))
+        .await
+        .expect("public image must survive a rejected credential via anonymous fallback");
+    assert_eq!(digest.0, SAMPLE_DIGEST);
+}
+
+#[tokio::test]
+async fn rejected_creds_on_private_image_surfaces_credentials_rejected() {
+    // Bad creds AND a genuinely private image (anonymous also denied) → a distinct
+    // typed error so the operator knows to rotate the token, not just set one.
+    let server = MockServer::start().await;
+    mount_challenge(&server, "/v2/owner/repo/manifests/latest", None).await;
+    // Both the authenticated and the anonymous token attempts are denied.
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+
+    let registry = OciRegistry::with_base_url(store_with_bad_dockerhub_creds(), &server.uri());
+    let err = registry
+        .fetch_digest(&ImageRef::parse("owner/repo"))
+        .await
+        .expect_err("private image + rejected creds + anonymous denied must error");
+    assert!(
+        matches!(err, RegistryError::CredentialsRejected(_)),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

@@ -39,6 +39,14 @@ pub enum RegistryError {
     Http(#[from] reqwest::Error),
     #[error("authentication failed: {0}")]
     Auth(String),
+    /// Configured credentials were rejected by the token endpoint (401/403) and
+    /// the anonymous fallback was also denied — i.e. the image is genuinely
+    /// private *and* the token is wrong/stale. Distinct from [`Auth`] ("no
+    /// credentials configured") so the operator knows to rotate, not to set, a
+    /// token. When the anonymous fallback succeeds, no error is returned at all;
+    /// the rejection surfaces as a `warn!` and the digest flows through.
+    #[error("configured credentials rejected for {0}")]
+    CredentialsRejected(String),
     #[error("manifest digest header missing or unparseable")]
     MissingDigest,
     #[error("invalid endpoint url: {0}")]

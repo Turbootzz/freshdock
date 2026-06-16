@@ -24,9 +24,13 @@ pub enum ProbeOutcome {
     },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
-    /// The registry needs credentials we don't have (or the configured ones
-    /// were rejected). Reported, not errored — set `[registry.<name>]` creds.
+    /// The registry needs credentials we don't have. Reported, not errored —
+    /// set `[registry.<name>]` creds.
     AuthRequired,
+    /// Configured credentials were rejected and the anonymous fallback was also
+    /// denied (a private image with a stale/wrong token). Distinct from
+    /// [`AuthRequired`] — the fix is to rotate the token, not to set one.
+    CredentialsRejected,
     /// The registry was unreachable; degrade gracefully (retry later).
     NetworkUnavailable,
     /// The fetch failed for some other reason; the message is for display/logs.
@@ -68,6 +72,12 @@ pub async fn probe_image(
         Err(RegistryError::Auth(reason)) => {
             warn!(repo = %image_ref.repository, %reason, "registry requires credentials");
             ProbeOutcome::AuthRequired
+        }
+        // Creds were set but rejected, and anonymous couldn't see the image
+        // either — surfaced distinctly so the operator rotates the token.
+        Err(RegistryError::CredentialsRejected(host)) => {
+            warn!(repo = %image_ref.repository, %host, "configured credentials rejected; anonymous access also denied");
+            ProbeOutcome::CredentialsRejected
         }
         Err(e) => {
             warn!(repo = %image_ref.repository, error = %e, "digest fetch failed");
@@ -273,22 +283,31 @@ mod tests {
         }
     }
 
+    /// What the fake registry should yield on the next `fetch_digest`.
+    enum FakeResult {
+        Digest(String),
+        AuthRequired,
+        CredentialsRejected,
+    }
+
     struct FakeRegistry {
-        /// `Some` digest to return, or `None` to simulate an auth failure.
-        digest: Option<String>,
+        result: FakeResult,
         calls: AtomicUsize,
     }
 
     impl FakeRegistry {
         fn new(digest: &str) -> Self {
-            Self {
-                digest: Some(digest.to_owned()),
-                calls: AtomicUsize::new(0),
-            }
+            Self::with(FakeResult::Digest(digest.to_owned()))
         }
         fn auth_required() -> Self {
+            Self::with(FakeResult::AuthRequired)
+        }
+        fn credentials_rejected() -> Self {
+            Self::with(FakeResult::CredentialsRejected)
+        }
+        fn with(result: FakeResult) -> Self {
             Self {
-                digest: None,
+                result,
                 calls: AtomicUsize::new(0),
             }
         }
@@ -298,9 +317,14 @@ mod tests {
     impl Registry for FakeRegistry {
         async fn fetch_digest(&self, _image: &ImageRef) -> Result<Digest, RegistryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            match &self.digest {
-                Some(d) => Ok(Digest(d.clone())),
-                None => Err(RegistryError::Auth("no credentials for registry".into())),
+            match &self.result {
+                FakeResult::Digest(d) => Ok(Digest(d.clone())),
+                FakeResult::AuthRequired => {
+                    Err(RegistryError::Auth("no credentials for registry".into()))
+                }
+                FakeResult::CredentialsRejected => {
+                    Err(RegistryError::CredentialsRejected("docker.io".into()))
+                }
             }
         }
     }
@@ -356,6 +380,15 @@ mod tests {
         let registry = FakeRegistry::auth_required();
         let outcome = probe_image(&docker, &registry, "ghcr.io/owner/private:v1").await;
         assert_eq!(outcome, ProbeOutcome::AuthRequired);
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn registry_credentials_rejected_maps_to_credentials_rejected() {
+        let docker = FakeDocker::new(&[]);
+        let registry = FakeRegistry::credentials_rejected();
+        let outcome = probe_image(&docker, &registry, "ghcr.io/owner/private:v1").await;
+        assert_eq!(outcome, ProbeOutcome::CredentialsRejected);
         assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
     }
 

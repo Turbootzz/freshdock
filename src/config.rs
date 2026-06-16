@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::labels::{Mode, PolicyDefaults};
 
@@ -278,6 +278,36 @@ impl CredentialStore {
     pub fn is_empty(&self) -> bool {
         self.by_host.is_empty()
     }
+
+    pub fn len(&self) -> usize {
+        self.by_host.len()
+    }
+
+    /// Canonical hosts with credentials loaded, sorted for stable log/test
+    /// output. Returns host names only — never a [`Secret`] — so it is safe to
+    /// log at any level.
+    pub fn hosts(&self) -> Vec<&str> {
+        let mut hosts: Vec<&str> = self.by_host.keys().map(String::as_str).collect();
+        hosts.sort_unstable();
+        hosts
+    }
+}
+
+/// Emit a one-line startup confirmation of which registries have credentials, so
+/// an operator can tell whether their `FRESHDOCK_REGISTRY_*` env vars were picked
+/// up. The empty case is `info!` (not `debug!`) on purpose: someone who set a
+/// credential and sees "anonymous access only" immediately knows the var name was
+/// wrong. Logs host names only — never a [`Secret`].
+fn log_credentials_loaded(credentials: &CredentialStore) {
+    if credentials.is_empty() {
+        info!("no registry credentials loaded; using anonymous access only");
+    } else {
+        info!(
+            count = credentials.len(),
+            registries = ?credentials.hosts(),
+            "registry credentials loaded"
+        );
+    }
 }
 
 impl Config {
@@ -319,6 +349,7 @@ impl Config {
             build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
         let settings = resolve_settings(std::mem::take(&mut config.settings), std::env::vars());
         let credentials = Arc::new(build_store(config, std::env::vars()));
+        log_credentials_loaded(&credentials);
         Ok(LoadedConfig {
             credentials,
             notifications,
@@ -583,6 +614,35 @@ mod tests {
         assert!(store.get("reg.example.com").is_some());
     }
 
+    #[test]
+    fn hosts_returns_sorted_canonical_hosts() {
+        let cfg = Config::from_toml(
+            r#"
+            [registry.ghcr]
+            token = "g"
+            [registry.dockerhub]
+            username = "u"
+            token = "d"
+            [registry."reg.example.com"]
+            token = "r"
+            "#,
+        )
+        .unwrap();
+        let store = build_store(cfg, env(&[]));
+        // Aliases fold to canonical hosts; output is sorted for stable logs.
+        assert_eq!(store.hosts(), ["docker.io", "ghcr.io", "reg.example.com"]);
+        assert_eq!(store.len(), 3);
+        assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn hosts_empty_for_default_store() {
+        let store = CredentialStore::default();
+        assert!(store.hosts().is_empty());
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+    }
+
     // --- secret redaction ---
 
     #[test]
@@ -599,8 +659,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn token_is_redacted_in_tracing_output() {
+    /// Run `f` with a temporary tracing subscriber that writes to an in-memory
+    /// buffer, and return everything it logged — so a test can assert on (or
+    /// prove the absence of) a value in real log output.
+    fn capture_logs(f: impl FnOnce()) -> String {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
         use tracing_subscriber::fmt::MakeWriter;
@@ -628,21 +690,47 @@ mod tests {
             .with_writer(BufWriter(buf.clone()))
             .with_ansi(false)
             .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
 
+    #[test]
+    fn token_is_redacted_in_tracing_output() {
         let creds = RegistryCredentials {
             username: Some("user".into()),
             token: Secret::new("supersecret-pat"),
         };
-        tracing::subscriber::with_default(subscriber, || {
+        let out = capture_logs(|| {
             tracing::info!(?creds, "loaded credentials");
             tracing::info!(token = ?creds.token, "token field");
         });
-
-        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(!out.contains("supersecret-pat"), "secret leaked: {out}");
         assert!(
             out.contains("[REDACTED]"),
             "expected redaction marker: {out}"
+        );
+    }
+
+    #[test]
+    fn credential_summary_log_never_leaks_token() {
+        // Exercise the real `Config::load` logging path: prove it can't regress
+        // into formatting a token even when the store holds one.
+        let cfg = Config::from_toml(
+            "[registry.dockerhub]\nusername = \"u\"\ntoken = \"supersecret-pat\"\n",
+        )
+        .unwrap();
+        let store = build_store(cfg, env(&[]));
+        let out = capture_logs(|| log_credentials_loaded(&store));
+        assert!(!out.contains("supersecret-pat"), "secret leaked: {out}");
+        assert!(out.contains("docker.io"), "host should be present: {out}");
+    }
+
+    #[test]
+    fn credential_summary_logs_anonymous_when_empty() {
+        let out = capture_logs(|| log_credentials_loaded(&CredentialStore::default()));
+        assert!(
+            out.contains("anonymous"),
+            "empty store must announce anonymous-only: {out}"
         );
     }
 

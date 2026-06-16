@@ -16,6 +16,7 @@ use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
 
 const AUTH_REQUIRED: &str = "auth required (set credentials)";
+const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
 const PINNED: &str = "pinned (no check)";
 
@@ -132,6 +133,7 @@ fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String)
             (current, PINNED.to_string(), dash())
         }
         ProbeOutcome::AuthRequired => (dash(), AUTH_REQUIRED.to_string(), dash()),
+        ProbeOutcome::CredentialsRejected => (dash(), CREDENTIALS_REJECTED.to_string(), dash()),
         ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
         ProbeOutcome::Error(msg) => (dash(), format!("error: {msg}"), dash()),
     }
@@ -376,6 +378,18 @@ mod tests {
             1,
             "the image is probed now (no more Phase-5 short-circuit)"
         );
+    }
+
+    #[test]
+    fn credentials_rejected_renders_distinct_status() {
+        // A rejected token (private image) must read differently from "no creds"
+        // so the operator rotates rather than sets a credential.
+        let (current, latest, update) =
+            render_cells("alpine:3.19", &ProbeOutcome::CredentialsRejected);
+        assert_eq!(latest, CREDENTIALS_REJECTED);
+        assert_ne!(latest, AUTH_REQUIRED);
+        assert_eq!(current, "-");
+        assert_eq!(update, "-");
     }
 
     #[tokio::test]
