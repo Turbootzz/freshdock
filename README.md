@@ -7,13 +7,13 @@
 **A modern, health-gated Docker container auto-updater — a maintained successor to Watchtower, in a single Rust binary.**
 
 [![CI](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml/badge.svg)](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml)
-[![Crate](https://img.shields.io/crates/v/freshdock.svg)](https://crates.io/crates/freshdock)
+[![Crate](https://img.shields.io/crates/v/freshdock)](https://crates.io/crates/freshdock)
 [![docs](https://img.shields.io/badge/docs-guide-blue.svg)](https://turbootzz.github.io/freshdock/)
 [![GHCR image](https://img.shields.io/badge/ghcr.io-turbootzz%2Ffreshdock-2496ED.svg)](https://github.com/Turbootzz/freshdock/pkgs/container/freshdock)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Turbootzz)
 
-[Quickstart](docs/quickstart.md) · [Docs](https://turbootzz.github.io/freshdock/) · [Configuration](docs/configuration.md) · [From Watchtower](docs/migrating-from-watchtower.md)
+[Quickstart](https://turbootzz.github.io/freshdock/quickstart.html) · [Docs](https://turbootzz.github.io/freshdock/) · [Configuration](https://turbootzz.github.io/freshdock/configuration.html) · [From Watchtower](https://turbootzz.github.io/freshdock/migrating-from-watchtower.html)
 
 </div>
 
@@ -63,7 +63,7 @@ freshdock check    # read-only: which containers have updates available?
 ```
 
 Ready to let it update something? Switch to `freshdock.mode=nightly` (and give the
-daemon a writable socket). Full walkthrough → [**Quickstart**](docs/quickstart.md).
+daemon a writable socket). Full walkthrough → [**Quickstart**](https://turbootzz.github.io/freshdock/quickstart.html).
 
 ## Install
 
@@ -99,24 +99,24 @@ Set the mode (and an optional cron override) with labels:
       - "freshdock.schedule=0 2 * * 1"   # 02:00 every Monday (overrides the default)
 ```
 
-Full label vocabulary and cron syntax → [**Configuration**](docs/configuration.md#labels)
-and [**Scheduling**](docs/scheduling.md).
+Full label vocabulary and cron syntax → [**Configuration**](https://turbootzz.github.io/freshdock/configuration.html#labels)
+and [**Scheduling**](https://turbootzz.github.io/freshdock/scheduling.html).
 
 ## Documentation
 
 | | |
 |---|---|
-| [Quickstart](docs/quickstart.md) | Up and running in a minute. |
-| [Configuration](docs/configuration.md) | Every label, `freshdock.toml` table, and env var (the single source of truth). |
-| [CLI reference](docs/cli-reference.md) | `check`, `recreate`, `run`, and all flags. |
-| [Scheduling & modes](docs/scheduling.md) | Update modes and cron syntax. |
-| [Notifications](docs/notifications.md) | Webhook, Discord, Telegram, SMTP. |
-| [Health & rollback](docs/health-and-rollback.md) | The recreate lifecycle and image cleanup. |
-| [Registry auth](docs/registry-auth.md) | Private registries and credentials. |
-| [Deployment](docs/deployment.md) | Container, systemd, socket permissions, compatibility. |
-| [Troubleshooting](docs/troubleshooting.md) | Symptom-first fixes for common first-run issues. |
-| [Migrating from Watchtower](docs/migrating-from-watchtower.md) | Label/flag translation. |
-| [Architecture & roadmap](docs/PLAN.md) | Design, phases, goals, risks. |
+| [Quickstart](https://turbootzz.github.io/freshdock/quickstart.html) | Up and running in a minute. |
+| [Configuration](https://turbootzz.github.io/freshdock/configuration.html) | Every label, env var, and `freshdock.toml` table (the single source of truth). |
+| [CLI reference](https://turbootzz.github.io/freshdock/cli-reference.html) | `check`, `recreate`, `run`, and all flags. |
+| [Scheduling & modes](https://turbootzz.github.io/freshdock/scheduling.html) | Update modes and cron syntax. |
+| [Notifications](https://turbootzz.github.io/freshdock/notifications.html) | Webhook, Discord, Telegram, SMTP. |
+| [Health & rollback](https://turbootzz.github.io/freshdock/health-and-rollback.html) | The recreate lifecycle and image cleanup. |
+| [Registry auth](https://turbootzz.github.io/freshdock/registry-auth.html) | Private registries and credentials. |
+| [Deployment](https://turbootzz.github.io/freshdock/deployment.html) | Container, systemd, socket permissions, compatibility. |
+| [Troubleshooting](https://turbootzz.github.io/freshdock/troubleshooting.html) | Symptom-first fixes for common first-run issues. |
+| [Migrating from Watchtower](https://turbootzz.github.io/freshdock/migrating-from-watchtower.html) | Label/flag translation. |
+| [Architecture & roadmap](https://turbootzz.github.io/freshdock/PLAN.html) | Design, phases, goals, risks. |
 
 Runnable example stacks: [`examples/compose/`](examples/compose/). A commented
 config template: [`freshdock.toml.example`](freshdock.toml.example).
@@ -146,8 +146,8 @@ community has forks, but none combine what matters for a small homelab:
 ## Status & roadmap
 
 Phases 0–7 are complete and freshdock is at its first stable release, `1.0.0`.
-The full plan and architecture live in [docs/PLAN.md](docs/PLAN.md); release
-mechanics in [RELEASE.md](RELEASE.md); per-version notes in
+The full plan and architecture live in [the roadmap](https://turbootzz.github.io/freshdock/PLAN.html);
+release mechanics in [RELEASE.md](RELEASE.md); per-version notes in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing

@@ -4,8 +4,16 @@ freshdock checks digests against any OCI-compliant registry that uses the Docker
 registry v2 bearer-token flow — Docker Hub, GHCR, Quay.io, lscr.io, and others.
 Public images resolve anonymously; private images need credentials.
 
-> **Syntax lives in one place.** The exact `[registry.<name>]` table and the
-> `FRESHDOCK_REGISTRY_*` environment variables are documented in the
+The simplest way to supply them is environment variables —
+`FRESHDOCK_REGISTRY_<NAME>_TOKEN` (plus `_USERNAME` where the registry needs it) for
+the four aliases (`DOCKERHUB`, `GHCR`, `QUAY`, `LSCR`); no config file is required.
+GHCR, Quay, and lscr authenticate with a token alone, while Docker Hub also needs its
+account name (`FRESHDOCK_REGISTRY_DOCKERHUB_USERNAME`). A `[registry.<name>]` table in
+`freshdock.toml` is the alternative, and the *only* option for a custom host whose
+name contains dots.
+
+> **Syntax lives in one place.** The exact `FRESHDOCK_REGISTRY_*` environment
+> variables and the `[registry.<name>]` table are documented in the
 > [configuration reference](configuration.md#registryname). This page covers the
 > registry-specific *guidance* — what credentials each registry wants, the alias
 > list, a smoke test, and what's out of scope.

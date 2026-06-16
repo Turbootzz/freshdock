@@ -12,11 +12,14 @@ Available on every subcommand.
 | Option | Default | Meaning |
 |---|---|---|
 | `--no-color` | colour on a TTY | Disable ANSI colour. Use for log files / non-interactive output. Setting `NO_COLOR` to any non-empty value does the same. |
-| `--config <PATH>` | see below | Path to `freshdock.toml`. |
+| `--config <PATH>` | see below | Path to an optional `freshdock.toml`. |
 
-Config resolution order: `--config <PATH>` → `$FRESHDOCK_CONFIG` →
+The config file is optional — freshdock is configured primarily through
+[environment variables](configuration.md#environment-variables) and per-container
+labels, and a file is only needed to declare notification targets. When you do use
+one, the resolution order is `--config <PATH>` → `$FRESHDOCK_CONFIG` →
 `./freshdock.toml`. An explicit path that's missing is an error; a missing default
-file is fine. See the [configuration reference](configuration.md#the-freshdocktoml-file).
+file is fine. See the [configuration reference](configuration.md#the-optional-freshdocktoml-file).
 
 `RUST_LOG` controls log verbosity (default `info`; try `freshdock=debug` or
 `trace`). Secrets are always redacted.

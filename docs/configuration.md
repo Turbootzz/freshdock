@@ -1,8 +1,21 @@
 # Configuration reference
 
-This is the single source of truth for everything freshdock reads: the per-container
-**labels**, the **`freshdock.toml`** file (settings, registries, notifications), and
-the **environment variables** that override the file.
+This is the single source of truth for everything freshdock reads. Configuration
+comes from three places:
+
+- **Labels** on each container — what to update and when (per-container behaviour).
+- **Environment variables** — fleet-wide settings, registry credentials, the `run`
+  flags, and notification secrets. This is the primary way to configure a
+  deployment: nothing to mount.
+- An optional **`freshdock.toml`** file — needed only to *declare* notification
+  targets, and to hold credentials for a registry whose host can't be spelled as an
+  env-var name. Environment variables override the file, per field.
+
+> **You usually don't need a file.** Registry credentials, the `[settings]`
+> defaults, and the `run` flags all have environment variables — a container
+> deployment never has to mount a `freshdock.toml`. The one thing env vars can't do
+> is *declare* a notification target; that block has to live in the file (its
+> secrets can still come from the environment). See [notifications](notifications.md).
 
 - New here? Start with the [quickstart](quickstart.md).
 - Just need the command flags? See the [CLI reference](cli-reference.md).
@@ -10,11 +23,11 @@ the **environment variables** that override the file.
 ## Contents
 
 - [Labels](#labels) — per-container behaviour
-- [The `freshdock.toml` file](#the-freshdocktoml-file) — location and precedence
+- [Environment variables](#environment-variables) — the primary fleet-wide config
+- [The optional `freshdock.toml` file](#the-optional-freshdocktoml-file) — when you need one
 - [`[settings]`](#settings) — fleet-wide defaults
 - [`[registry.<name>]`](#registryname) — registry credentials
 - [`[notifications.<name>]`](#notificationsname) — notification targets
-- [Environment variables](#environment-variables)
 - [A complete example](#a-complete-example)
 
 ---
@@ -38,8 +51,8 @@ is reported with the offending label named.
 
 When `freshdock.enable=true` but `freshdock.mode` is absent, the mode is `watch`
 (detect-and-notify, never mutate) — a non-destructive default. Change this
-fleet-wide fallback with [`[settings] default_mode`](#settings); an explicit
-`freshdock.mode` label always wins.
+fleet-wide fallback with [`[settings] default_mode`](#settings) (or
+`FRESHDOCK_DEFAULT_MODE`); an explicit `freshdock.mode` label always wins.
 
 > **Mode vs. schedule.** `freshdock.schedule` only refines the *calendar* modes
 > (`nightly` / `weekly` / `monthly`). `live` and `watch` are polled on the
@@ -57,10 +70,47 @@ fleet-wide fallback with [`[settings] default_mode`](#settings); an explicit
 
 ---
 
-## The `freshdock.toml` file
+## Environment variables
 
-The file is **optional** — freshdock runs without it (public images need no
-credentials, and notifications are simply off). It is resolved in this order:
+Environment variables are the primary way to configure freshdock — a container
+deployment can run entirely from them, no file mounted. They also **override the
+file per field** (a lone `…_TOKEN` replaces the file token while keeping the file
+username). For registry and notification targets, the `<NAME>` is the table name,
+upper-cased, with `-` → `_`.
+
+| Variable | Sets / overrides | Notes |
+|---|---|---|
+| `FRESHDOCK_CONFIG` | config file path | The `--config` flag wins over it. |
+| `FRESHDOCK_REGISTRY_<NAME>_USERNAME` | `[registry.<name>] username` | `<NAME>` = alias (`DOCKERHUB`, `GHCR`, `QUAY`, `LSCR`). Hosts with dots can't be expressed unambiguously — configure those in the file. |
+| `FRESHDOCK_REGISTRY_<NAME>_TOKEN` | `[registry.<name>] token` | A token (with or without a username) is enough to create a registry entry from the environment alone — no file needed. |
+| `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | Overrides a secret on a target **declared in the file** — env can't create the target itself. |
+| `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | Same: overrides a secret on a file-declared target. |
+| `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
+| `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
+| `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
+| `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
+| `NO_COLOR` | `--no-color` | Any non-empty value disables colored output. |
+| `RUST_LOG` | log verbosity | e.g. `info`, `freshdock=debug`, `trace`. Default `info`. |
+| `DOCKER_HOST` | Docker daemon endpoint | Honoured by the underlying Docker client (bollard). |
+
+`freshdock --help` prints the same override list (`after_long_help`).
+
+---
+
+## The optional `freshdock.toml` file
+
+The file is **optional** — freshdock runs without it. Reach for it only when you
+need something environment variables can't express:
+
+1. **Declaring a notification target** (a `[notifications.<name>]` block). Env vars
+   can supply that target's *secret*, but the target itself must be declared here.
+2. **Registry credentials for a custom host with dots** (e.g.
+   `registry.example.com`), whose name can't be spelled as an env-var name.
+
+Everything else — the four registry aliases, the `[settings]` defaults, the `run`
+flags — has an environment variable, so most deployments need no file at all.
+
+When present, it is resolved in this order:
 
 1. `--config <path>` flag
 2. `$FRESHDOCK_CONFIG`
@@ -76,7 +126,8 @@ and `[notifications.*]`.
 
 ### `[settings]`
 
-Fleet-wide defaults. Every key is optional.
+Fleet-wide defaults. Every key is optional — and each has an environment variable
+(shown below) that overrides it.
 
 ```toml
 [settings]
@@ -88,17 +139,19 @@ prune_dangling = false     # additionally run a daemon-wide dangling-image prune
                            # after each successful update (no per-container override).
 ```
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `default_mode` | string (a mode name) | unset → `watch` | Applied to enabled containers without a `freshdock.mode` label. A `freshdock.mode` label always overrides it. |
-| `cleanup` | bool | `false` | Default for `freshdock.cleanup`. Best-effort; a shared image in use elsewhere is kept, and a cleanup failure never fails the update. |
-| `prune_dangling` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. |
+| Key | Env var | Type | Default | Notes |
+|---|---|---|---|---|
+| `default_mode` | `FRESHDOCK_DEFAULT_MODE` | string (a mode name) | unset → `watch` | Applied to enabled containers without a `freshdock.mode` label. A `freshdock.mode` label always overrides it. |
+| `cleanup` | `FRESHDOCK_CLEANUP` | bool | `false` | Default for `freshdock.cleanup`. Best-effort; a shared image in use elsewhere is kept, and a cleanup failure never fails the update. |
+| `prune_dangling` | `FRESHDOCK_PRUNE_DANGLING` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. |
 
 ### `[registry.<name>]`
 
 One table per registry. `<name>` may be a friendly alias (`dockerhub`, `ghcr`,
 `quay`, `lscr`) or a literal host (`"registry.example.com"`); both fold onto the
-same registry as the matching image reference.
+same registry as the matching image reference. For the four aliases you can skip
+the file entirely and set `FRESHDOCK_REGISTRY_<NAME>_TOKEN` (and optionally
+`_USERNAME`) instead.
 
 ```toml
 [registry.ghcr]
@@ -123,10 +176,11 @@ out of scope), see [registry-auth.md](registry-auth.md).
 
 ### `[notifications.<name>]`
 
-One table per target, selected by `type`. Every target may set an optional
-`triggers` list to subscribe to a subset of events; omit it (or use `[]`) to
-receive all three (`available`, `succeeded`, `failed`). Payload formats and the
-event/mode matrix are documented in [notifications.md](notifications.md).
+One table per target, selected by `type`. **This is the one thing that requires the
+file** — env vars can supply a target's secret but can't declare the target. Every
+target may set an optional `triggers` list to subscribe to a subset of events; omit
+it (or use `[]`) to receive all three (`available`, `succeeded`, `failed`). Payload
+formats and the event/mode matrix are documented in [notifications.md](notifications.md).
 
 ```toml
 [notifications.ops-webhook]
@@ -171,32 +225,27 @@ allowed).
 
 ---
 
-## Environment variables
-
-Environment variables override the file **per field** (a lone `…_TOKEN` replaces
-the file token while keeping the file username). The `<NAME>` is the table name,
-upper-cased, with `-` → `_`.
-
-| Variable | Overrides | Notes |
-|---|---|---|
-| `FRESHDOCK_CONFIG` | config file path | The `--config` flag wins over it. |
-| `FRESHDOCK_REGISTRY_<NAME>_USERNAME` | `[registry.<name>] username` | `<NAME>` = alias (`DOCKERHUB`, `GHCR`, `QUAY`, `LSCR`). Hosts with dots can't be expressed unambiguously — configure those in the file. |
-| `FRESHDOCK_REGISTRY_<NAME>_TOKEN` | `[registry.<name>] token` | |
-| `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | |
-| `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | |
-| `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
-| `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
-| `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
-| `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
-| `NO_COLOR` | `--no-color` | Any non-empty value disables colored output. |
-| `RUST_LOG` | log verbosity | e.g. `info`, `freshdock=debug`, `trace`. Default `info`. |
-| `DOCKER_HOST` | Docker daemon endpoint | Honoured by the underlying Docker client (bollard). |
-
-`freshdock --help` prints the same override list (`after_long_help`).
-
----
-
 ## A complete example
+
+### File-free (environment only)
+
+A deployment with a private GHCR image, `cleanup` on, and no notifications needs no
+file at all — just environment:
+
+```bash
+FRESHDOCK_DEFAULT_MODE=nightly
+FRESHDOCK_CLEANUP=true
+FRESHDOCK_REGISTRY_GHCR_USERNAME=octocat
+FRESHDOCK_REGISTRY_GHCR_TOKEN=ghp_xxx
+```
+
+(Set these under `environment:` in compose, `Environment=` in a systemd unit, or
+`export` in a shell.)
+
+### With a file (for notifications)
+
+Once you want notifications, declare the target in a `freshdock.toml` and keep the
+secret in the environment:
 
 ```toml
 # freshdock.toml
