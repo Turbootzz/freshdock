@@ -7,7 +7,7 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::auth::{CachedToken, parse_www_authenticate};
 use super::{Digest, ImageRef, Registry, RegistryError};
@@ -199,6 +199,12 @@ impl OciRegistry {
 
     /// Exchange a challenge for a bearer token at its realm, sending credentials
     /// for `host` when the store has them. Returns the token + its lifetime.
+    ///
+    /// If configured credentials are *rejected* (401/403), retry the exchange
+    /// anonymously so public images keep resolving when a token is stale, and
+    /// `warn!` so the downgrade is never silent. Only when the anonymous retry is
+    /// also denied (a genuinely private image) does this surface
+    /// [`RegistryError::CredentialsRejected`].
     async fn request_token(
         &self,
         realm: &str,
@@ -212,8 +218,9 @@ impl OciRegistry {
         }
         query.push(("scope", scope));
 
+        let creds = self.store.get(host);
         let mut req = self.client.get(realm).query(&query);
-        if let Some(creds) = self.store.get(host) {
+        if let Some(creds) = creds {
             req = req.basic_auth(
                 creds.username.clone().unwrap_or_default(),
                 Some(creds.token.expose()),
@@ -223,23 +230,58 @@ impl OciRegistry {
         let resp = req.send().await.map_err(classify_send_error)?;
         // Only an explicit rejection is an auth failure; 429/5xx are transient
         // HTTP errors, not "wrong credentials", so don't mislabel them.
-        if matches!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
-            return Err(RegistryError::Auth(format!(
-                "token endpoint denied access (status {})",
-                resp.status()
-            )));
+        if is_denied(&resp) {
+            // With no credentials sent, a denial is the plain "needs auth" case.
+            if creds.is_none() {
+                return Err(RegistryError::Auth(format!(
+                    "token endpoint denied access (status {})",
+                    resp.status()
+                )));
+            }
+            // Credentials *were* sent and rejected. Retry anonymously so a public
+            // image still resolves; warn so a stale token doesn't silently
+            // downgrade us to the (much smaller) anonymous rate budget.
+            warn!(
+                host = %host,
+                status = %resp.status(),
+                "configured registry credentials were rejected; retrying anonymously"
+            );
+            let anon = self
+                .client
+                .get(realm)
+                .query(&query)
+                .send()
+                .await
+                .map_err(classify_send_error)?;
+            if is_denied(&anon) {
+                // Anonymous also denied → genuinely private *and* bad creds.
+                return Err(RegistryError::CredentialsRejected(host.to_string()));
+            }
+            return finish_token(anon).await;
         }
-        let resp = resp.error_for_status()?;
-        let body: TokenResponse = resp.json().await?;
-        let expires_in = body.expires_in;
-        let token = body
-            .into_token()
-            .ok_or_else(|| RegistryError::Auth("token response had no token field".into()))?;
-        Ok((token, expires_in))
+        finish_token(resp).await
     }
+}
+
+/// Did the registry explicitly reject the request (401/403)? 429/5xx are
+/// transient and handled elsewhere, so they are deliberately excluded.
+fn is_denied(resp: &reqwest::Response) -> bool {
+    matches!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    )
+}
+
+/// Parse a successful token-endpoint response into `(token, lifetime)`. Shared by
+/// the authenticated and anonymous-fallback paths of [`OciRegistry::request_token`].
+async fn finish_token(resp: reqwest::Response) -> Result<(String, Option<u64>), RegistryError> {
+    let resp = resp.error_for_status()?;
+    let body: TokenResponse = resp.json().await?;
+    let expires_in = body.expires_in;
+    let token = body
+        .into_token()
+        .ok_or_else(|| RegistryError::Auth("token response had no token field".into()))?;
+    Ok((token, expires_in))
 }
 
 async fn probe(authority: &str) -> Result<(), RegistryError> {

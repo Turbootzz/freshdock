@@ -361,6 +361,9 @@ async fn process_container<D, R>(
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
         }
+        ProbeOutcome::CredentialsRejected => {
+            warn!(container = %name, "scheduler: configured registry credentials rejected and anonymous denied; check/rotate token — not updating");
+        }
         ProbeOutcome::NetworkUnavailable => {
             warn!(container = %name, "scheduler: registry network unavailable; will retry next tick");
         }
