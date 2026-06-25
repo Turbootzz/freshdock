@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/Turbootzz/freshdock/compare/v1.2.1...v1.3.0) - 2026-06-25
+
+### Added
+
+- *(notify)* declare targets via env URLs, add notification logging ([#56](https://github.com/Turbootzz/freshdock/pull/56))
+
+### Other
+
+- env-first config docs, Pages links, fix crates.io badge ([#53](https://github.com/Turbootzz/freshdock/pull/53))
+
 ## [1.2.1](https://github.com/Turbootzz/freshdock/compare/v1.2.0...v1.2.1) - 2026-06-16
 
 ### Other
