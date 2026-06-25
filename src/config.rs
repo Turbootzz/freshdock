@@ -542,9 +542,12 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
             if url.username().is_empty() {
                 return Err("expected telegram://BOT_TOKEN@telegram?chats=CHAT_ID".to_string());
             }
+            // Percent-decode each part (as the SMTP arm does) so an encoded
+            // credential round-trips instead of reaching the API still-encoded.
+            let id = pct_decode(url.username());
             let bot_token = match url.password() {
-                Some(pass) => format!("{}:{}", url.username(), pass),
-                None => url.username().to_string(),
+                Some(pass) => format!("{id}:{}", pct_decode(pass)),
+                None => id,
             };
             let chats: Vec<String> = url
                 .query_pairs()
@@ -1159,6 +1162,25 @@ mod tests {
             )]),
         );
         assert!(cfg.targets.is_empty(), "an empty bot id must be rejected");
+    }
+
+    #[test]
+    fn env_url_telegram_percent_decodes_the_token() {
+        // An encoded character in the token (here `%3A` → `:`) must round-trip,
+        // matching the SMTP userinfo handling.
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_TG_URL",
+                "telegram://111:AA%3ABB@telegram?chats=42",
+            )]),
+        );
+        match &cfg.targets["tg"] {
+            NotificationTarget::Telegram { bot_token, .. } => {
+                assert_eq!(bot_token.expose(), "111:AA:BB");
+            }
+            other => panic!("expected telegram, got {other:?}"),
+        }
     }
 
     #[test]
