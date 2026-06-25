@@ -1,8 +1,8 @@
 # Quickstart
 
 Get freshdock watching a container in about a minute. No config file required —
-freshdock is driven by container labels and environment variables; a `freshdock.toml`
-is only needed later if you want notifications.
+freshdock is driven by container labels and environment variables, notifications
+[included](notifications.md#declaring-targets-from-the-environment).
 
 ## 1. Install
 

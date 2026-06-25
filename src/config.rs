@@ -10,13 +10,14 @@
 //! Secrets are wrapped in [`Secret`], whose `Debug` redacts the value and which
 //! has no `Display` — so a token can never reach a log line, even at trace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use tracing::{info, warn};
+use url::Url;
 
 use crate::labels::{Mode, PolicyDefaults};
 
@@ -376,8 +377,12 @@ pub const DEFAULT_CONFIG_FILE: &str = "freshdock.toml";
 pub const ENV_VAR_HELP: &str = "Registry credentials may also be supplied via environment, which \
 overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOCK_REGISTRY_GHCR_USERNAME\n  \
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
-lscr, or a registry host.\nNotification secrets may be overridden the same way (<NAME> is the \
-[notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
+lscr, or a registry host.\nNotification targets can be declared from the environment alone (no file) via a \
+shoutrrr-style URL, with an optional trigger filter:\n  FRESHDOCK_NOTIFY_<NAME>_URL          discord://token@id | \
+telegram://token@telegram?chats=id | smtp://user:pass@host:port/?from=a&to=b | https://host/hook\n  \
+FRESHDOCK_NOTIFY_<NAME>_TRIGGERS     comma list of available,succeeded,failed (default all)\nA target's secret may \
+also be overridden on its own (<NAME> is the [notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  \
+FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
 FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names so two can't map to the \
 same variable (e.g. `ops-mail` and `ops_mail` collide).\n[settings] defaults may be supplied or overridden \
 the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthly|watch|off\n  \
@@ -465,10 +470,218 @@ fn notify_env_name(key: &str) -> String {
     key.to_ascii_uppercase().replace('-', "_")
 }
 
-/// Overlay `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` / `_PASSWORD` env vars onto the
-/// declared targets, so a Telegram token or SMTP password can stay out of the
-/// file. Env only *overrides a secret on an already-declared target* — it never
-/// creates a target (KISS). Injecting `env_vars` keeps this pure and testable.
+/// Decode a URL component that `url` hands back still-encoded (userinfo). Query
+/// values are already decoded by `query_pairs`, so this is only for username /
+/// password — e.g. an SMTP login that had to write `@` as `%40`.
+fn pct_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Split a comma-separated value, trimming each item and dropping empties.
+fn split_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Parse a comma-separated `_TRIGGERS` value into a subscription list, or `None`
+/// (subscribe to all) when it is empty/blank — tokens are validated later by
+/// [`crate::notify`], so a bad one warns-and-skips the whole target there.
+fn split_triggers(raw: &str) -> Option<Vec<String>> {
+    let list = split_csv(raw);
+    (!list.is_empty()).then_some(list)
+}
+
+/// Set the `triggers` field on any backend variant (one slot, four shapes).
+fn set_triggers(target: &mut NotificationTarget, triggers: Option<Vec<String>>) {
+    let slot = match target {
+        NotificationTarget::Webhook { triggers, .. }
+        | NotificationTarget::Discord { triggers, .. }
+        | NotificationTarget::Telegram { triggers, .. }
+        | NotificationTarget::Smtp { triggers, .. } => triggers,
+    };
+    *slot = triggers;
+}
+
+/// Parse a shoutrrr-style notification URL into a target (issue #54), so a
+/// target can be declared entirely from `FRESHDOCK_NOTIFY_<NAME>_URL` with no
+/// file — the schemes Watchtower migrants know. `triggers` is left `None` for
+/// the caller to fill from `_TRIGGERS`. A bad URL / unknown scheme is an `Err`
+/// the caller logs and skips, never a hard failure (resilience parity with the
+/// other env overlays). `name` only labels diagnostics.
+fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String> {
+    let url = Url::parse(raw).map_err(|e| format!("not a valid URL: {e}"))?;
+    match url.scheme() {
+        // Generic webhook: the URL *is* the endpoint, kept whole as a secret.
+        "http" | "https" => Ok(NotificationTarget::Webhook {
+            url: Secret::new(raw.to_string()),
+            triggers: None,
+        }),
+        // discord://TOKEN@WEBHOOK_ID → the real Discord webhook URL.
+        "discord" => {
+            let token = url.username();
+            let id = url.host_str().unwrap_or_default();
+            if token.is_empty() || id.is_empty() {
+                return Err("expected discord://TOKEN@WEBHOOK_ID".to_string());
+            }
+            Ok(NotificationTarget::Discord {
+                webhook_url: Secret::new(format!("https://discord.com/api/webhooks/{id}/{token}")),
+                triggers: None,
+            })
+        }
+        // telegram://BOT_TOKEN@telegram?chats=CHAT_ID. A bot token embeds a `:`
+        // (`<id>:<secret>`), which the URL parser splits into user:password —
+        // rejoin them to recover the original token.
+        "telegram" => {
+            // The bot id is the userinfo username; a token's `<id>:<secret>`
+            // colon is parsed as user:password, so rejoin them. An empty id
+            // (`telegram://:secret@…`) is not a valid token.
+            if url.username().is_empty() {
+                return Err("expected telegram://BOT_TOKEN@telegram?chats=CHAT_ID".to_string());
+            }
+            // Percent-decode each part (as the SMTP arm does) so an encoded
+            // credential round-trips instead of reaching the API still-encoded.
+            let id = pct_decode(url.username());
+            let bot_token = match url.password() {
+                Some(pass) => format!("{id}:{}", pct_decode(pass)),
+                None => id,
+            };
+            let chats: Vec<String> = url
+                .query_pairs()
+                .filter(|(k, _)| k == "chats" || k == "chat_id")
+                .flat_map(|(_, v)| split_csv(&v))
+                .collect();
+            let Some(chat_id) = chats.first().cloned() else {
+                return Err("telegram:// requires ?chats=<id>".to_string());
+            };
+            if chats.len() > 1 {
+                warn!(
+                    target = %name,
+                    "telegram target supports a single chat; using the first and ignoring the rest"
+                );
+            }
+            Ok(NotificationTarget::Telegram {
+                bot_token: Secret::new(bot_token),
+                chat_id,
+                triggers: None,
+            })
+        }
+        // smtp://[user:pass@]host[:port]/?from=…&to=a,b&starttls=true.
+        "smtp" => {
+            let host = url
+                .host_str()
+                .filter(|h| !h.is_empty())
+                .ok_or("smtp:// requires a host")?
+                .to_string();
+            let port = url.port().unwrap_or_else(default_smtp_port);
+            let username = (!url.username().is_empty()).then(|| pct_decode(url.username()));
+            let password = url.password().map(|p| Secret::new(pct_decode(p)));
+
+            let mut from = None;
+            let mut to: Vec<String> = Vec::new();
+            let mut starttls = default_true();
+            for (key, value) in url.query_pairs() {
+                match key.as_ref() {
+                    "from" => from = Some(value.into_owned()),
+                    "to" => to.extend(split_csv(&value)),
+                    "starttls" => {
+                        if let Some(flag) = parse_env_bool("smtp starttls", &value) {
+                            starttls = flag;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let from = from.ok_or("smtp:// requires ?from=<addr>")?;
+            if to.is_empty() {
+                return Err("smtp:// requires ?to=<addr>[,<addr>…]".to_string());
+            }
+            Ok(NotificationTarget::Smtp {
+                host,
+                port,
+                username,
+                password,
+                from,
+                to,
+                starttls,
+                triggers: None,
+            })
+        }
+        other => Err(format!(
+            "unknown scheme `{other}` (expected discord, telegram, smtp, http, or https)"
+        )),
+    }
+}
+
+/// Declare notification targets from `FRESHDOCK_NOTIFY_<NAME>_URL` (a
+/// shoutrrr-style URL) plus an optional `FRESHDOCK_NOTIFY_<NAME>_TRIGGERS`
+/// (issue #54). Unlike the secret overlay below, env here can *create* a target
+/// — the last gap to a file-free deployment. Additive: a name already declared
+/// in the file wins, so a richer file target is never clobbered by an env URL.
+fn declare_env_targets(
+    targets: &mut HashMap<String, NotificationTarget>,
+    env: &[(String, String)],
+) {
+    // File-declared names in env-var form, so a collision check is O(1).
+    let file_names: HashSet<String> = targets.keys().map(|k| notify_env_name(k)).collect();
+
+    // Gather the URL + triggers per `<NAME>` first (two vars, one target).
+    let mut decls: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for (key, value) in env {
+        let Some(rest) = key.strip_prefix("FRESHDOCK_NOTIFY_") else {
+            continue;
+        };
+        if let Some(name) = rest.strip_suffix("_URL") {
+            decls.entry(name.to_string()).or_default().0 = Some(value.clone());
+        } else if let Some(name) = rest.strip_suffix("_TRIGGERS") {
+            decls.entry(name.to_string()).or_default().1 = Some(value.clone());
+        }
+    }
+
+    for (env_name, (url, triggers)) in decls {
+        let Some(url) = url else {
+            // A `_TRIGGERS` with no `_URL` and no matching file target has
+            // nothing to attach to. (A file target sets its triggers in-file.)
+            if !file_names.contains(&env_name) {
+                warn!(
+                    target = %env_name,
+                    "ignoring FRESHDOCK_NOTIFY_*_TRIGGERS: no FRESHDOCK_NOTIFY_*_URL declares this target"
+                );
+            }
+            continue;
+        };
+        if file_names.contains(&env_name) {
+            warn!(
+                target = %env_name,
+                "ignoring FRESHDOCK_NOTIFY_*_URL: a notification target with this name is already declared in the file"
+            );
+            continue;
+        }
+        match parse_notify_url(&env_name, &url) {
+            Ok(mut target) => {
+                set_triggers(&mut target, triggers.as_deref().and_then(split_triggers));
+                // Key by the lower-cased env name; it surfaces only in logs and
+                // as the dispatcher's target name, and feeds the secret overlay
+                // below via `notify_env_name`.
+                targets.insert(env_name.to_ascii_lowercase(), target);
+            }
+            Err(reason) => warn!(
+                target = %env_name,
+                %reason,
+                "ignoring invalid FRESHDOCK_NOTIFY_*_URL"
+            ),
+        }
+    }
+}
+
+/// Assemble notification targets from the file plus the `FRESHDOCK_NOTIFY_*`
+/// environment in two passes: first *declare* env-only targets from
+/// `_URL`/`_TRIGGERS` (issue #54), then *overlay* `_BOT_TOKEN`/`_PASSWORD`
+/// secrets onto any target (file- or env-declared). Injecting `env_vars` keeps
+/// this pure and testable.
 pub fn build_notifications<I>(
     mut targets: HashMap<String, NotificationTarget>,
     env_vars: I,
@@ -476,20 +689,28 @@ pub fn build_notifications<I>(
 where
     I: Iterator<Item = (String, String)>,
 {
-    // Map each target's env-name back to its real key for O(1) lookup.
+    // Buffer the env once: two passes read it, and the iterator is single-use.
+    let env: Vec<(String, String)> = env_vars.collect();
+
+    // Pass 1 — declare targets the file didn't (env can *create* one here).
+    declare_env_targets(&mut targets, &env);
+
+    // Pass 2 — overlay a secret onto an already-declared target (file or env),
+    // so a Telegram token or SMTP password can stay out of any URL/file.
+    // Re-index after declaration so env-declared targets are reachable too.
     let index: HashMap<String, String> = targets
         .keys()
         .map(|k| (notify_env_name(k), k.clone()))
         .collect();
 
-    for (key, value) in env_vars {
+    for (key, value) in &env {
         let Some(rest) = key.strip_prefix("FRESHDOCK_NOTIFY_") else {
             continue;
         };
         if let Some(name) = rest.strip_suffix("_BOT_TOKEN") {
             match index.get(name).and_then(|k| targets.get_mut(k)) {
                 Some(NotificationTarget::Telegram { bot_token, .. }) => {
-                    *bot_token = Secret::new(value);
+                    *bot_token = Secret::new(value.clone());
                 }
                 _ => warn!(
                     target = %name,
@@ -499,7 +720,7 @@ where
         } else if let Some(name) = rest.strip_suffix("_PASSWORD") {
             match index.get(name).and_then(|k| targets.get_mut(k)) {
                 Some(NotificationTarget::Smtp { password, .. }) => {
-                    *password = Some(Secret::new(value));
+                    *password = Some(Secret::new(value.clone()));
                 }
                 _ => warn!(
                     target = %name,
@@ -871,6 +1092,250 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // --- notification targets declared from the environment (issue #54) ---
+
+    #[test]
+    fn env_url_declares_generic_webhook() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY_OPS_URL", "https://example.com/hook")]),
+        );
+        match &cfg.targets["ops"] {
+            NotificationTarget::Webhook { url, triggers } => {
+                assert_eq!(url.expose(), "https://example.com/hook");
+                assert!(triggers.is_none(), "omitted _TRIGGERS → subscribe all");
+            }
+            other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_declares_discord_reconstructing_the_webhook_url() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY_OPS_URL", "discord://tok123@456789")]),
+        );
+        match &cfg.targets["ops"] {
+            NotificationTarget::Discord { webhook_url, .. } => {
+                assert_eq!(
+                    webhook_url.expose(),
+                    "https://discord.com/api/webhooks/456789/tok123"
+                );
+            }
+            other => panic!("expected discord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_declares_telegram_rejoining_the_token_and_taking_the_chat() {
+        // A bot token embeds a `:` the URL parser splits into user:password —
+        // the target must recover the original `<id>:<secret>` form.
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_TG_URL",
+                "telegram://111:AAA-bbb@telegram?chats=42",
+            )]),
+        );
+        match &cfg.targets["tg"] {
+            NotificationTarget::Telegram {
+                bot_token, chat_id, ..
+            } => {
+                assert_eq!(bot_token.expose(), "111:AAA-bbb");
+                assert_eq!(chat_id, "42");
+            }
+            other => panic!("expected telegram, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_telegram_rejects_an_empty_bot_id() {
+        // `telegram://:secret@…` has no bot id — must be rejected, not built
+        // into a target with a `:secret` token that only fails at send time.
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_TG_URL",
+                "telegram://:secret@telegram?chats=42",
+            )]),
+        );
+        assert!(cfg.targets.is_empty(), "an empty bot id must be rejected");
+    }
+
+    #[test]
+    fn env_url_telegram_percent_decodes_the_token() {
+        // An encoded character in the token (here `%3A` → `:`) must round-trip,
+        // matching the SMTP userinfo handling.
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_TG_URL",
+                "telegram://111:AA%3ABB@telegram?chats=42",
+            )]),
+        );
+        match &cfg.targets["tg"] {
+            NotificationTarget::Telegram { bot_token, .. } => {
+                assert_eq!(bot_token.expose(), "111:AA:BB");
+            }
+            other => panic!("expected telegram, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_telegram_accepts_the_chat_id_alias() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_TG_URL",
+                "telegram://111:AAA@telegram?chat_id=99",
+            )]),
+        );
+        match &cfg.targets["tg"] {
+            NotificationTarget::Telegram { chat_id, .. } => assert_eq!(chat_id, "99"),
+            other => panic!("expected telegram, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_declares_smtp_decoding_userinfo_and_recipients() {
+        // `@`/`:` in the login are percent-encoded so they don't break parsing;
+        // they must be decoded back. Recipients are a comma list in `?to=`.
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_MAIL_URL",
+                "smtp://user%40corp:pa%3Ass@mail.example.com:2525/?from=ops%40example.com&to=a%40x.com,b%40y.com&starttls=false",
+            )]),
+        );
+        match &cfg.targets["mail"] {
+            NotificationTarget::Smtp {
+                host,
+                port,
+                username,
+                password,
+                from,
+                to,
+                starttls,
+                ..
+            } => {
+                assert_eq!(host, "mail.example.com");
+                assert_eq!(*port, 2525);
+                assert_eq!(username.as_deref(), Some("user@corp"));
+                assert_eq!(password.as_ref().unwrap().expose(), "pa:ss");
+                assert_eq!(from, "ops@example.com");
+                assert_eq!(to, &["a@x.com".to_string(), "b@y.com".to_string()]);
+                assert!(!*starttls, "explicit starttls=false honoured");
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_smtp_defaults_port_and_starttls() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_MAIL_URL",
+                "smtp://mail.example.com/?from=a@e.com&to=b@e.com",
+            )]),
+        );
+        match &cfg.targets["mail"] {
+            NotificationTarget::Smtp {
+                port,
+                starttls,
+                username,
+                password,
+                ..
+            } => {
+                assert_eq!(*port, 587, "default submission port");
+                assert!(*starttls, "starttls defaults on");
+                assert!(username.is_none());
+                assert!(password.is_none());
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_triggers_limit_the_subscription_of_an_env_declared_target() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[
+                ("FRESHDOCK_NOTIFY_OPS_URL", "https://example.com/hook"),
+                ("FRESHDOCK_NOTIFY_OPS_TRIGGERS", "succeeded, failed"),
+            ]),
+        );
+        match &cfg.targets["ops"] {
+            NotificationTarget::Webhook { triggers, .. } => {
+                assert_eq!(
+                    triggers.as_deref(),
+                    Some(&["succeeded".to_string(), "failed".to_string()][..])
+                );
+            }
+            other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_with_an_unknown_scheme_is_skipped_not_fatal() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY_OPS_URL", "carrier-pigeon://nest")]),
+        );
+        assert!(
+            cfg.targets.is_empty(),
+            "an unparseable scheme warns and is dropped"
+        );
+    }
+
+    #[test]
+    fn env_url_does_not_clobber_a_file_declared_target_of_the_same_name() {
+        let file = notifications(
+            "[notifications.ops]\ntype = \"webhook\"\nurl = \"https://file.example/hook\"\n",
+        );
+        let cfg = build_notifications(
+            file,
+            env(&[("FRESHDOCK_NOTIFY_OPS_URL", "https://env.example/hook")]),
+        );
+        match &cfg.targets["ops"] {
+            NotificationTarget::Webhook { url, .. } => {
+                assert_eq!(
+                    url.expose(),
+                    "https://file.example/hook",
+                    "the file declaration wins; the env URL is skipped"
+                );
+            }
+            other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_triggers_without_a_url_declare_nothing() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY_OPS_TRIGGERS", "succeeded")]),
+        );
+        assert!(
+            cfg.targets.is_empty(),
+            "_TRIGGERS alone has no target to attach to"
+        );
+    }
+
+    #[test]
+    fn env_declared_target_with_a_bad_trigger_is_dropped_by_the_dispatcher() {
+        // The token is validated later, in the dispatcher: a bad one warns and
+        // skips the whole target (same resilience as a file-declared one).
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[
+                ("FRESHDOCK_NOTIFY_OPS_URL", "https://example.com/hook"),
+                ("FRESHDOCK_NOTIFY_OPS_TRIGGERS", "bogus"),
+            ]),
+        );
+        let dispatcher = crate::notify::Dispatcher::from_config(cfg, crate::http::client());
+        assert!(dispatcher.is_empty());
     }
 
     // --- [settings] table ---
