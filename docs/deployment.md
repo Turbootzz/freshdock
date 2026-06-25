@@ -54,11 +54,27 @@ services:
 
 The full list is the [env-var table](configuration.md#environment-variables).
 
-### Mounting a config file (for notifications)
+### Notifications (no file needed)
 
-You only need a `freshdock.toml` to *declare* a notification target (see
-[notifications](notifications.md)). Mount it read-only and keep its secrets in the
-environment:
+A notification target can be declared from the environment with a
+[shoutrrr-style URL](notifications.md#declaring-targets-from-the-environment) — no
+file to mount:
+
+```yaml
+services:
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    environment:
+      FRESHDOCK_NOTIFY_OPS_URL: "discord://${DISCORD_TOKEN}@${DISCORD_ID}"
+      FRESHDOCK_NOTIFY_OPS_TRIGGERS: "succeeded,failed"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+```
+
+Prefer a file? Declare the target in a `[notifications.<name>]` table, mount it
+read-only, and keep its secret in the environment instead:
 
 ```yaml
 services:

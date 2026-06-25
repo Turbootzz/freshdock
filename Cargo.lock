@@ -472,6 +472,7 @@ dependencies = [
  "comfy-table",
  "futures",
  "lettre",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
@@ -480,6 +481,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 

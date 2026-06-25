@@ -118,6 +118,9 @@ impl Notifier for SmtpNotifier {
     fn name(&self) -> &str {
         &self.name
     }
+    fn kind(&self) -> &'static str {
+        "smtp"
+    }
 
     async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
         let email = build_message(&self.from, &self.to, msg)?;

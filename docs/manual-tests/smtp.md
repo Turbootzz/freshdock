@@ -31,6 +31,13 @@ verifies the transport (connection, STARTTLS, auth) against a local catcher.
    # triggers omitted → subscribes to available, succeeded, and failed
    ```
 
+   Or skip the file entirely and declare the same target with an
+   [env URL](../notifications.md#declaring-targets-from-the-environment):
+
+   ```bash
+   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://localhost:1025/?from=freshdock@example.com&to=admin@example.com&starttls=false'
+   ```
+
 2. Trigger a notification. The quickest path is a watch-mode container with a
    newer image available; or force a failed update (a broken healthcheck) to
    exercise the `failed` trigger and its rollback detail. Run the daemon:
@@ -67,6 +74,12 @@ them (mailpit's `--smtp-auth` modes, a real provider, or
    ```bash
    export FRESHDOCK_NOTIFY_EMAIL_PASSWORD='app-password'
    cargo run -- run
+   ```
+
+   Or as a single env URL (percent-encode `@`/`:` in the login as `%40`/`%3A`):
+
+   ```bash
+   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://freshdock%40example.com:app-password@smtp.example.com:587/?from=freshdock@example.com&to=admin@example.com&starttls=true'
    ```
 
 2. Confirm the message is delivered. A STARTTLS handshake failure surfaces as a

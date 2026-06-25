@@ -1,15 +1,11 @@
 # Notifications
 
 The scheduler ([`freshdock run`](cli-reference.md#freshdock-run)) can notify you when
-an opted-in container (`freshdock.notify=true`) reaches one of three events. Targets
-are configured as [`[notifications.<name>]`](configuration.md#notificationsname)
-tables in `freshdock.toml`.
-
-> **This is the one feature that needs a config file.** Everything else in freshdock
-> is configurable through labels and environment variables, but a notification
-> *target* must be declared in a `freshdock.toml` — env vars can only supply its
-> [secret](#secrets), not create the target. Mount the file read-only and keep the
-> secret in the environment (see [deployment](deployment.md#mounting-a-config-file-for-notifications)).
+an opted-in container (`freshdock.notify=true`) reaches one of three events. A target
+is configured either as a [`[notifications.<name>]`](configuration.md#notificationsname)
+table in `freshdock.toml` **or** declared entirely from the environment with a
+[shoutrrr-style URL](#declaring-targets-from-the-environment) — so a container
+deployment can run with no config file at all.
 
 ## Events (triggers)
 
@@ -23,9 +19,18 @@ Each target may subscribe to a subset with `triggers = [...]`; omitting it (or `
 subscribes to all three. The failure message includes the reason (health-check
 timeout, or the container crashed before becoming healthy).
 
-Delivery is **best-effort and non-fatal**: a send that fails is logged
-(`notification failed; continuing`) and skipped. A broken notifier never blocks or
-rolls back an update.
+Delivery is **best-effort and non-fatal**: a successful send logs `notification
+sent` (with the target, trigger, and container) at `info`; a send that fails logs
+`notification failed; continuing` at `warn` and is skipped. A broken notifier never
+blocks or rolls back an update. If an event fires but no target subscribes to its
+trigger, that is logged at `debug` — so a "missing" notification is always
+diagnosable from the logs.
+
+At startup `freshdock run` logs the targets it loaded
+(`notification targets configured count=2 targets=["ops(discord)[failed,succeeded]", …]`),
+or `no notification targets configured` when none were found — so a typo'd or unset
+`FRESHDOCK_NOTIFY_*` variable is visible at boot instead of only when an update
+later fails to notify.
 
 ## Backends
 
@@ -97,13 +102,55 @@ triggers = ["failed"]
 See the [SMTP smoke-test playbook](manual-tests/smtp.md) to verify delivery against
 a local catcher.
 
+## Declaring targets from the environment
+
+Every backend can be declared without a file, using a shoutrrr-style URL — the same
+shape Watchtower's `WATCHTOWER_NOTIFICATION_URL` uses — so a container deployment
+needs no `freshdock.toml`:
+
+| Env var | Value |
+|---|---|
+| `FRESHDOCK_NOTIFY_<NAME>_URL` | the target URL (schemes below) |
+| `FRESHDOCK_NOTIFY_<NAME>_TRIGGERS` | optional comma list of `available,succeeded,failed`; defaults to all |
+
+`<NAME>` is any label you choose; it appears only in logs. The scheme selects the
+backend:
+
+| Scheme | Example | Becomes |
+|---|---|---|
+| `https` / `http` | `https://example.com/hooks/freshdock` | a generic **webhook** |
+| `discord` | `discord://TOKEN@WEBHOOK_ID` | a **Discord** webhook |
+| `telegram` | `telegram://BOT_TOKEN@telegram?chats=CHAT_ID` | a **Telegram** message |
+| `smtp` | `smtp://user:pass@host:587/?from=ops@x.com&to=a@x.com,b@y.com&starttls=true` | an **SMTP** email |
+
+```bash
+# one Discord target, succeeded + failed only — no file involved
+FRESHDOCK_NOTIFY_OPS_URL=discord://abcdef...@123456789
+FRESHDOCK_NOTIFY_OPS_TRIGGERS=succeeded,failed
+```
+
+Notes:
+
+- A Telegram bot token's `:` (and any `@`/`:` in an SMTP login) are URL
+  metacharacters — percent-encode them in the userinfo (`%40`, `%3A`) and freshdock
+  decodes them back. A Telegram token written as `id:secret` is rejoined for you.
+- SMTP `?to=` takes a comma list or repeated `to=`; Telegram uses the first
+  `chats=` value.
+- An invalid URL or unknown scheme is **warned and skipped**, never fatal — the
+  same resilience as a malformed file target.
+- If a `<NAME>` is already declared in the file, the file target wins and the env
+  URL is ignored: env declaration is purely additive.
+
 ## Secrets
 
 Webhook URLs, Discord webhook URLs, Telegram bot tokens, and SMTP passwords are
-treated as secrets and redacted in all logs. Two can also come from the environment
-instead of the file:
+treated as secrets and redacted in all logs. A secret on a **file-declared** target
+can also come from the environment instead of the file:
 
 - `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` — a Telegram target's `bot_token`
 - `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` — an SMTP target's `password`
+
+(To declare a whole target — secret included — from the environment, use
+[`FRESHDOCK_NOTIFY_<NAME>_URL`](#declaring-targets-from-the-environment).)
 
 See the full [environment-variable table](configuration.md#environment-variables).

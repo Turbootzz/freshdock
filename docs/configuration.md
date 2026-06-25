@@ -7,15 +7,17 @@ comes from three places:
 - **Environment variables** — fleet-wide settings, registry credentials, the `run`
   flags, and notification secrets. This is the primary way to configure a
   deployment: nothing to mount.
-- An optional **`freshdock.toml`** file — needed only to *declare* notification
-  targets, and to hold credentials for a registry whose host can't be spelled as an
-  env-var name. Environment variables override the file, per field.
+- An optional **`freshdock.toml`** file — needed only to hold credentials for a
+  registry whose host can't be spelled as an env-var name. Everything else,
+  notification targets included, can come from the environment. Environment
+  variables override the file, per field.
 
-> **You usually don't need a file.** Registry credentials, the `[settings]`
-> defaults, and the `run` flags all have environment variables — a container
-> deployment never has to mount a `freshdock.toml`. The one thing env vars can't do
-> is *declare* a notification target; that block has to live in the file (its
-> secrets can still come from the environment). See [notifications](notifications.md).
+> **You don't need a file.** Registry credentials, the `[settings]` defaults, the
+> `run` flags, and now notification targets (via a
+> [shoutrrr-style URL](notifications.md#declaring-targets-from-the-environment)) all
+> have environment variables — a container deployment never has to mount a
+> `freshdock.toml`. The only thing env can't express is a registry whose host has
+> dots in it (its name can't be spelled as an env-var name).
 
 - New here? Start with the [quickstart](quickstart.md).
 - Just need the command flags? See the [CLI reference](cli-reference.md).
@@ -83,8 +85,10 @@ upper-cased, with `-` → `_`.
 | `FRESHDOCK_CONFIG` | config file path | The `--config` flag wins over it. |
 | `FRESHDOCK_REGISTRY_<NAME>_USERNAME` | `[registry.<name>] username` | `<NAME>` = alias (`DOCKERHUB`, `GHCR`, `QUAY`, `LSCR`). Hosts with dots can't be expressed unambiguously — configure those in the file. |
 | `FRESHDOCK_REGISTRY_<NAME>_TOKEN` | `[registry.<name>] token` | A token (with or without a username) is enough to create a registry entry from the environment alone — no file needed. |
-| `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | Overrides a secret on a target **declared in the file** — env can't create the target itself. |
-| `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | Same: overrides a secret on a file-declared target. |
+| `FRESHDOCK_NOTIFY_<NAME>_URL` | declares a notification target | A [shoutrrr-style URL](notifications.md#declaring-targets-from-the-environment) — `discord://…`, `telegram://…`, `smtp://…`, or `https://…` — creates the target from the environment alone, no file needed. A bad URL warns and is skipped. |
+| `FRESHDOCK_NOTIFY_<NAME>_TRIGGERS` | an env-declared target's `triggers` | Optional comma list of `available,succeeded,failed`; omit for all three. Pairs with `…_URL`. |
+| `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | Overrides the secret on an already-declared target (file or `…_URL`). |
+| `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | Same: overrides the secret on an already-declared target. |
 | `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
 | `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
 | `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
@@ -102,10 +106,12 @@ upper-cased, with `-` → `_`.
 The file is **optional** — freshdock runs without it. Reach for it only when you
 need something environment variables can't express:
 
-1. **Declaring a notification target** (a `[notifications.<name>]` block). Env vars
-   can supply that target's *secret*, but the target itself must be declared here.
-2. **Registry credentials for a custom host with dots** (e.g.
+1. **Registry credentials for a custom host with dots** (e.g.
    `registry.example.com`), whose name can't be spelled as an env-var name.
+2. **A notification target you'd rather keep in a file** — though these can now be
+   declared from the environment too (see
+   [`FRESHDOCK_NOTIFY_<NAME>_URL`](#environment-variables) /
+   [Declaring targets from the environment](notifications.md#declaring-targets-from-the-environment)).
 
 Everything else — the four registry aliases, the `[settings]` defaults, the `run`
 flags — has an environment variable, so most deployments need no file at all.
@@ -176,11 +182,12 @@ out of scope), see [registry-auth.md](registry-auth.md).
 
 ### `[notifications.<name>]`
 
-One table per target, selected by `type`. **This is the one thing that requires the
-file** — env vars can supply a target's secret but can't declare the target. Every
-target may set an optional `triggers` list to subscribe to a subset of events; omit
-it (or use `[]`) to receive all three (`available`, `succeeded`, `failed`). Payload
-formats and the event/mode matrix are documented in [notifications.md](notifications.md).
+One table per target, selected by `type`. A target can equally be declared from the
+environment with [`FRESHDOCK_NOTIFY_<NAME>_URL`](notifications.md#declaring-targets-from-the-environment) —
+the file form below is for when you'd rather keep it in config. Every target may set
+an optional `triggers` list to subscribe to a subset of events; omit it (or use `[]`)
+to receive all three (`available`, `succeeded`, `failed`). Payload formats and the
+event/mode matrix are documented in [notifications.md](notifications.md).
 
 ```toml
 [notifications.ops-webhook]

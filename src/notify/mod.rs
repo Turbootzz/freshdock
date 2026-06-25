@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::config::{NotificationConfig, NotificationTarget};
 use crate::format::short_digest;
@@ -310,6 +310,9 @@ async fn post_json<B: Serialize + ?Sized>(
 pub trait Notifier: Send + Sync {
     /// The target's config name (`[notifications.<name>]`), used only in logs.
     fn name(&self) -> &str;
+    /// The backend kind (`webhook`/`discord`/`telegram`/`smtp`) for the startup
+    /// summary. A `&'static str`, never a secret.
+    fn kind(&self) -> &'static str;
     async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError>;
 }
 
@@ -367,22 +370,75 @@ impl Dispatcher {
         self.targets.is_empty()
     }
 
+    /// Log a one-line startup summary of the configured targets — each as
+    /// `name(kind)[triggers]` — so a typo'd or unset `FRESHDOCK_NOTIFY_*` var
+    /// shows up at boot, not hours later when an update fails to notify. Mirrors
+    /// the registry-credential summary. Names, kinds, and triggers only; a
+    /// configured-but-empty dispatcher says so explicitly.
+    pub fn log_configured(&self) {
+        if self.targets.is_empty() {
+            info!("no notification targets configured");
+            return;
+        }
+        let mut summary: Vec<String> = self
+            .targets
+            .iter()
+            .map(|t| {
+                let mut triggers: Vec<&str> = t.triggers.iter().map(|x| x.as_str()).collect();
+                triggers.sort_unstable();
+                format!(
+                    "{}({})[{}]",
+                    t.notifier.name(),
+                    t.notifier.kind(),
+                    triggers.join(",")
+                )
+            })
+            .collect();
+        summary.sort_unstable();
+        info!(count = self.targets.len(), targets = ?summary, "notification targets configured");
+    }
+
     /// Render the event once, then send to every subscribed target. Never fails:
     /// a per-target error is logged at WARN and the next target still runs, so a
     /// flaky notifier can neither block another target nor abort the caller.
+    ///
+    /// Every outcome leaves a log line so a missing notification is diagnosable:
+    /// a successful send logs at INFO (`notification sent`), a failure at WARN,
+    /// and an event that no target subscribed to logs at DEBUG — otherwise an
+    /// operator can't tell "sent and the receiver dropped it" from "nothing was
+    /// subscribed to this trigger".
     pub async fn dispatch(&self, event: &NotifyEvent) {
         if self.targets.is_empty() {
             return;
         }
         let trigger = event.trigger();
         let msg = event.render();
+        let mut delivered = 0usize;
         for target in self.targets.iter() {
             if !target.triggers.contains(&trigger) {
                 continue;
             }
-            if let Err(e) = target.notifier.send(&msg).await {
-                warn!(target = %target.notifier.name(), error = %e, "notification failed; continuing");
+            delivered += 1;
+            match target.notifier.send(&msg).await {
+                Ok(()) => info!(
+                    target = %target.notifier.name(),
+                    trigger = %trigger.as_str(),
+                    container = %msg.container,
+                    "notification sent"
+                ),
+                Err(e) => warn!(
+                    target = %target.notifier.name(),
+                    error = %e,
+                    "notification failed; continuing"
+                ),
             }
+        }
+        if delivered == 0 {
+            debug!(
+                trigger = %trigger.as_str(),
+                container = %msg.container,
+                "no notification target subscribes to this trigger"
+            );
         }
     }
 }
@@ -460,6 +516,9 @@ mod tests {
     impl Notifier for RecordingNotifier {
         fn name(&self) -> &str {
             &self.name
+        }
+        fn kind(&self) -> &'static str {
+            "recording"
         }
         async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -594,5 +653,93 @@ mod tests {
         // running (here with no targets left).
         let d = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
         assert!(d.is_empty());
+    }
+
+    /// Run `f` under a temporary tracing subscriber that captures into a string,
+    /// so a test can assert on real log output.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        use std::io::Write;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_successful_send_logs_notification_sent() {
+        let (ok, _seen, _calls) = RecordingNotifier::new("ops");
+        let d = Dispatcher::from_targets(vec![target(Trigger::all(), ok)]);
+        let out = capture_logs(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(d.dispatch(&succeeded()));
+        });
+        assert!(
+            out.contains("notification sent"),
+            "expected the send log: {out}"
+        );
+        assert!(out.contains("ops"), "target name present: {out}");
+        assert!(out.contains("succeeded"), "trigger present: {out}");
+    }
+
+    #[test]
+    fn log_configured_summarizes_targets_without_leaking_secrets() {
+        use crate::config::{NotificationConfig, NotificationTarget, Secret};
+        let mut targets = std::collections::HashMap::new();
+        targets.insert(
+            "ops".to_string(),
+            NotificationTarget::Webhook {
+                url: Secret::new("https://example.com/hook"),
+                triggers: Some(vec!["succeeded".to_string()]),
+            },
+        );
+        targets.insert(
+            "chat".to_string(),
+            NotificationTarget::Discord {
+                webhook_url: Secret::new("https://discord.com/api/webhooks/1/SECRETTOKEN"),
+                triggers: None,
+            },
+        );
+        let d = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
+        let out = capture_logs(|| d.log_configured());
+        assert!(out.contains("notification targets configured"), "{out}");
+        assert!(out.contains("ops(webhook)"), "{out}");
+        assert!(out.contains("chat(discord)"), "{out}");
+        assert!(out.contains("succeeded"), "{out}");
+        assert!(
+            !out.contains("SECRETTOKEN"),
+            "the summary must never print a secret: {out}"
+        );
+    }
+
+    #[test]
+    fn log_configured_announces_when_empty() {
+        let out = capture_logs(|| Dispatcher::noop().log_configured());
+        assert!(out.contains("no notification targets configured"), "{out}");
     }
 }

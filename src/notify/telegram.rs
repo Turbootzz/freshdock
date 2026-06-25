@@ -62,6 +62,9 @@ impl Notifier for TelegramNotifier {
     fn name(&self) -> &str {
         &self.name
     }
+    fn kind(&self) -> &'static str {
+        "telegram"
+    }
 
     async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
         let url = format!(

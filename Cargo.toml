@@ -3,23 +3,26 @@ name = "freshdock"
 version = "1.2.1"
 edition = "2024"
 rust-version = "1.95.0"
-authors = ["Turbootzz <thijs@bendy.nl>"]
+authors = ["Turbootzz <thijs@turboot.com>"]
 description = "A modern Rust-based Docker container auto-updater: a maintained, health-gated, single-binary successor to Watchtower."
 license = "Apache-2.0"
 repository = "https://github.com/Turbootzz/freshdock"
-homepage = "https://github.com/Turbootzz/freshdock"
+homepage = "https://freshdock.dev"
 documentation = "https://docs.rs/freshdock"
 readme = "README.md"
 keywords = ["docker", "container", "watchtower", "auto-update", "devops"]
 categories = ["command-line-utilities", "development-tools"]
-# Keep the published crate to code + README/LICENSE; repo guides and CI plumbing
-# add weight without helping a `cargo install`.
+# Ship code + README/LICENSE only; repo guides/CI don't help `cargo install`.
 exclude = [".github/", "docs/", "examples/", "RELEASE.md", "RELEASE_NOTES.md", "freshdock.toml.example", "book.toml", "book/"]
 
 [dependencies]
 bollard = "0.21"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2", "charset", "query"] }
+# Parse shoutrrr-style notify URLs (issue #54); percent-encoding decodes userinfo.
+# Both already in-tree via reqwest, so no new version for cargo-deny.
+url = "2"
+percent-encoding = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
@@ -31,30 +34,18 @@ anyhow = "1.0"
 comfy-table = "7"
 futures = "0.3"
 async-trait = "0.1"
-# Used only for DST-correct local-time calendar math in the cron scheduler
-# (`DateTime<Local>` + spring-forward gap detection). The cron *parser* and the
-# scheduler loop are hand-rolled (PLAN §10 Q3: "hand-roll; less dependency
-# surface"); chrono owns only the calendar primitive. `clock` brings `Local`.
+# Calendar primitive only (DST-correct `DateTime<Local>`); cron parser + loop are
+# hand-rolled (PLAN §10 Q3). `clock` brings `Local`.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# SMTP notification backend (Phase 6). `default-features = false` drops lettre's
-# `native-tls`/OpenSSL default. The crypto provider must match reqwest's, which
-# uses `aws-lc-rs` (reqwest's `rustls` feature pulls `__rustls-aws-lc-rs`); the
-# convenience `tokio1-rustls-tls` feature would instead force `ring`, putting two
-# rustls providers in the tree and tripping `cargo deny`'s multiple-versions on
-# getrandom/windows-sys. So compose it by hand: rustls connector (`tokio1-rustls`)
-# + `aws-lc-rs` provider + `webpki-roots` (Mozilla CA bundle, no OS dep). `builder`
-# gives Message construction; `smtp-transport` gives STARTTLS + plain/login auth.
+# SMTP backend (Phase 6). Hand-pick rustls features so the provider is `aws-lc-rs`
+# (matching reqwest); the convenience `tokio1-rustls-tls` would pull `ring` and
+# duplicate rustls providers, tripping cargo-deny.
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 
 [dev-dependencies]
 wiremock = "0.6"
-# `test-util` enables `#[tokio::test(start_paused = true)]` so the health-gate
-# polling tests advance time virtually instead of sleeping real seconds. Kept
-# in dev-dependencies (feature-unified for the test build only) so it doesn't
-# ship in the release binary.
+# `test-util` enables `#[tokio::test(start_paused = true)]` for virtual-time tests.
 tokio = { version = "1.52", features = ["test-util"] }
-# `testcontainers` is intentionally NOT used for the Phase-3 live recreate
-# round-trip (tests/recreate_roundtrip_live.rs). Its current 0.27.x line pins
-# bollard 0.20 while we use 0.21; adding it would duplicate bollard and fail
-# `cargo deny` (multiple-versions=deny). The live gate drives the daemon via
-# raw bollard 0.21 instead, gated behind `#[ignore = "needs-docker"]`.
+# `testcontainers` intentionally NOT used: its 0.27.x pins bollard 0.20 (we use
+# 0.21), duplicating bollard and failing cargo-deny. Live tests drive raw bollard
+# 0.21 instead, gated `#[ignore = "needs-docker"]`.

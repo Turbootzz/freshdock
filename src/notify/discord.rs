@@ -62,6 +62,9 @@ impl Notifier for DiscordNotifier {
     fn name(&self) -> &str {
         &self.name
     }
+    fn kind(&self) -> &'static str {
+        "discord"
+    }
 
     async fn send(&self, msg: &RenderedMessage) -> Result<(), NotifyError> {
         super::post_json(&self.client, &self.webhook_url, &payload(msg)).await
