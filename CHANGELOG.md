@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/Turbootzz/freshdock/compare/v1.3.0...v1.4.0) - 2026-07-28
+
+### Added
+
+- read watchtower labels as fallbacks ([#66](https://github.com/Turbootzz/freshdock/pull/66))
+- lifecycle hooks — pre/post-update commands via labels ([#62](https://github.com/Turbootzz/freshdock/pull/62))
+
 ## [1.3.0](https://github.com/Turbootzz/freshdock/compare/v1.2.1...v1.3.0) - 2026-06-25
 
 ### Added
