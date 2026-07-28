@@ -80,6 +80,10 @@ pub async fn run_with(
         return Ok(());
     }
 
+    for note in labels::watchtower_diagnostics(spec.config.labels.as_ref().unwrap_or(&empty)) {
+        warn!(container = %name, %note, "watchtower label");
+    }
+
     let cleanup = Cleanup {
         remove_replaced: policy.cleanup,
         prune_dangling,

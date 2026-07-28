@@ -55,6 +55,13 @@ entirely. All behaviour is driven by these Docker labels (set them in compose un
 Values are case-insensitive and tolerate surrounding whitespace. An invalid value
 is reported with the offending label named.
 
+> **Watchtower labels are read too.** `com.centurylinklabs.watchtower.enable`,
+> `…monitor-only`, and the `…lifecycle.pre-update`/`post-update` hook labels
+> (timeouts in Watchtower's **minutes**) are honoured as fallbacks, so a
+> migrated fleet needs no relabelling. A `freshdock.*` label always wins over
+> its watchtower counterpart. See
+> [coming from Watchtower](migrating-from-watchtower.md#keep-your-labels--theyre-read-directly).
+
 When `freshdock.enable=true` but `freshdock.mode` is absent, the mode is `watch`
 (detect-and-notify, never mutate) — a non-destructive default. Change this
 fleet-wide fallback with [`[settings] default_mode`](#settings) (or
