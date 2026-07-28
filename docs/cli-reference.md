@@ -69,7 +69,9 @@ freshdock recreate <NAME>
 
 Manually update **one** container by name or ID: inspect → pull → stop → rename →
 create → start, then [health-gate](health-and-rollback.md) the new container and
-**roll back** to the previous one if it fails.
+**roll back** to the previous one if it fails. A configured
+[pre-update lifecycle hook](lifecycle-hooks.md) runs between pull and stop and
+can skip the update (the command reports the skip and exits `0`).
 
 | Argument | Meaning |
 |---|---|

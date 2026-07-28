@@ -20,7 +20,7 @@ use futures::StreamExt;
 use tracing::debug;
 
 use crate::config::CredentialStore;
-use crate::docker::recreate::DockerOps;
+use crate::docker::recreate::{DockerOps, HookStatus};
 use crate::docker::spec::ContainerSpec;
 use crate::health::{ContainerRuntimeState, HealthProbe};
 use crate::registry::ImageRef;
@@ -143,6 +143,70 @@ impl Docker {
         Ok(())
     }
 
+    /// Run a lifecycle hook command inside a running container via `sh -c`
+    /// (the image must ship a `sh`, as with watchtower). Output is drained at
+    /// `debug!`. The timeout bounds the whole exchange with the daemon
+    /// (create → drain → exit-code inspect), so a wedged daemon can't hang a
+    /// scheduler tick past the hook budget. On timeout the exec itself keeps
+    /// running inside the container — Docker has no exec-kill API — but the
+    /// verdict is `TimedOut`.
+    pub async fn exec_in_container(
+        &self,
+        name_or_id: &str,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<HookStatus, DockerError> {
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+
+        let run = async {
+            let created = self
+                .0
+                .create_exec(
+                    name_or_id,
+                    CreateExecOptions {
+                        cmd: Some(vec!["sh", "-c", command]),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            if let StartExecResults::Attached { mut output, .. } =
+                self.0.start_exec(&created.id, None).await?
+            {
+                while let Some(chunk) = output.next().await {
+                    debug!(container = %name_or_id, output = %chunk?, "hook output");
+                }
+            }
+
+            // The daemon finalises exec state asynchronously after the stream
+            // closes, so an immediate inspect can still report `running` with
+            // no exit code — poll briefly rather than misread a just-finished
+            // hook. A code still missing after that is treated as a failure,
+            // never a success.
+            let mut inspected = self.0.inspect_exec(&created.id).await?;
+            for _ in 0..20 {
+                if inspected.running != Some(true) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                inspected = self.0.inspect_exec(&created.id).await?;
+            }
+            Ok::<HookStatus, DockerError>(HookStatus::Completed {
+                exit_code: inspected.exit_code.unwrap_or(-1),
+            })
+        };
+
+        match timeout {
+            Some(t) => match tokio::time::timeout(t, run).await {
+                Ok(res) => res,
+                Err(_) => Ok(HookStatus::TimedOut),
+            },
+            None => run.await,
+        }
+    }
+
     /// Inspect a container and classify its lifecycle + health into the
     /// daemon-agnostic [`ContainerRuntimeState`] the health gate polls on.
     pub async fn probe_runtime_state(
@@ -251,6 +315,16 @@ impl DockerOps for Docker {
         let opts = PruneImagesOptionsBuilder::new().filters(&filters).build();
         self.0.prune_images(Some(opts)).await?;
         Ok(())
+    }
+
+    async fn exec_hook(
+        &self,
+        name_or_id: &str,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<HookStatus, DockerError> {
+        debug!(container = %name_or_id, %command, timeout_s = ?timeout.map(|t| t.as_secs()), "exec_hook");
+        self.exec_in_container(name_or_id, command, timeout).await
     }
 }
 

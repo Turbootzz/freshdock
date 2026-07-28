@@ -31,6 +31,7 @@ leaving you with a dead service.
 | **Per-container modes** | Drive each container with Docker labels: `live`, `nightly`, `weekly`, `monthly`, `watch`, `off`. Mix them freely on one daemon. |
 | **Five registries** | Docker Hub, GHCR, Quay.io, lscr.io, and any OCI bearer-token registry — anonymous or authenticated. |
 | **Four notifiers** | Webhook, Discord, Telegram, and SMTP, each subscribable to the events it cares about. |
+| **Lifecycle hooks** | Run commands inside the container around an update: a pre-update hook can veto/defer (exit 75), a post-update hook handles maintenance like cache clears. |
 | **Optional cleanup** | Remove superseded images after a healthy update; optionally prune dangling images. |
 | **Single static binary** | ≤ 10 MB, no runtime dependencies. No JVM, no Go runtime, no 100 MB image to manage your homelab. |
 

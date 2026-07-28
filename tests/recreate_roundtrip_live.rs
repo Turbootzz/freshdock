@@ -293,9 +293,17 @@ async fn weird_config_recreate_roundtrip_is_byte_identical() {
 
     let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
         .expect("freshdock docker connect");
-    let cycle = recreate_one(&fd, &name, now_unix)
-        .await
-        .expect("recreate_one against live daemon");
+    let outcome = recreate_one(
+        &fd,
+        &name,
+        &freshdock::labels::LifecycleHooks::default(),
+        now_unix,
+    )
+    .await
+    .expect("recreate_one against live daemon");
+    let freshdock::docker::recreate::CycleOutcome::Completed(cycle) = outcome else {
+        panic!("no hooks configured, so the cycle must complete: {outcome:?}");
+    };
 
     let after = docker
         .inspect_container(&name, None)
@@ -432,6 +440,7 @@ async fn recreate_with_health_removes_archive_on_live_success() {
         &HealthConfig::default(),
         &TokioClock,
         freshdock::docker::recreate::Cleanup::default(),
+        &freshdock::labels::LifecycleHooks::default(),
         now_unix,
     )
     .await
@@ -440,6 +449,7 @@ async fn recreate_with_health_removes_archive_on_live_success() {
     let old_name = match outcome {
         RecreateOutcome::Recreated { old_name, .. } => old_name,
         RecreateOutcome::RolledBack(e) => panic!("healthy container must not roll back: {e:?}"),
+        RecreateOutcome::SkippedByHook(r) => panic!("no hooks configured, must not skip: {r}"),
     };
 
     // The new container exists under its original name and is running...

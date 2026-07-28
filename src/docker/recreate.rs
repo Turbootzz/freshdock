@@ -1,12 +1,24 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::DockerError;
 use super::spec::ContainerSpec;
 use crate::health::{Clock, HealthConfig, HealthOutcome, HealthProbe, wait_for_health};
+use crate::labels::{Hook, LifecycleHooks};
 use crate::registry::ImageRef;
 use crate::rollback::{RollbackReason, rollback};
-use crate::updater::RecreateOutcome;
+use crate::updater::{HookSkipReason, RecreateOutcome};
+
+/// Verdict of a lifecycle hook exec. `TimedOut` is a normal verdict, not an
+/// error — an `Err` from [`DockerOps::exec_hook`] means the exec could not be
+/// run at all (no `sh` in the image, daemon error, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStatus {
+    Completed { exit_code: i64 },
+    TimedOut,
+}
 
 /// Daemon operations the recreate orchestrator depends on. Abstracted as a
 /// trait so unit tests can substitute a recording fake without spinning up
@@ -44,6 +56,14 @@ pub trait DockerOps {
     async fn remove_image(&self, id: &str, force: bool) -> Result<(), DockerError>;
     /// Daemon-wide prune of dangling (untagged) images.
     async fn prune_dangling_images(&self) -> Result<(), DockerError>;
+    /// Run a lifecycle hook command inside a running container via `sh -c`,
+    /// bounded by `timeout` (`None` = unlimited).
+    async fn exec_hook(
+        &self,
+        name_or_id: &str,
+        command: &str,
+        timeout: Option<Duration>,
+    ) -> Result<HookStatus, DockerError>;
 }
 
 /// Post-update image cleanup, off by default (PLAN §5.2 step 8). Both steps are
@@ -75,17 +95,32 @@ pub struct CycleResult {
     pub old_image_id: Option<String>,
 }
 
+/// Outcome of the pure recreate cycle: either it ran to completion, or the
+/// pre-update hook refused and the container was left untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleOutcome {
+    Completed(CycleResult),
+    /// The pre-update hook did not succeed; nothing was stopped or replaced.
+    Skipped(HookSkipReason),
+}
+
 /// Drive one container through the recreate cycle:
-/// `inspect → pull → stop → rename → create → start`.
+/// `inspect → pull → pre-update hook → stop → rename → create → start`.
+///
+/// The pre-update hook runs after the pull (image already local, so the
+/// stopped window stays short) and before the stop (the app is still up to
+/// answer the exec). Any hook failure skips the cycle — see
+/// [`run_pre_update_hook`].
 ///
 /// This is the **pure cycle** only: health gating, removal of the `-old-`
-/// container, and rollback on failure are layered on top by
-/// [`recreate_with_health`].
+/// container, the post-update hook, and rollback on failure are layered on
+/// top by [`recreate_with_health`].
 pub async fn recreate_one(
     ops: &impl DockerOps,
     name: &str,
+    hooks: &LifecycleHooks,
     ts_provider: impl Fn() -> i64,
-) -> Result<CycleResult, DockerError> {
+) -> Result<CycleOutcome, DockerError> {
     let spec = ops.inspect(name).await?;
     // Pull uses the `library/`-prefixed parse (registry-correct), but create
     // uses the original `spec.image_ref` so `Config.Image` round-trips
@@ -94,6 +129,9 @@ pub async fn recreate_one(
     // rollback event's old/new refs are the same string.
     let image_ref = ImageRef::parse(&spec.image_ref);
     ops.pull(&image_ref).await?;
+    if let Some(reason) = run_pre_update_hook(ops, name, hooks.pre_update.as_ref()).await {
+        return Ok(CycleOutcome::Skipped(reason));
+    }
     ops.stop(
         name,
         spec.config.stop_signal.as_deref(),
@@ -103,13 +141,54 @@ pub async fn recreate_one(
     let old_name = ops.rename(name, ts_provider()).await?;
     let new_id = ops.create_from_spec(name, &spec, &spec.image_ref).await?;
     ops.start(&new_id).await?;
-    Ok(CycleResult {
+    Ok(CycleOutcome::Completed(CycleResult {
         old_name,
         new_id,
         old_image_ref: spec.image_ref.clone(),
         new_image_ref: spec.image_ref,
         old_image_id: spec.image_id,
-    })
+    }))
+}
+
+/// Run the pre-update hook in the *old* (still running) container. Returns
+/// `Some(reason)` when the update must be skipped. The contract is
+/// deliberately stricter than watchtower (which only skips on exit 75):
+/// **any** failure — non-zero exit (75 = intentional "not now"), timeout, or
+/// an exec that couldn't run — skips the update, because an app whose own
+/// pre-hook couldn't confirm readiness must not be taken down.
+async fn run_pre_update_hook(
+    ops: &impl DockerOps,
+    name: &str,
+    hook: Option<&Hook>,
+) -> Option<HookSkipReason> {
+    let hook = hook?;
+    info!(container = %name, command = %hook.command, "running pre-update hook");
+    match ops.exec_hook(name, &hook.command, hook.timeout).await {
+        Ok(HookStatus::Completed { exit_code: 0 }) => None,
+        Ok(HookStatus::Completed { exit_code }) => Some(HookSkipReason::NonZeroExit(exit_code)),
+        Ok(HookStatus::TimedOut) => Some(HookSkipReason::TimedOut),
+        Err(e) => Some(HookSkipReason::ExecFailed(e.to_string())),
+    }
+}
+
+/// Best-effort post-update hook in the *new* container. By this point the
+/// update has already succeeded, so any failure is logged and swallowed —
+/// mirroring the cleanup contract.
+async fn run_post_update_hook(ops: &impl DockerOps, name: &str, new_id: &str, hook: Option<&Hook>) {
+    let Some(hook) = hook else { return };
+    info!(container = %name, command = %hook.command, "running post-update hook");
+    match ops.exec_hook(new_id, &hook.command, hook.timeout).await {
+        Ok(HookStatus::Completed { exit_code: 0 }) => {}
+        Ok(HookStatus::Completed { exit_code }) => {
+            warn!(container = %name, exit_code, "post-update hook exited non-zero; the update stands");
+        }
+        Ok(HookStatus::TimedOut) => {
+            warn!(container = %name, "post-update hook timed out; the update stands");
+        }
+        Err(e) => {
+            warn!(container = %name, error = %e, "post-update hook could not be executed; the update stands");
+        }
+    }
 }
 
 /// The full Phase-3 update: run the recreate cycle, then health-gate the new
@@ -122,9 +201,22 @@ pub async fn recreate_with_health(
     cfg: &HealthConfig,
     clock: &impl Clock,
     cleanup: Cleanup,
+    hooks: &LifecycleHooks,
     ts_provider: impl Fn() -> i64,
 ) -> Result<RecreateOutcome, DockerError> {
-    let cycle = recreate_one(ops, name, ts_provider).await?;
+    let cycle = match recreate_one(ops, name, hooks, ts_provider).await? {
+        CycleOutcome::Completed(cycle) => cycle,
+        CycleOutcome::Skipped(reason) => {
+            // Exit 75 is the hook *asking* to defer — expected traffic, not a
+            // problem; everything else is worth a warning.
+            if reason == HookSkipReason::NonZeroExit(75) {
+                info!(container = %name, %reason, "update deferred by pre-update hook");
+            } else {
+                warn!(container = %name, %reason, "update skipped by pre-update hook");
+            }
+            return Ok(RecreateOutcome::SkippedByHook(reason));
+        }
+    };
 
     // `wait_for_health` always returns a verdict (it tolerates transient probe
     // errors), so a blip can't strand a half-recreated container; a persistent
@@ -137,6 +229,9 @@ pub async fn recreate_with_health(
             if let Err(e) = ops.remove(&cycle.old_name, false).await {
                 warn!(archive = %cycle.old_name, error = %e, "new container healthy but failed to remove archived old container; remove it manually");
             }
+            // App maintenance first, image housekeeping last (so the dangling
+            // prune stays the final step of a successful update).
+            run_post_update_hook(ops, name, &cycle.new_id, hooks.post_update.as_ref()).await;
             run_cleanup(ops, cleanup, cycle.old_image_id.as_deref()).await;
             return Ok(RecreateOutcome::Recreated {
                 old_name: cycle.old_name,
@@ -231,12 +326,30 @@ mod tests {
         /// When set, `inspect` reports no image id — exercises the safe-skip
         /// path (cleanup requested but nothing safe to target).
         omit_image_id: bool,
+        /// Verdict `exec_hook` returns (`None` = exited 0).
+        hook_status: Option<HookStatus>,
+        /// When set, `exec_hook` errors — the exec-transport-failure path.
+        exec_fails: bool,
     }
 
     impl RecordingOps {
         fn with_probe(states: &[ContainerRuntimeState]) -> Self {
             Self {
                 probe: Mutex::new(states.iter().copied().collect()),
+                ..Default::default()
+            }
+        }
+
+        fn with_hook_status(status: HookStatus) -> Self {
+            Self {
+                hook_status: Some(status),
+                ..Default::default()
+            }
+        }
+
+        fn with_failing_exec() -> Self {
+            Self {
+                exec_fails: true,
                 ..Default::default()
             }
         }
@@ -354,6 +467,23 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn exec_hook(
+            &self,
+            name_or_id: &str,
+            command: &str,
+            _timeout: Option<Duration>,
+        ) -> Result<HookStatus, DockerError> {
+            self.record(format!("exec_hook:{name_or_id}:{command}"));
+            if self.exec_fails {
+                return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                    "exec",
+                )));
+            }
+            Ok(self
+                .hook_status
+                .unwrap_or(HookStatus::Completed { exit_code: 0 }))
+        }
     }
 
     #[async_trait]
@@ -375,19 +505,21 @@ mod tests {
     #[tokio::test]
     async fn recreate_one_visits_steps_in_canonical_order() {
         let ops = RecordingOps::default();
-        let cycle = recreate_one(&ops, "fd-smoke", || 1_700_000_000)
-            .await
-            .expect("recording fake never errors");
+        let cycle = recreate_one(&ops, "fd-smoke", &LifecycleHooks::default(), || {
+            1_700_000_000
+        })
+        .await
+        .expect("recording fake never errors");
 
         assert_eq!(
             cycle,
-            CycleResult {
+            CycleOutcome::Completed(CycleResult {
                 old_name: "fd-smoke-old-1700000000".to_owned(),
                 new_id: "new-id".to_owned(),
                 old_image_ref: "nginx:alpine".to_owned(),
                 new_image_ref: "nginx:alpine".to_owned(),
                 old_image_id: Some("sha256:oldimg".to_owned()),
-            }
+            })
         );
         assert_eq!(
             ops.created_image().as_deref(),
@@ -431,6 +563,7 @@ mod tests {
             &HealthConfig::default(),
             &TokioClock,
             Cleanup::default(),
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -474,6 +607,7 @@ mod tests {
                 remove_replaced: true,
                 prune_dangling: false,
             },
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -512,6 +646,7 @@ mod tests {
                 remove_replaced: true,
                 prune_dangling: true,
             },
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -542,6 +677,7 @@ mod tests {
                 remove_replaced: false,
                 prune_dangling: true,
             },
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -567,6 +703,7 @@ mod tests {
                 remove_replaced: true,
                 prune_dangling: false,
             },
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -597,6 +734,7 @@ mod tests {
                 remove_replaced: true,
                 prune_dangling: false,
             },
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -605,6 +743,226 @@ mod tests {
         assert!(
             matches!(outcome, RecreateOutcome::Recreated { .. }),
             "a failed image removal must not turn a healthy update into a failure"
+        );
+    }
+
+    fn hooks(pre: Option<&str>, post: Option<&str>) -> LifecycleHooks {
+        let mk = |c: &str| Hook {
+            command: c.to_owned(),
+            timeout: Some(std::time::Duration::from_secs(60)),
+        };
+        LifecycleHooks {
+            pre_update: pre.map(mk),
+            post_update: post.map(mk),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_update_hook_runs_between_pull_and_stop() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::default();
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(Some("/app/drain.sh"), None),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("recording fake never errors");
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+        assert_eq!(
+            &ops.into_calls()[..4],
+            &[
+                "inspect".to_owned(),
+                "pull".to_owned(),
+                "exec_hook:fd-smoke:/app/drain.sh".to_owned(),
+                "stop:fd-smoke".to_owned(),
+            ],
+            "the pre-update hook must run in the OLD container, after the pull \
+             (image ready) and before the stop (app still up)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_update_hook_nonzero_exit_skips_update() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_hook_status(HookStatus::Completed { exit_code: 1 });
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(Some("/app/drain.sh"), None),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a refused hook is a graceful skip, not an error");
+
+        assert_eq!(
+            outcome,
+            RecreateOutcome::SkippedByHook(HookSkipReason::NonZeroExit(1))
+        );
+        assert_eq!(
+            ops.into_calls(),
+            vec![
+                "inspect".to_owned(),
+                "pull".to_owned(),
+                "exec_hook:fd-smoke:/app/drain.sh".to_owned(),
+            ],
+            "after a refused pre-update hook the container must be left untouched"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_update_hook_timeout_skips_update() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_hook_status(HookStatus::TimedOut);
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(Some("/app/drain.sh"), None),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a timed-out hook is a graceful skip, not an error");
+
+        assert_eq!(
+            outcome,
+            RecreateOutcome::SkippedByHook(HookSkipReason::TimedOut)
+        );
+        assert!(
+            !ops.into_calls().iter().any(|c| c.starts_with("stop:")),
+            "a timed-out pre-update hook must not stop the container"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_update_hook_exec_error_skips_update() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_failing_exec();
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(Some("/app/drain.sh"), None),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("an exec transport error skips the update rather than failing it");
+
+        assert!(matches!(
+            outcome,
+            RecreateOutcome::SkippedByHook(HookSkipReason::ExecFailed(_))
+        ));
+        assert!(!ops.into_calls().iter().any(|c| c.starts_with("stop:")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_update_hook_runs_in_new_container_after_archive_removal() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::default();
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(None, Some("php artisan cache:clear")),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("recording fake never errors");
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+        assert_eq!(
+            ops.into_calls().last().map(String::as_str),
+            Some("exec_hook:new-id:php artisan cache:clear"),
+            "the post-update hook must run in the NEW container, after the \
+             health gate and archive removal"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_update_hook_failure_does_not_fail_update() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_hook_status(HookStatus::Completed { exit_code: 2 });
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(None, Some("php artisan cache:clear")),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a failed post-update hook must not surface as an error");
+
+        assert!(
+            matches!(outcome, RecreateOutcome::Recreated { .. }),
+            "post-update hooks are best-effort — the update already succeeded"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_update_exec_error_does_not_fail_update() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_failing_exec();
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(None, Some("php artisan cache:clear")),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a post-update exec error must not surface as an error");
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rollback_skips_post_update_hook() {
+        use crate::health::TokioClock;
+
+        let ops = RecordingOps::with_probe(&[ContainerRuntimeState::Exited { exit_code: 1 }]);
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(None, Some("php artisan cache:clear")),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("recording fake never errors");
+
+        assert!(matches!(outcome, RecreateOutcome::RolledBack(_)));
+        assert!(
+            !ops.into_calls()
+                .iter()
+                .any(|c| c.starts_with("exec_hook:new-id")),
+            "the update did not happen — the post-update hook must not run"
         );
     }
 
@@ -619,6 +977,7 @@ mod tests {
             &HealthConfig::default(),
             &TokioClock,
             Cleanup::default(),
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await
@@ -665,6 +1024,7 @@ mod tests {
             &fast_cfg(),
             &TokioClock,
             Cleanup::default(),
+            &LifecycleHooks::default(),
             || 1_700_000_000,
         )
         .await

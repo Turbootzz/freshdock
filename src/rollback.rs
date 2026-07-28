@@ -178,6 +178,14 @@ mod tests {
         async fn prune_dangling_images(&self) -> Result<(), DockerError> {
             unreachable!("rollback never prunes images")
         }
+        async fn exec_hook(
+            &self,
+            _name_or_id: &str,
+            _command: &str,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
+            unreachable!("rollback never runs lifecycle hooks")
+        }
     }
 
     #[tokio::test]
