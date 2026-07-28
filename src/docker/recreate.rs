@@ -152,10 +152,10 @@ pub async fn recreate_one(
 
 /// Run the pre-update hook in the *old* (still running) container. Returns
 /// `Some(reason)` when the update must be skipped. The contract is
-/// conservative and watchtower-compatible: **any** failure — non-zero exit
-/// (75 = intentional "not now"), timeout, or an exec that couldn't run —
-/// skips the update, because an app whose own pre-hook couldn't confirm
-/// readiness must not be taken down.
+/// deliberately stricter than watchtower (which only skips on exit 75):
+/// **any** failure — non-zero exit (75 = intentional "not now"), timeout, or
+/// an exec that couldn't run — skips the update, because an app whose own
+/// pre-hook couldn't confirm readiness must not be taken down.
 async fn run_pre_update_hook(
     ops: &impl DockerOps,
     name: &str,

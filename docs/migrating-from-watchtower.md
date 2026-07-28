@@ -26,7 +26,7 @@ ask for it with a mode like `live` or `nightly`.
 | `com.centurylinklabs.watchtower.enable=false` (with global watch) | *omit the labels*, or `freshdock.mode=off` | freshdock ignores unlabelled containers, so there's usually nothing to disable. |
 | `com.centurylinklabs.watchtower.monitor-only=true` | `freshdock.mode=watch` | Detect + notify, never pull/recreate. |
 | *(no per-container schedule)* | `freshdock.mode=nightly`/`weekly`/`monthly` + `freshdock.schedule=<cron>` | Scheduling is **per container** in freshdock, not a single global cron. |
-| `com.centurylinklabs.watchtower.lifecycle.pre-update` | `freshdock.lifecycle.pre-update` | Same semantics (exec in the old container; failure/75 skips the update). Timeout labels count **seconds** in freshdock, minutes in Watchtower. See [lifecycle hooks](lifecycle-hooks.md). |
+| `com.centurylinklabs.watchtower.lifecycle.pre-update` | `freshdock.lifecycle.pre-update` | Exec in the old container, but **stricter**: any non-zero exit (not just `75`), a timeout, or a failed exec skips the update. Timeout labels count **seconds** in freshdock, minutes in Watchtower. See [lifecycle hooks](lifecycle-hooks.md). |
 | `com.centurylinklabs.watchtower.lifecycle.post-update` | `freshdock.lifecycle.post-update` | Best-effort exec in the new container after the health gate. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-check` / `post-check` | *(no equivalent)* | freshdock has no per-cycle check hooks. |
 | `com.centurylinklabs.watchtower.no-pull=true` | *(no equivalent)* | freshdock always pulls before recreate; there is no "recreate without pull". |

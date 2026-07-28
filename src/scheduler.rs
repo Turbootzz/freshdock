@@ -590,6 +590,8 @@ mod tests {
         /// State the (recreated) container reports to the health gate. Default
         /// healthy; `unhealthy()` makes it crash so the gate rolls back.
         health_state: ContainerRuntimeState,
+        /// Verdict `exec_hook` returns; default exit 0.
+        hook_status: crate::docker::recreate::HookStatus,
     }
 
     impl FakeNode {
@@ -600,20 +602,23 @@ mod tests {
                 list_fails: false,
                 creates: AtomicUsize::new(0),
                 health_state: ContainerRuntimeState::HealthHealthy,
+                hook_status: crate::docker::recreate::HookStatus::Completed { exit_code: 0 },
             }
         }
         fn failing() -> Self {
             Self {
-                containers: Mutex::new(vec![]),
-                local_digest: DIG_A.to_owned(),
                 list_fails: true,
-                creates: AtomicUsize::new(0),
-                health_state: ContainerRuntimeState::HealthHealthy,
+                ..Self::new(vec![], DIG_A)
             }
         }
         /// Make the recreated container crash so the health gate rolls back.
         fn unhealthy(mut self) -> Self {
             self.health_state = ContainerRuntimeState::Exited { exit_code: 1 };
+            self
+        }
+        /// Make the pre-update hook veto the update (non-zero exit).
+        fn hook_refuses(mut self) -> Self {
+            self.hook_status = crate::docker::recreate::HookStatus::Completed { exit_code: 75 };
             self
         }
         fn creates(&self) -> usize {
@@ -701,7 +706,7 @@ mod tests {
             _command: &str,
             _timeout: Option<std::time::Duration>,
         ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
-            Ok(crate::docker::recreate::HookStatus::Completed { exit_code: 0 })
+            Ok(self.hook_status)
         }
     }
 
@@ -1296,6 +1301,38 @@ mod tests {
         let node = FakeNode::new(notifying_container("watch", false), DIG_A);
         let reg = FakeRegistry::new(DIG_B);
         one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[tokio::test]
+    async fn skipped_by_hook_sends_no_notification_and_does_not_recreate() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0) // a hook skip is neither "succeeded" nor "failed"
+            .mount(&server)
+            .await;
+
+        let node = FakeNode::new(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[
+                    ("freshdock.enable", "true"),
+                    ("freshdock.mode", "live"),
+                    ("freshdock.notify", "true"),
+                    ("freshdock.lifecycle.pre-update", "/app/drain.sh"),
+                ],
+            )],
+            DIG_A,
+        )
+        .hook_refuses();
+        let reg = FakeRegistry::new(DIG_B); // update available, but the hook vetoes
+        one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+        assert_eq!(
+            node.creates(),
+            0,
+            "a refused pre-update hook must not recreate"
+        );
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ Watchtower). Hook output is logged at `debug` level.
 
 ## Where the hooks sit in the update
 
-```
+```text
 inspect → pull → PRE-UPDATE HOOK → stop → rename → create → start
         → health gate → remove old container → POST-UPDATE HOOK → image cleanup
 ```

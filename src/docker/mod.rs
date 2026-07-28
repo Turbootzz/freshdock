@@ -145,8 +145,11 @@ impl Docker {
 
     /// Run a lifecycle hook command inside a running container via `sh -c`
     /// (the image must ship a `sh`, as with watchtower). Output is drained at
-    /// `debug!`. On timeout the exec keeps running inside the container —
-    /// Docker has no exec-kill API — but the verdict is `TimedOut`.
+    /// `debug!`. The timeout bounds the whole exchange with the daemon
+    /// (create → drain → exit-code inspect), so a wedged daemon can't hang a
+    /// scheduler tick past the hook budget. On timeout the exec itself keeps
+    /// running inside the container — Docker has no exec-kill API — but the
+    /// verdict is `TimedOut`.
     pub async fn exec_in_container(
         &self,
         name_or_id: &str,
@@ -155,20 +158,20 @@ impl Docker {
     ) -> Result<HookStatus, DockerError> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
 
-        let created = self
-            .0
-            .create_exec(
-                name_or_id,
-                CreateExecOptions {
-                    cmd: Some(vec!["sh", "-c", command]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let run = async {
+            let created = self
+                .0
+                .create_exec(
+                    name_or_id,
+                    CreateExecOptions {
+                        cmd: Some(vec!["sh", "-c", command]),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
 
-        let drain = async {
             if let StartExecResults::Attached { mut output, .. } =
                 self.0.start_exec(&created.id, None).await?
             {
@@ -176,23 +179,32 @@ impl Docker {
                     debug!(container = %name_or_id, output = %chunk?, "hook output");
                 }
             }
-            Ok::<(), DockerError>(())
-        };
-        match timeout {
-            Some(t) => match tokio::time::timeout(t, drain).await {
-                Ok(res) => res?,
-                Err(_) => return Ok(HookStatus::TimedOut),
-            },
-            None => drain.await?,
-        }
 
-        let inspected = self.0.inspect_exec(&created.id).await?;
-        // The output stream is fully drained, so a missing exit code would
-        // mean the daemon still considers the exec running — treat it as a
-        // failure rather than assuming success.
-        Ok(HookStatus::Completed {
-            exit_code: inspected.exit_code.unwrap_or(-1),
-        })
+            // The daemon finalises exec state asynchronously after the stream
+            // closes, so an immediate inspect can still report `running` with
+            // no exit code — poll briefly rather than misread a just-finished
+            // hook. A code still missing after that is treated as a failure,
+            // never a success.
+            let mut inspected = self.0.inspect_exec(&created.id).await?;
+            for _ in 0..20 {
+                if inspected.running != Some(true) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                inspected = self.0.inspect_exec(&created.id).await?;
+            }
+            Ok::<HookStatus, DockerError>(HookStatus::Completed {
+                exit_code: inspected.exit_code.unwrap_or(-1),
+            })
+        };
+
+        match timeout {
+            Some(t) => match tokio::time::timeout(t, run).await {
+                Ok(res) => res,
+                Err(_) => Ok(HookStatus::TimedOut),
+            },
+            None => run.await,
+        }
     }
 
     /// Inspect a container and classify its lifecycle + health into the
