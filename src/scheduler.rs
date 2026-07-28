@@ -394,7 +394,17 @@ async fn apply_update<D>(
         remove_replaced: policy.cleanup,
         prune_dangling,
     };
-    match recreate_with_health(docker, name, &cfg.health, clock, cleanup, || ts).await {
+    match recreate_with_health(
+        docker,
+        name,
+        &cfg.health,
+        clock,
+        cleanup,
+        &policy.hooks,
+        || ts,
+    )
+    .await
+    {
         Ok(RecreateOutcome::Recreated { old_name, new_id }) => {
             info!(container = %name, archived = %old_name, %new_id, "scheduler: recreated");
             if policy.notify {
@@ -420,6 +430,11 @@ async fn apply_update<D>(
                     })
                     .await;
             }
+        }
+        Ok(RecreateOutcome::SkippedByHook(reason)) => {
+            // Deliberate skip, not a failure: the bookkeeping already advanced,
+            // so the next due cycle simply tries again.
+            info!(container = %name, %reason, "scheduler: update skipped by pre-update hook; will retry when next due");
         }
         Err(e) => {
             warn!(container = %name, error = %e, "scheduler: recreate failed; daemon continues");
@@ -462,6 +477,7 @@ mod tests {
             notify: false,
             schedule: schedule.map(str::to_owned),
             cleanup: false,
+            hooks: crate::labels::LifecycleHooks::default(),
         }
     }
 
@@ -678,6 +694,14 @@ mod tests {
         }
         async fn prune_dangling_images(&self) -> Result<(), DockerError> {
             Ok(())
+        }
+        async fn exec_hook(
+            &self,
+            _name_or_id: &str,
+            _command: &str,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
+            Ok(crate::docker::recreate::HookStatus::Completed { exit_code: 0 })
         }
     }
 

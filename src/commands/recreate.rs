@@ -84,7 +84,16 @@ pub async fn run_with(
         remove_replaced: policy.cleanup,
         prune_dangling,
     };
-    let outcome = recreate_with_health(docker, name, health, clock, cleanup, ts_provider).await?;
+    let outcome = recreate_with_health(
+        docker,
+        name,
+        health,
+        clock,
+        cleanup,
+        &policy.hooks,
+        ts_provider,
+    )
+    .await?;
     // Exhaustive match (no wildcard) on purpose: a new `RecreateOutcome`
     // variant forces this site to decide what to print.
     match outcome {
@@ -110,6 +119,14 @@ pub async fn run_with(
                 "recreate failed for {name}: new image was unhealthy ({:?}); rolled back to the previous container (restored from {})",
                 event.reason, event.restored_from
             );
+        }
+        RecreateOutcome::SkippedByHook(reason) => {
+            info!(
+                container = %name,
+                %reason,
+                "recreate skipped by the pre-update hook — container left unchanged"
+            );
+            println!("recreate skipped for {name}: {reason} — container left unchanged");
         }
     }
     Ok(())
@@ -207,6 +224,14 @@ mod tests {
         }
         async fn prune_dangling_images(&self) -> Result<(), DockerError> {
             panic!("policy gate must refuse before prune_dangling_images");
+        }
+        async fn exec_hook(
+            &self,
+            _name_or_id: &str,
+            _command: &str,
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
+            panic!("policy gate must refuse before exec_hook");
         }
     }
 

@@ -47,6 +47,10 @@ entirely. All behaviour is driven by these Docker labels (set them in compose un
 | `freshdock.schedule` | 5-field cron | the mode's default | Override the cron for a calendar mode. Ignored for `live` / `watch` / `off`. See [cron syntax](scheduling.md#cron-syntax). |
 | `freshdock.notify` | `true` / `false` | `false` | Emit notifications for this container's update events. Requires a configured `[notifications.*]` target. See [notifications](notifications.md). |
 | `freshdock.cleanup` | `true` / `false` | `[settings] cleanup` (else `false`) | After a healthy update, remove the image the *old* container ran. Overrides the global `[settings] cleanup`. See [health & cleanup](health-and-rollback.md#image-cleanup). |
+| `freshdock.lifecycle.pre-update` | shell command | *(none)* | Exec'd (`sh -c`) in the old container before it is stopped; a non-zero exit, timeout, or exec failure **skips the update**. See [lifecycle hooks](lifecycle-hooks.md). |
+| `freshdock.lifecycle.pre-update-timeout` | seconds | `60` | Time budget for the pre-update hook; `0` disables the timeout. |
+| `freshdock.lifecycle.post-update` | shell command | *(none)* | Exec'd (`sh -c`) in the new container after it passes the health gate. Best-effort; a failure never fails the update. See [lifecycle hooks](lifecycle-hooks.md). |
+| `freshdock.lifecycle.post-update-timeout` | seconds | `60` | Time budget for the post-update hook; `0` disables the timeout. |
 
 Values are case-insensitive and tolerate surrounding whitespace. An invalid value
 is reported with the offending label named.

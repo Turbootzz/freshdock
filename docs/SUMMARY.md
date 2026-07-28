@@ -15,6 +15,7 @@
 - [Scheduling & modes](scheduling.md)
 - [Notifications](notifications.md)
 - [Health gating & rollback](health-and-rollback.md)
+- [Lifecycle hooks](lifecycle-hooks.md)
 - [Registry authentication](registry-auth.md)
 - [Deployment](deployment.md)
 

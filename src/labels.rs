@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -43,7 +44,35 @@ pub struct Policy {
     /// Remove the superseded image after a healthy update. From the
     /// `freshdock.cleanup` label, falling back to the global default.
     pub cleanup: bool,
+    /// Lifecycle hook commands from `freshdock.lifecycle.*` labels (issue #61).
+    pub hooks: LifecycleHooks,
 }
+
+/// A single lifecycle hook: a command exec'd inside the container via
+/// `sh -c`, bounded by a timeout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hook {
+    pub command: String,
+    /// `None` means unlimited (label value `0`).
+    pub timeout: Option<Duration>,
+}
+
+/// Hook commands run around an update, watchtower-style
+/// (`freshdock.lifecycle.pre-update` / `post-update` and their `-timeout`
+/// companions, in seconds).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LifecycleHooks {
+    /// Runs in the *old* container after the pull, before the stop. Any
+    /// failure (non-zero exit, timeout, exec error) skips the update.
+    pub pre_update: Option<Hook>,
+    /// Runs in the *new* container once it passes the health gate.
+    /// Best-effort: a failure is logged, the update stands.
+    pub post_update: Option<Hook>,
+}
+
+/// Watchtower defaults its hook timeout to one minute; keeping the same
+/// default eases migration.
+const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fleet-wide defaults from `[settings]`, applied when a container omits the
 /// matching `freshdock.*` label. A per-container label always overrides these.
@@ -63,6 +92,10 @@ pub enum LabelError {
         "invalid value for label `freshdock.mode`: `{value}` (expected one of live, nightly, weekly, monthly, watch, off)"
     )]
     InvalidMode { value: String },
+    #[error(
+        "invalid value for label `{key}`: `{value}` (expected a whole number of seconds, 0 for no timeout)"
+    )]
+    InvalidTimeout { key: String, value: String },
 }
 
 pub fn parse_policy(
@@ -81,6 +114,7 @@ pub fn parse_policy(
             notify: false,
             schedule: None,
             cleanup: false,
+            hooks: LifecycleHooks::default(),
         });
     }
 
@@ -101,13 +135,53 @@ pub fn parse_policy(
         Some(v) => parse_bool("freshdock.cleanup", v)?,
     };
 
+    let hooks = LifecycleHooks {
+        pre_update: parse_hook(
+            labels,
+            "freshdock.lifecycle.pre-update",
+            "freshdock.lifecycle.pre-update-timeout",
+        )?,
+        post_update: parse_hook(
+            labels,
+            "freshdock.lifecycle.post-update",
+            "freshdock.lifecycle.post-update-timeout",
+        )?,
+    };
+
     Ok(Policy {
         enabled,
         mode,
         notify,
         schedule,
         cleanup,
+        hooks,
     })
+}
+
+/// The timeout label is validated even when no command is set — a dangling
+/// timeout is almost certainly a typo'd hook setup, and silence would hide it.
+fn parse_hook(
+    labels: &HashMap<String, String>,
+    command_key: &str,
+    timeout_key: &str,
+) -> Result<Option<Hook>, LabelError> {
+    let timeout = match labels.get(timeout_key) {
+        None => Some(DEFAULT_HOOK_TIMEOUT),
+        Some(v) => match v.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(Duration::from_secs(secs)),
+            Err(_) => {
+                return Err(LabelError::InvalidTimeout {
+                    key: timeout_key.to_string(),
+                    value: v.to_string(),
+                });
+            }
+        },
+    };
+    Ok(labels.get(command_key).map(|c| Hook {
+        command: c.clone(),
+        timeout,
+    }))
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, LabelError> {
@@ -365,6 +439,130 @@ mod tests {
         assert_eq!(Mode::Monthly.to_string(), "monthly");
         assert_eq!(Mode::Watch.to_string(), "watch");
         assert_eq!(Mode::Off.to_string(), "off");
+    }
+
+    #[test]
+    fn lifecycle_hooks_absent_by_default() {
+        let p = parse_policy(
+            &labels(&[("freshdock.enable", "true")]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(p.hooks, LifecycleHooks::default());
+        assert!(p.hooks.pre_update.is_none());
+        assert!(p.hooks.post_update.is_none());
+    }
+
+    #[test]
+    fn pre_update_hook_parses_with_default_timeout() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.pre-update", "/app/flush.sh"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        let hook = p.hooks.pre_update.expect("pre-update hook must parse");
+        assert_eq!(hook.command, "/app/flush.sh");
+        assert_eq!(hook.timeout, Some(Duration::from_secs(60)));
+        assert!(p.hooks.post_update.is_none());
+    }
+
+    #[test]
+    fn post_update_hook_parses_with_explicit_timeout() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.post-update", "php artisan cache:clear"),
+                ("freshdock.lifecycle.post-update-timeout", "120"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        let hook = p.hooks.post_update.expect("post-update hook must parse");
+        assert_eq!(hook.command, "php artisan cache:clear");
+        assert_eq!(hook.timeout, Some(Duration::from_secs(120)));
+        assert!(p.hooks.pre_update.is_none());
+    }
+
+    #[test]
+    fn hook_timeout_zero_disables_the_timeout() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.pre-update", "/app/drain.sh"),
+                ("freshdock.lifecycle.pre-update-timeout", "0"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(p.hooks.pre_update.unwrap().timeout, None);
+    }
+
+    #[test]
+    fn invalid_hook_timeout_returns_typed_error() {
+        let err = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.pre-update", "/app/drain.sh"),
+                ("freshdock.lifecycle.pre-update-timeout", "soon"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            LabelError::InvalidTimeout { ref key, ref value }
+                if key == "freshdock.lifecycle.pre-update-timeout" && value == "soon"
+        ));
+    }
+
+    #[test]
+    fn hook_timeout_label_is_validated_even_without_a_command() {
+        // A dangling timeout label is almost certainly a typo'd setup — surface
+        // it instead of silently ignoring it.
+        let err = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.post-update-timeout", "brief"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LabelError::InvalidTimeout { ref key, .. } if key == "freshdock.lifecycle.post-update-timeout")
+        );
+    }
+
+    #[test]
+    fn hook_timeout_tolerates_surrounding_whitespace() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.pre-update", "/app/drain.sh"),
+                ("freshdock.lifecycle.pre-update-timeout", " 30 "),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            p.hooks.pre_update.unwrap().timeout,
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn disabled_container_has_no_hooks() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "false"),
+                ("freshdock.lifecycle.pre-update", "/app/drain.sh"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(p.hooks, LifecycleHooks::default());
     }
 
     #[test]
