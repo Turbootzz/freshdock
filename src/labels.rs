@@ -74,6 +74,18 @@ pub struct LifecycleHooks {
 /// default eases migration.
 const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Watchtower's label namespace, read as a fallback so a migrated fleet works
+/// without relabelling (issue #63). A `freshdock.*` label always wins over its
+/// watchtower counterpart.
+const WATCHTOWER_PREFIX: &str = "com.centurylinklabs.watchtower.";
+
+const WT_ENABLE: &str = "com.centurylinklabs.watchtower.enable";
+const WT_MONITOR_ONLY: &str = "com.centurylinklabs.watchtower.monitor-only";
+const WT_PRE_UPDATE: &str = "com.centurylinklabs.watchtower.lifecycle.pre-update";
+const WT_PRE_UPDATE_TIMEOUT: &str = "com.centurylinklabs.watchtower.lifecycle.pre-update-timeout";
+const WT_POST_UPDATE: &str = "com.centurylinklabs.watchtower.lifecycle.post-update";
+const WT_POST_UPDATE_TIMEOUT: &str = "com.centurylinklabs.watchtower.lifecycle.post-update-timeout";
+
 /// Fleet-wide defaults from `[settings]`, applied when a container omits the
 /// matching `freshdock.*` label. A per-container label always overrides these.
 #[derive(Debug, Clone, Copy, Default)]
@@ -103,8 +115,13 @@ pub fn parse_policy(
     defaults: PolicyDefaults,
 ) -> Result<Policy, LabelError> {
     let enabled = match labels.get("freshdock.enable") {
-        None => false,
         Some(v) => parse_bool("freshdock.enable", v)?,
+        // Watchtower fallback: `enable=true` is an explicit opt-in either way;
+        // `enable=false` (or absence) is simply not opted in.
+        None => match labels.get(WT_ENABLE) {
+            Some(v) => parse_bool(WT_ENABLE, v)?,
+            None => false,
+        },
     };
 
     if !enabled {
@@ -118,8 +135,15 @@ pub fn parse_policy(
         });
     }
 
+    let monitor_only = match labels.get(WT_MONITOR_ONLY) {
+        Some(v) => parse_bool(WT_MONITOR_ONLY, v)?,
+        None => false,
+    };
     let mode = match labels.get("freshdock.mode") {
         Some(v) => parse_mode(v)?,
+        // monitor-only is explicit per-container intent, so it also beats the
+        // fleet-wide `[settings] default_mode`.
+        None if monitor_only => Mode::Watch,
         None => defaults.mode.unwrap_or(Mode::Watch),
     };
 
@@ -140,11 +164,15 @@ pub fn parse_policy(
             labels,
             "freshdock.lifecycle.pre-update",
             "freshdock.lifecycle.pre-update-timeout",
+            WT_PRE_UPDATE,
+            WT_PRE_UPDATE_TIMEOUT,
         )?,
         post_update: parse_hook(
             labels,
             "freshdock.lifecycle.post-update",
             "freshdock.lifecycle.post-update-timeout",
+            WT_POST_UPDATE,
+            WT_POST_UPDATE_TIMEOUT,
         )?,
     };
 
@@ -158,30 +186,104 @@ pub fn parse_policy(
     })
 }
 
-/// The timeout label is validated even when no command is set — a dangling
+/// The timeout labels are validated even when no command is set — a dangling
 /// timeout is almost certainly a typo'd hook setup, and silence would hide it.
+/// The freshdock labels win over their watchtower fallbacks independently, so
+/// a mid-migration mix (watchtower command + freshdock timeout) behaves
+/// predictably.
 fn parse_hook(
     labels: &HashMap<String, String>,
     command_key: &str,
     timeout_key: &str,
+    wt_command_key: &str,
+    wt_timeout_key: &str,
 ) -> Result<Option<Hook>, LabelError> {
     let timeout = match labels.get(timeout_key) {
-        None => Some(DEFAULT_HOOK_TIMEOUT),
-        Some(v) => match v.trim().parse::<u64>() {
-            Ok(0) => None,
-            Ok(secs) => Some(Duration::from_secs(secs)),
-            Err(_) => {
-                return Err(LabelError::InvalidTimeout {
-                    key: timeout_key.to_string(),
-                    value: v.to_string(),
-                });
-            }
+        Some(v) => parse_timeout(timeout_key, v, 1)?,
+        // Watchtower counts MINUTES, not seconds.
+        None => match labels.get(wt_timeout_key) {
+            Some(v) => parse_timeout(wt_timeout_key, v, 60)?,
+            None => Some(DEFAULT_HOOK_TIMEOUT),
         },
     };
-    Ok(labels.get(command_key).map(|c| Hook {
+    let command = labels
+        .get(command_key)
+        .or_else(|| labels.get(wt_command_key));
+    Ok(command.map(|c| Hook {
         command: c.clone(),
         timeout,
     }))
+}
+
+/// Parse a hook timeout label: a whole number of `unit_secs`-sized units
+/// (`1` = seconds, `60` = watchtower's minutes), `0` = no timeout.
+fn parse_timeout(key: &str, value: &str, unit_secs: u64) -> Result<Option<Duration>, LabelError> {
+    match value.trim().parse::<u64>() {
+        Ok(0) => Ok(None),
+        Ok(n) => Ok(Some(Duration::from_secs(n.saturating_mul(unit_secs)))),
+        Err(_) => Err(LabelError::InvalidTimeout {
+            key: key.to_string(),
+            value: value.to_string(),
+        }),
+    }
+}
+
+/// Notes about `com.centurylinklabs.watchtower.*` labels freshdock ignores
+/// (unsupported features) or overrides (a `freshdock.*` counterpart with a
+/// different effect). Best-effort and pure — invalid values are reported by
+/// [`parse_policy`], not here — so callers decide where and how often to log.
+pub fn watchtower_diagnostics(labels: &HashMap<String, String>) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (key, value) in labels {
+        let Some(suffix) = key.strip_prefix(WATCHTOWER_PREFIX) else {
+            continue;
+        };
+        match suffix {
+            "enable" => {
+                if let Some(fd) = labels.get("freshdock.enable")
+                    && parse_bool("freshdock.enable", fd).ok() != parse_bool(key, value).ok()
+                {
+                    notes.push(format!(
+                        "`{key}={value}` conflicts with `freshdock.enable={fd}`; the freshdock label wins"
+                    ));
+                }
+            }
+            "monitor-only" => {
+                if let Some(mode) = labels.get("freshdock.mode")
+                    && parse_bool(key, value).unwrap_or(false)
+                    && parse_mode(mode).ok() != Some(Mode::Watch)
+                {
+                    notes.push(format!(
+                        "`{key}=true` conflicts with `freshdock.mode={mode}`; the freshdock label wins"
+                    ));
+                }
+            }
+            "lifecycle.pre-update" | "lifecycle.post-update" => {
+                let fd_key = format!("freshdock.{suffix}");
+                if let Some(fd) = labels.get(&fd_key)
+                    && fd != value
+                {
+                    notes.push(format!("`{key}` is overridden by `{fd_key}`"));
+                }
+            }
+            "lifecycle.pre-update-timeout" | "lifecycle.post-update-timeout" => {
+                let fd_key = format!("freshdock.{suffix}");
+                if let Some(fd) = labels.get(&fd_key)
+                    && parse_timeout(&fd_key, fd, 1).ok() != parse_timeout(key, value, 60).ok()
+                {
+                    notes.push(format!(
+                        "`{key}` (minutes) is overridden by `{fd_key}` (seconds)"
+                    ));
+                }
+            }
+            _ => notes.push(format!(
+                "unsupported watchtower label `{key}` ignored (no freshdock equivalent)"
+            )),
+        }
+    }
+    // HashMap iteration order is random; keep log output stable.
+    notes.sort();
+    notes
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, LabelError> {
@@ -563,6 +665,288 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.hooks, LifecycleHooks::default());
+    }
+
+    // --- watchtower label translation (issue #63) ---
+
+    #[test]
+    fn watchtower_enable_true_alone_opts_in_with_default_mode() {
+        let p = parse_policy(
+            &labels(&[("com.centurylinklabs.watchtower.enable", "true")]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.mode, Mode::Watch, "opted in, but on OUR safe default");
+    }
+
+    #[test]
+    fn watchtower_enable_false_stays_disabled() {
+        let p = parse_policy(
+            &labels(&[("com.centurylinklabs.watchtower.enable", "false")]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn freshdock_enable_wins_over_watchtower_enable() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "false"),
+                ("com.centurylinklabs.watchtower.enable", "true"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert!(!p.enabled, "freshdock.enable=false must win");
+
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("com.centurylinklabs.watchtower.enable", "false"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert!(p.enabled, "freshdock.enable=true must win");
+    }
+
+    #[test]
+    fn watchtower_monitor_only_maps_to_watch() {
+        let p = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                ("com.centurylinklabs.watchtower.monitor-only", "true"),
+            ]),
+            // monitor-only is explicit user intent, so it must beat the
+            // fleet-wide default mode too.
+            PolicyDefaults {
+                mode: Some(Mode::Live),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(p.mode, Mode::Watch);
+    }
+
+    #[test]
+    fn watchtower_monitor_only_false_is_inert() {
+        let p = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                ("com.centurylinklabs.watchtower.monitor-only", "false"),
+            ]),
+            PolicyDefaults {
+                mode: Some(Mode::Live),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            p.mode,
+            Mode::Live,
+            "monitor-only=false falls through to defaults"
+        );
+    }
+
+    #[test]
+    fn freshdock_mode_wins_over_monitor_only() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.mode", "live"),
+                ("com.centurylinklabs.watchtower.monitor-only", "true"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(p.mode, Mode::Live);
+    }
+
+    #[test]
+    fn watchtower_lifecycle_hooks_map_with_minute_timeouts() {
+        let p = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update",
+                    "/app/drain.sh",
+                ),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update-timeout",
+                    "5",
+                ),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.post-update",
+                    "cache-clear",
+                ),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        let pre = p.hooks.pre_update.expect("pre-update must map");
+        assert_eq!(pre.command, "/app/drain.sh");
+        assert_eq!(
+            pre.timeout,
+            Some(Duration::from_secs(300)),
+            "watchtower timeouts are MINUTES"
+        );
+        let post = p.hooks.post_update.expect("post-update must map");
+        assert_eq!(post.command, "cache-clear");
+        assert_eq!(
+            post.timeout,
+            Some(Duration::from_secs(60)),
+            "watchtower's default hook budget is 1 minute — same as ours"
+        );
+    }
+
+    #[test]
+    fn watchtower_timeout_zero_disables_the_timeout() {
+        let p = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.post-update",
+                    "cache-clear",
+                ),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.post-update-timeout",
+                    "0",
+                ),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(p.hooks.post_update.unwrap().timeout, None);
+    }
+
+    #[test]
+    fn freshdock_lifecycle_labels_win_over_watchtower() {
+        let p = parse_policy(
+            &labels(&[
+                ("freshdock.enable", "true"),
+                ("freshdock.lifecycle.pre-update", "/fd.sh"),
+                ("freshdock.lifecycle.pre-update-timeout", "30"),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update",
+                    "/wt.sh",
+                ),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update-timeout",
+                    "5",
+                ),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        let pre = p.hooks.pre_update.unwrap();
+        assert_eq!(pre.command, "/fd.sh");
+        assert_eq!(
+            pre.timeout,
+            Some(Duration::from_secs(30)),
+            "seconds, not minutes"
+        );
+    }
+
+    #[test]
+    fn freshdock_timeout_applies_to_a_watchtower_command() {
+        // Mixed setup mid-migration: command still on the watchtower label, a
+        // freshdock timeout override added. freshdock label wins per rule.
+        let p = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update",
+                    "/wt.sh",
+                ),
+                ("freshdock.lifecycle.pre-update-timeout", "90"),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            p.hooks.pre_update.unwrap().timeout,
+            Some(Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn invalid_watchtower_enable_returns_typed_error() {
+        let err = parse_policy(
+            &labels(&[("com.centurylinklabs.watchtower.enable", "yes")]),
+            PolicyDefaults::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            LabelError::InvalidBool { ref key, .. } if key == "com.centurylinklabs.watchtower.enable"
+        ));
+    }
+
+    #[test]
+    fn invalid_watchtower_timeout_returns_typed_error() {
+        let err = parse_policy(
+            &labels(&[
+                ("com.centurylinklabs.watchtower.enable", "true"),
+                (
+                    "com.centurylinklabs.watchtower.lifecycle.pre-update-timeout",
+                    "soon",
+                ),
+            ]),
+            PolicyDefaults::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            LabelError::InvalidTimeout { ref key, .. }
+                if key == "com.centurylinklabs.watchtower.lifecycle.pre-update-timeout"
+        ));
+    }
+
+    #[test]
+    fn diagnostics_flag_unsupported_watchtower_labels() {
+        let notes = watchtower_diagnostics(&labels(&[
+            ("com.centurylinklabs.watchtower.enable", "true"),
+            ("com.centurylinklabs.watchtower.no-pull", "true"),
+            ("com.centurylinklabs.watchtower.depends-on", "db"),
+            ("com.centurylinklabs.watchtower.lifecycle.pre-check", "x"),
+            ("freshdock.mode", "live"),
+        ]));
+        let joined = notes.join("\n");
+        assert!(joined.contains("no-pull"), "{notes:?}");
+        assert!(joined.contains("depends-on"), "{notes:?}");
+        assert!(joined.contains("lifecycle.pre-check"), "{notes:?}");
+        assert!(
+            !joined.contains("watchtower.enable"),
+            "translated labels are not 'unsupported': {notes:?}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_flag_an_enable_conflict() {
+        let notes = watchtower_diagnostics(&labels(&[
+            ("freshdock.enable", "true"),
+            ("com.centurylinklabs.watchtower.enable", "false"),
+        ]));
+        assert!(
+            notes.iter().any(|n| n.contains("enable")),
+            "conflicting enable labels must be flagged: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_stay_quiet_when_labels_agree_or_are_absent() {
+        assert!(
+            watchtower_diagnostics(&labels(&[
+                ("freshdock.enable", "true"),
+                ("com.centurylinklabs.watchtower.enable", "true"),
+            ]))
+            .is_empty(),
+            "agreeing labels are not a conflict"
+        );
+        assert!(watchtower_diagnostics(&labels(&[("freshdock.enable", "true")])).is_empty());
     }
 
     #[test]

@@ -256,6 +256,13 @@ async fn run_tick<D, R>(
         }
         live.insert(name.clone());
 
+        // Diagnostics on first sight only, or a fleet full of ignored
+        // watchtower labels would re-warn every tick.
+        if !states.contains_key(&name) {
+            for note in labels::watchtower_diagnostics(c.labels.as_ref().unwrap_or(&empty)) {
+                warn!(container = %name, %note, "scheduler: watchtower label");
+            }
+        }
         let state = states
             .entry(name.clone())
             .or_insert_with(|| seed_state(&policy, &name, now));

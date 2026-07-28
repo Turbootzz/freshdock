@@ -4,6 +4,7 @@ use std::sync::Arc;
 use comfy_table::Table;
 use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
+use tracing::warn;
 
 use crate::config::{CredentialStore, ResolvedSettings};
 use crate::docker::Docker;
@@ -70,6 +71,9 @@ async fn collect_cells(
             .and_then(|n| n.first())
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "?".to_string());
+        for note in labels::watchtower_diagnostics(lbls) {
+            warn!(container = %name, %note, "watchtower label");
+        }
         let image_str = c.image.unwrap_or_else(|| "?".to_string());
 
         rows.push(RowPrep {

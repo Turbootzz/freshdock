@@ -18,7 +18,30 @@ ask for it with a mode like `live` or `nightly`.
 > `FRESHDOCK_NOTIFY_OPS_URL=discord://token@id` almost verbatim. See the
 > [configuration reference](configuration.md).
 
+## Keep your labels — they're read directly
+
+freshdock reads the `com.centurylinklabs.watchtower.*` labels themselves, so an
+existing fleet usually needs **no relabelling**: swap the updater container and
+go. A `freshdock.*` label always wins when both are present, so you can migrate
+label-by-label at your own pace.
+
+What's honoured directly:
+
+| Watchtower label | Effect in freshdock |
+|---|---|
+| `com.centurylinklabs.watchtower.enable=true` | Same as `freshdock.enable=true`. **Note:** the container lands on freshdock's safe default mode (`watch`, or `[settings] default_mode`) — it will not auto-update like Watchtower did until you give it an active mode. |
+| `com.centurylinklabs.watchtower.enable=false` | Not opted in (same as having no labels — freshdock is opt-in anyway). |
+| `com.centurylinklabs.watchtower.monitor-only=true` | Same as `freshdock.mode=watch`; beats `[settings] default_mode`. |
+| `com.centurylinklabs.watchtower.lifecycle.pre-update` / `post-update` | Same as the [`freshdock.lifecycle.*` hooks](lifecycle-hooks.md). |
+| `…lifecycle.pre-update-timeout` / `post-update-timeout` | Honoured in Watchtower's unit (**minutes**, converted; `0` = unlimited). The `freshdock.lifecycle.*-timeout` labels count seconds. |
+
+Not supported — logged once and ignored: `no-pull`, `depends-on`, `scope`,
+`lifecycle.pre-check` / `post-check`. Dependency ordering is out of v1 scope and
+freshdock always pulls before recreate; there are no per-cycle check hooks.
+
 ## Label translation
+
+Prefer clean labels (or need the finer-grained knobs)? The native spelling:
 
 | Watchtower label | freshdock label | Notes |
 |---|---|---|
