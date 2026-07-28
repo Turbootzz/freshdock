@@ -18,7 +18,7 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Install the toolchain pinned in rust-toolchain.toml. rustup reads
       # the file automatically; this keeps CI and the local pre-push hook
@@ -42,7 +42,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: taiki-e/install-action@v2
         with:
@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # ubuntu-latest ships a running Docker daemon, so the `#[ignore]`d live
       # "weird config" round-trip (PLAN §6.3, P3-3) can run here — it is the
@@ -85,7 +85,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain + target
         run: |
