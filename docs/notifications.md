@@ -85,19 +85,24 @@ chat_id   = "987654321"
 An email with the message title as the subject. `username` and `password` must be
 set together, or both omitted for an anonymous relay.
 
-`tls` selects the transport security:
+`tls` selects the transport security, and `port` defaults to whatever that mode
+conventionally uses — a mode and a port that don't match can never complete a
+handshake, so the default follows the mode:
 
-| `tls` | Meaning | Typical port |
+| `tls` | Meaning | Default `port` |
 |---|---|---|
 | `"starttls"` | upgrade the connection with STARTTLS — **the default** | 587 |
 | `"implicit"` | TLS from the first byte (SMTPS) | 465 |
-| `"none"` | no encryption at all — local catchers and development only | 1025 |
+| `"none"` | no encryption at all — local catchers and development only | 25 |
+
+Set `port` explicitly whenever the relay listens elsewhere (mailpit, for example,
+takes plaintext SMTP on 1025).
 
 ```toml
 [notifications.email]
 type     = "smtp"
 host     = "smtp.example.com"
-port     = 587
+port     = 587                   # optional; 587 is already the starttls default
 username = "freshdock@example.com"
 password = "s3cr3t"              # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 from     = "freshdock@example.com"
@@ -107,9 +112,13 @@ triggers = ["failed"]
 ```
 
 `starttls = true|false` is the legacy alias kept for existing configs: `true` means
-`tls = "starttls"`, `false` means `tls = "implicit"` — never plaintext. Setting both
-`tls` and `starttls` is an error and the target is skipped, so pick one (prefer
-`tls`).
+`tls = "starttls"`, `false` means `tls = "implicit"` — never plaintext. Keeping both
+keys is fine as long as they agree (`tls = "starttls"` with `starttls = true`, or
+`tls = "implicit"` with `starttls = false`), so adding `tls` to an existing config
+never breaks it. A pair that **contradicts** — including any `tls = "none"` next to
+a `starttls` key, which the boolean can't express — is an error and the target is
+skipped, naming both values. Prefer `tls`, and delete the legacy line once it's
+there.
 
 `tls = "none"` sends credentials and message content in the clear. freshdock logs a
 warning for every plaintext target at startup; use it only against a catcher such as
@@ -153,8 +162,11 @@ Notes:
 - SMTP `?to=` takes a comma list or repeated `to=`; Telegram uses the first
   `chats=` value.
 - SMTP `?tls=starttls|implicit|none` mirrors the file key and defaults to
-  `starttls`; the legacy `?starttls=true|false` still works, but passing both is an
-  error and the target is skipped.
+  `starttls`; the legacy `?starttls=true|false` still works, and the two may both
+  be present as long as they agree. A contradictory pair is an error and the
+  target is skipped.
+- An omitted port in an `smtp://` URL follows the same mode-based default as the
+  file key (587 / 465 / 25).
 - An invalid URL or unknown scheme is **warned and skipped**, never fatal — the
   same resilience as a malformed file target.
 - If a `<NAME>` is already declared in the file, the file target wins and the env

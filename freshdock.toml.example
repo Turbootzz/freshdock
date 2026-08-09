@@ -60,7 +60,8 @@
 # [notifications.email]
 # type     = "smtp"
 # host     = "smtp.example.com"
-# port     = 587                        # default 587
+# port     = 587                        # optional; defaults from tls:
+#                                       # 587 starttls | 465 implicit | 25 none
 # username = "freshdock@example.com"    # username + password together, or neither
 # password = "s3cr3t"                   # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 # from     = "freshdock@example.com"

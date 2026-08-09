@@ -220,7 +220,7 @@ triggers  = ["failed"]
 [notifications.email]
 type     = "smtp"
 host     = "smtp.example.com"
-port     = 587                        # default 587
+port     = 587                        # optional; defaults per tls: 587/465/25
 username = "freshdock@example.com"    # username + password together, or neither
 password = "s3cr3t"                   # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 from     = "freshdock@example.com"
@@ -236,7 +236,7 @@ Per-type keys:
 | `webhook` | `url` (secret) | Generic JSON POST. |
 | `discord` | `webhook_url` (secret) | Posts a coloured embed. |
 | `telegram` | `bot_token` (secret), `chat_id` | Plain-text message via the Bot API. |
-| `smtp` | `host`, `port` (=587), `username`?, `password`? (secret), `from`, `to` (list), `tls` (=`"starttls"`) | `tls` is `"starttls"` \| `"implicit"` (465) \| `"none"` (plaintext, dev only — logged as a warning). The legacy `starttls = true\|false` maps to starttls/implicit; setting both keys is an error. `username`+`password` must be set together or both omitted (anonymous relay). |
+| `smtp` | `host`, `port`?, `username`?, `password`? (secret), `from`, `to` (list), `tls` (=`"starttls"`) | `tls` is `"starttls"` \| `"implicit"` \| `"none"` (plaintext, dev only — logged as a warning). An omitted `port` defaults **from the mode**: 587 (starttls), 465 (implicit), 25 (none) — set it explicitly for a relay on another port (e.g. mailpit on 1025). The legacy `starttls = true\|false` maps to starttls/implicit; keeping both keys is fine when they agree, a contradictory pair is an error. `username`+`password` must be set together or both omitted (anonymous relay). |
 
 All targets also accept `triggers = ["available", "succeeded", "failed"]` (subset
 allowed).

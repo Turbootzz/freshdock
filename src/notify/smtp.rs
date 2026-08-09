@@ -3,9 +3,11 @@
 //! [`RenderedMessage`]: `title` → Subject, `body` → the plain-text part.
 //!
 //! Message construction is split into the free [`build_message`] so it can be
-//! unit-tested without a transport or a relay; CI cannot reach a real SMTP
-//! server, so transport behaviour is covered by the manual test in
-//! `docs/manual-tests/smtp.md`.
+//! unit-tested without a transport or a relay. The plaintext transport is
+//! covered end to end in CI by `tests/smtp_plaintext.rs`, which drives a real
+//! lettre client against an in-process SMTP server; the TLS modes need a relay
+//! CI has no way to reach, so `starttls` / `implicit` remain covered by the
+//! manual test in `docs/manual-tests/smtp.md`.
 
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
@@ -28,6 +30,8 @@ pub struct SmtpNotifier {
 pub struct SmtpParams {
     pub name: String,
     pub host: String,
+    /// Already resolved: an omitted config port has been replaced with the
+    /// default for [`Self::tls`] (587 / 465 / 25) by [`crate::notify`].
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<Secret>,

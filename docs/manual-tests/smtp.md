@@ -44,6 +44,9 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
    mailpit's plaintext listener and could never deliver (#57/#58). Only
    `tls = "none"` disables encryption.
 
+   `port` is spelled out on purpose: an omitted port defaults from the mode, and
+   for `tls = "none"` that is the classic SMTP port 25 — mailpit listens on 1025.
+
 2. Trigger a notification. The quickest path is a watch-mode container with a
    newer image available; or force a failed update (a broken healthcheck) to
    exercise the `failed` trigger and its rollback detail. Run the daemon:

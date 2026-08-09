@@ -21,7 +21,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::config::{NotificationConfig, NotificationTarget, resolve_smtp_tls};
+use crate::config::{NotificationConfig, NotificationTarget, SmtpTls, resolve_smtp_tls};
 use crate::format::short_digest;
 use crate::rollback::RollbackReason;
 use discord::DiscordNotifier;
@@ -186,6 +186,36 @@ fn parse_triggers(
     }
 }
 
+/// The conventional port for each transport mode. Implicit TLS on 587 (or
+/// STARTTLS on 465) cannot complete a handshake, so the default has to follow
+/// the mode rather than being one fixed number.
+fn default_smtp_port(tls: SmtpTls) -> u16 {
+    match tls {
+        SmtpTls::Starttls => 587,
+        SmtpTls::Implicit => 465,
+        SmtpTls::Plaintext => 25,
+    }
+}
+
+/// Resolve one SMTP target's transport settings: collapse `tls` / the legacy
+/// `starttls` into a single mode, then fill an omitted port from *that* mode.
+/// Both in one place, because a port defaulted without knowing the mode is the
+/// wrong-port bug #57 fixed, in the other direction.
+fn smtp_transport(
+    name: &str,
+    tls: Option<SmtpTls>,
+    starttls: Option<bool>,
+    port: Option<u16>,
+) -> Result<(SmtpTls, u16), NotifyError> {
+    // A contradictory `tls` + `starttls` pair fails the target the same way a
+    // bad address does: warned and skipped, never fatal.
+    let tls = resolve_smtp_tls(tls, starttls).map_err(|reason| NotifyError::Config {
+        name: name.to_string(),
+        reason,
+    })?;
+    Ok((tls, port.unwrap_or_else(|| default_smtp_port(tls))))
+}
+
 /// Build one configured target (backend + its trigger subscription). Fallible
 /// so [`Dispatcher::from_config`] can skip a bad target rather than abort.
 fn build_target(
@@ -232,24 +262,22 @@ fn build_target(
             tls,
             starttls,
             triggers,
-        } => (
-            triggers,
-            Box::new(SmtpNotifier::new(SmtpParams {
-                name: name.to_string(),
-                host,
-                port,
-                username,
-                password,
-                from,
-                to,
-                // A contradictory `tls` + `starttls` pair fails the target the
-                // same way a bad address does: warned and skipped, never fatal.
-                tls: resolve_smtp_tls(tls, starttls).map_err(|reason| NotifyError::Config {
+        } => {
+            let (tls, port) = smtp_transport(name, tls, starttls, port)?;
+            (
+                triggers,
+                Box::new(SmtpNotifier::new(SmtpParams {
                     name: name.to_string(),
-                    reason,
-                })?,
-            })?),
-        ),
+                    host,
+                    port,
+                    username,
+                    password,
+                    from,
+                    to,
+                    tls,
+                })?),
+            )
+        }
     };
     let triggers = parse_triggers(name, raw_triggers)?;
     Ok(Target { triggers, notifier })
@@ -644,6 +672,91 @@ mod tests {
         assert!(parse_triggers("x", Some(vec![])).unwrap().is_empty());
     }
 
+    // --- smtp transport resolution: tls mode + the port that goes with it ---
+
+    #[test]
+    fn default_smtp_port_follows_the_tls_mode() {
+        assert_eq!(default_smtp_port(SmtpTls::Starttls), 587);
+        assert_eq!(default_smtp_port(SmtpTls::Implicit), 465);
+        assert_eq!(default_smtp_port(SmtpTls::Plaintext), 25);
+    }
+
+    #[test]
+    fn smtp_transport_defaults_the_port_from_the_resolved_mode() {
+        // Implicit TLS on 587 can never complete a handshake — the #57
+        // wrong-port bug in the other direction, so the default must follow the
+        // mode rather than being a fixed 587.
+        assert_eq!(
+            smtp_transport("mail", Some(SmtpTls::Implicit), None, None).unwrap(),
+            (SmtpTls::Implicit, 465)
+        );
+        // …including when the mode came from the legacy key.
+        assert_eq!(
+            smtp_transport("mail", None, Some(false), None).unwrap(),
+            (SmtpTls::Implicit, 465)
+        );
+        assert_eq!(
+            smtp_transport("mail", None, None, None).unwrap(),
+            (SmtpTls::Starttls, 587)
+        );
+        assert_eq!(
+            smtp_transport("mail", Some(SmtpTls::Plaintext), None, None).unwrap(),
+            (SmtpTls::Plaintext, 25)
+        );
+        // An explicit port always wins over the mode default.
+        assert_eq!(
+            smtp_transport("mail", Some(SmtpTls::Plaintext), None, Some(1025)).unwrap(),
+            (SmtpTls::Plaintext, 1025)
+        );
+    }
+
+    /// A minimal file-declared smtp target, so a test can vary only the tls
+    /// pair and the port.
+    fn smtp_target(
+        port: Option<u16>,
+        tls: Option<SmtpTls>,
+        starttls: Option<bool>,
+    ) -> NotificationTarget {
+        NotificationTarget::Smtp {
+            host: "smtp.example.com".to_string(),
+            port,
+            username: None,
+            password: None,
+            from: "freshdock@example.com".to_string(),
+            to: vec!["admin@example.com".to_string()],
+            tls,
+            starttls,
+            triggers: None,
+        }
+    }
+
+    #[test]
+    fn build_target_accepts_an_agreeing_tls_pair_and_a_missing_port() {
+        // `tls = "implicit"` alongside a not-yet-removed `starttls = false`, and
+        // no port: both resolutions happen here, and the target survives.
+        let built = build_target(
+            "mail",
+            smtp_target(None, Some(SmtpTls::Implicit), Some(false)),
+            &crate::http::client(),
+        );
+        assert!(built.is_ok(), "an agreeing pair must not drop the target");
+    }
+
+    #[test]
+    fn build_target_rejects_a_contradictory_tls_pair() {
+        // `match` rather than `unwrap_err`: `Target` wraps a non-Debug notifier.
+        let err = match build_target(
+            "mail",
+            smtp_target(None, Some(SmtpTls::Plaintext), Some(true)),
+            &crate::http::client(),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("a contradictory tls pair must be rejected"),
+        };
+        assert!(matches!(err, NotifyError::Config { .. }), "{err}");
+        assert!(err.to_string().contains("mail"), "{err}");
+    }
+
     #[test]
     fn from_config_skips_a_target_with_an_unknown_trigger() {
         use crate::config::{NotificationConfig, NotificationTarget, Secret};
@@ -661,11 +774,31 @@ mod tests {
         assert!(d.is_empty());
     }
 
+    /// A second dispatcher, registered once and never dropped, that discards
+    /// everything. It exists only to keep tracing-core off its
+    /// single-dispatcher fast path: with just one live dispatcher, callsite
+    /// interest is rebuilt from whatever subscriber the *rebuilding thread*
+    /// happens to have, so a test running in parallel — holding no subscriber —
+    /// can cache a callsite as "never" and blank a capture below. With two
+    /// registered dispatchers, interest falls back to the per-event `enabled`
+    /// path, which asks *this* thread's subscriber. Without this, the log
+    /// assertions here fail intermittently under `cargo test`'s parallelism.
+    static KEEPALIVE: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
+        tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .finish(),
+        )
+    });
+
     /// Run `f` under a temporary tracing subscriber that captures into a string,
     /// so a test can assert on real log output.
     fn capture_logs(f: impl FnOnce()) -> String {
         use std::io::Write;
         use tracing_subscriber::fmt::MakeWriter;
+
+        std::sync::LazyLock::force(&KEEPALIVE);
 
         #[derive(Clone)]
         struct BufWriter(Arc<Mutex<Vec<u8>>>);

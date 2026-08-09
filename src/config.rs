@@ -210,8 +210,11 @@ pub enum NotificationTarget {
     },
     Smtp {
         host: String,
-        #[serde(default = "default_smtp_port")]
-        port: u16,
+        /// Omitted means "whatever suits the transport": the default follows the
+        /// resolved TLS mode (587 / 465 / 25), filled in by
+        /// [`crate::notify`] where that mode is known.
+        #[serde(default)]
+        port: Option<u16>,
         #[serde(default)]
         username: Option<String>,
         #[serde(default)]
@@ -220,7 +223,7 @@ pub enum NotificationTarget {
         to: Vec<String>,
         /// Transport security. Both this and the legacy `starttls` are raw
         /// `Option`s here; [`resolve_smtp_tls`] is the single place that turns
-        /// the pair into one mode (and rejects setting both).
+        /// the pair into one mode (and rejects a contradictory pair).
         #[serde(default)]
         tls: Option<SmtpTls>,
         /// Legacy alias for `tls`: `true` → STARTTLS, `false` → **implicit
@@ -247,15 +250,32 @@ pub enum SmtpTls {
     Plaintext,
 }
 
-impl SmtpTls {
+impl fmt::Display for SmtpTls {
+    /// The canonical config token, so an error message can quote a value the
+    /// operator can paste straight back into `tls = "…"`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SmtpTls::Starttls => "starttls",
+            SmtpTls::Implicit => "implicit",
+            SmtpTls::Plaintext => "none",
+        })
+    }
+}
+
+impl std::str::FromStr for SmtpTls {
+    type Err = String;
+
     /// One case-insensitive matcher for both the TOML `tls = "…"` value and the
-    /// env URL's `?tls=…`, so the two can never accept different tokens.
-    fn parse(raw: &str) -> Option<Self> {
+    /// env URL's `?tls=…`, so the two can never accept different tokens
+    /// (the [`crate::labels::Mode`] convention).
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "starttls" => Some(SmtpTls::Starttls),
-            "implicit" => Some(SmtpTls::Implicit),
-            "none" => Some(SmtpTls::Plaintext),
-            _ => None,
+            "starttls" => Ok(SmtpTls::Starttls),
+            "implicit" => Ok(SmtpTls::Implicit),
+            "none" => Ok(SmtpTls::Plaintext),
+            _ => Err(format!(
+                "unknown smtp tls mode `{raw}` (expected starttls, implicit, or none)"
+            )),
         }
     }
 }
@@ -263,22 +283,35 @@ impl SmtpTls {
 impl TryFrom<String> for SmtpTls {
     type Error = String;
 
+    /// serde's entry point (`#[serde(try_from = "String")]`), delegating to
+    /// [`FromStr`](std::str::FromStr) so the file and the env URL share one
+    /// matcher and one error message.
     fn try_from(raw: String) -> Result<Self, Self::Error> {
-        Self::parse(&raw).ok_or_else(|| {
-            format!("unknown smtp tls mode `{raw}` (expected starttls, implicit, or none)")
-        })
+        raw.parse()
     }
 }
 
 /// Collapse the `tls` / legacy `starttls` pair into the one mode the transport
-/// is built from. Setting both is an error rather than a precedence rule: the
-/// operator's two statements may contradict each other and guessing which they
-/// meant is worse than saying so.
+/// is built from.
+///
+/// Setting both is only an error when the two *contradict* each other. An
+/// agreeing pair (`tls = "starttls"` with `starttls = true`, or
+/// `tls = "implicit"` with `starttls = false`) is the normal shape of a
+/// half-finished migration — the operator added the new key and has not yet
+/// deleted the old line — and two statements of the same intent are not
+/// ambiguous. Rejecting them would drop the target at dispatcher build,
+/// silently disabling notifications behind a single startup warning.
 pub fn resolve_smtp_tls(tls: Option<SmtpTls>, starttls: Option<bool>) -> Result<SmtpTls, String> {
     match (tls, starttls) {
-        (Some(_), Some(_)) => {
-            Err("set either `tls` or the legacy `starttls`, not both".to_string())
-        }
+        // Both keys, saying the same thing.
+        (Some(SmtpTls::Starttls), Some(true)) => Ok(SmtpTls::Starttls),
+        (Some(SmtpTls::Implicit), Some(false)) => Ok(SmtpTls::Implicit),
+        // Both keys, disagreeing — including every plaintext pairing, since the
+        // legacy boolean cannot express "no TLS" at all. Name both values so the
+        // operator knows exactly which line to delete.
+        (Some(tls), Some(starttls)) => Err(format!(
+            "tls = \"{tls}\" contradicts starttls = {starttls}; remove the legacy starttls key"
+        )),
         (Some(tls), None) => Ok(tls),
         // `starttls = false` predates the plaintext mode and always meant
         // implicit TLS; keep that meaning so an existing config can't silently
@@ -287,11 +320,6 @@ pub fn resolve_smtp_tls(tls: Option<SmtpTls>, starttls: Option<bool>) -> Result<
         (None, Some(false)) => Ok(SmtpTls::Implicit),
         (None, None) => Ok(SmtpTls::Starttls),
     }
-}
-
-/// SMTP submission port — STARTTLS on 587 is the modern default.
-fn default_smtp_port() -> u16 {
-    587
 }
 
 /// Notification targets after the secret env-overlay, ready for the dispatcher.
@@ -439,7 +467,7 @@ overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOC
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
 lscr, or a registry host.\nNotification targets can be declared from the environment alone (no file) via a \
 shoutrrr-style URL, with an optional trigger filter:\n  FRESHDOCK_NOTIFY_<NAME>_URL          discord://token@id | \
-telegram://token@telegram?chats=id | smtp://user:pass@host:port/?from=a&to=b&tls=starttls|implicit|none | \
+telegram://token@telegram?chats=id | smtp://user:pass@host[:port]/?from=a&to=b&tls=starttls|implicit|none | \
 https://host/hook\n  \
 FRESHDOCK_NOTIFY_<NAME>_TRIGGERS     comma list of available,succeeded,failed (default all)\nA target's secret may \
 also be overridden on its own (<NAME> is the [notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  \
@@ -637,7 +665,9 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
                 .filter(|h| !h.is_empty())
                 .ok_or("smtp:// requires a host")?
                 .to_string();
-            let port = url.port().unwrap_or_else(default_smtp_port);
+            // No port in the URL leaves `None`: the default depends on the
+            // resolved tls mode, which `notify::build_target` fills in.
+            let port = url.port();
             let username = (!url.username().is_empty()).then(|| pct_decode(url.username()));
             let password = url.password().map(|p| Secret::new(pct_decode(p)));
 
@@ -649,7 +679,15 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
                 match key.as_ref() {
                     "from" => from = Some(value.into_owned()),
                     "to" => to.extend(split_csv(&value)),
-                    "tls" => tls = Some(SmtpTls::try_from(value.into_owned())?),
+                    // The strictness here is deliberately asymmetric: an invalid
+                    // `?tls=` value is a hard error that kills the target at
+                    // declaration, while an invalid legacy `?starttls=` warns
+                    // and falls through to the default. The new key is strict
+                    // from day one (nothing depends on its leniency yet); the
+                    // legacy key keeps the historical leniency configs may rely
+                    // on, and its fallback — STARTTLS — is never a security
+                    // downgrade.
+                    "tls" => tls = Some(value.parse::<SmtpTls>()?),
                     "starttls" => {
                         if let Some(flag) = parse_env_bool("smtp starttls", &value) {
                             starttls = Some(flag);
@@ -662,10 +700,10 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
             if to.is_empty() {
                 return Err("smtp:// requires ?to=<addr>[,<addr>…]".to_string());
             }
-            // Validate the pair now so a contradictory URL is skipped at
-            // declaration time; the raw values are kept so `notify::build_target`
-            // stays the single place that resolves them.
-            resolve_smtp_tls(tls, starttls)?;
+            // Resolve the pair here, once: a contradictory URL is skipped at
+            // declaration time, and the target carries the single resolved mode
+            // rather than a raw pair for `notify::build_target` to map again.
+            let tls = resolve_smtp_tls(tls, starttls)?;
             Ok(NotificationTarget::Smtp {
                 host,
                 port,
@@ -673,8 +711,8 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
                 password,
                 from,
                 to,
-                tls,
-                starttls,
+                tls: Some(tls),
+                starttls: None,
                 triggers: None,
             })
         }
@@ -948,6 +986,20 @@ mod tests {
         );
     }
 
+    /// A second dispatcher, registered once and never dropped, that discards
+    /// everything — it keeps tracing-core off its single-dispatcher fast path,
+    /// where callsite interest is rebuilt from the *rebuilding thread's*
+    /// subscriber and a parallel test holding none can blank a capture below.
+    /// See the fuller note on the twin in [`crate::notify`]'s tests.
+    static KEEPALIVE: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
+        tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .finish(),
+        )
+    });
+
     /// Run `f` with a temporary tracing subscriber that writes to an in-memory
     /// buffer, and return everything it logged — so a test can assert on (or
     /// prove the absence of) a value in real log output.
@@ -955,6 +1007,8 @@ mod tests {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
         use tracing_subscriber::fmt::MakeWriter;
+
+        std::sync::LazyLock::force(&KEEPALIVE);
 
         #[derive(Clone)]
         struct BufWriter(Arc<Mutex<Vec<u8>>>);
@@ -1081,7 +1135,10 @@ mod tests {
                 triggers,
                 ..
             } => {
-                assert_eq!(*port, 587, "default submission port");
+                assert!(
+                    port.is_none(),
+                    "omitted port → None; the default follows the resolved tls mode"
+                );
                 assert!(tls.is_none(), "omitted tls → None (resolver defaults it)");
                 assert!(starttls.is_none(), "legacy alias omitted → None");
                 assert!(
@@ -1117,17 +1174,66 @@ mod tests {
     }
 
     #[test]
-    fn resolve_smtp_tls_matrix() {
-        assert_eq!(resolve_smtp_tls(None, None), Ok(SmtpTls::Starttls));
+    fn smtp_tls_parses_case_insensitively_and_displays_canonically() {
+        for (raw, mode) in [
+            ("starttls", SmtpTls::Starttls),
+            (" Implicit ", SmtpTls::Implicit),
+            ("NONE", SmtpTls::Plaintext),
+        ] {
+            assert_eq!(raw.parse::<SmtpTls>(), Ok(mode), "parsing {raw:?}");
+        }
+        assert_eq!(SmtpTls::Starttls.to_string(), "starttls");
+        assert_eq!(SmtpTls::Implicit.to_string(), "implicit");
+        assert_eq!(SmtpTls::Plaintext.to_string(), "none");
+        // Display emits a token FromStr accepts, so an error message that names
+        // a mode always names a value the operator can paste back into config.
+        for mode in [SmtpTls::Starttls, SmtpTls::Implicit, SmtpTls::Plaintext] {
+            assert_eq!(mode.to_string().parse::<SmtpTls>(), Ok(mode));
+        }
+        // serde's entry point delegates to the same matcher and the same error.
+        let err = SmtpTls::try_from("ssl".to_string()).unwrap_err();
         assert_eq!(
-            resolve_smtp_tls(Some(SmtpTls::Plaintext), None),
-            Ok(SmtpTls::Plaintext)
+            err,
+            "unknown smtp tls mode `ssl` (expected starttls, implicit, or none)"
         );
-        // The legacy alias: true → STARTTLS, false → implicit TLS (never plaintext).
+        assert_eq!("ssl".parse::<SmtpTls>().unwrap_err(), err);
+    }
+
+    #[test]
+    fn resolve_smtp_tls_matrix() {
+        // Neither key, or `tls` alone.
+        assert_eq!(resolve_smtp_tls(None, None), Ok(SmtpTls::Starttls));
+        for mode in [SmtpTls::Starttls, SmtpTls::Implicit, SmtpTls::Plaintext] {
+            assert_eq!(resolve_smtp_tls(Some(mode), None), Ok(mode));
+        }
+        // The legacy alias alone: true → STARTTLS, false → implicit TLS (never plaintext).
         assert_eq!(resolve_smtp_tls(None, Some(true)), Ok(SmtpTls::Starttls));
         assert_eq!(resolve_smtp_tls(None, Some(false)), Ok(SmtpTls::Implicit));
-        let err = resolve_smtp_tls(Some(SmtpTls::Starttls), Some(true)).unwrap_err();
-        assert!(err.contains("not both"), "{err}");
+        // Both keys *agreeing* is a half-finished migration, not a mistake: the
+        // operator added `tls` and left the old line in place. Two statements
+        // that say the same thing resolve; dropping the target here would
+        // silently disable notifications.
+        assert_eq!(
+            resolve_smtp_tls(Some(SmtpTls::Starttls), Some(true)),
+            Ok(SmtpTls::Starttls)
+        );
+        assert_eq!(
+            resolve_smtp_tls(Some(SmtpTls::Implicit), Some(false)),
+            Ok(SmtpTls::Implicit)
+        );
+        // Only a contradiction errors — two crosswise, plus both plaintext pairs
+        // (the legacy key cannot express "no TLS" at all). The message names
+        // both values so the operator knows which line to delete.
+        for (tls, starttls) in [
+            (SmtpTls::Starttls, false),
+            (SmtpTls::Implicit, true),
+            (SmtpTls::Plaintext, true),
+            (SmtpTls::Plaintext, false),
+        ] {
+            let err = resolve_smtp_tls(Some(tls), Some(starttls)).unwrap_err();
+            assert!(err.contains(&format!("tls = \"{tls}\"")), "{err}");
+            assert!(err.contains(&format!("starttls = {starttls}")), "{err}");
+        }
     }
 
     #[test]
@@ -1324,23 +1430,31 @@ mod tests {
                 password,
                 from,
                 to,
+                tls,
                 starttls,
                 ..
             } => {
                 assert_eq!(host, "mail.example.com");
-                assert_eq!(*port, 2525);
+                assert_eq!(*port, Some(2525));
                 assert_eq!(username.as_deref(), Some("user@corp"));
                 assert_eq!(password.as_ref().unwrap().expose(), "pa:ss");
                 assert_eq!(from, "ops@example.com");
                 assert_eq!(to, &["a@x.com".to_string(), "b@y.com".to_string()]);
-                assert_eq!(*starttls, Some(false), "explicit starttls=false honoured");
+                // The legacy `?starttls=false` is mapped once, here at parse
+                // time: the target carries the resolved mode, not the raw pair.
+                assert_eq!(
+                    *tls,
+                    Some(SmtpTls::Implicit),
+                    "legacy starttls=false → implicit TLS"
+                );
+                assert!(starttls.is_none(), "the legacy value is not carried on");
             }
             other => panic!("expected smtp, got {other:?}"),
         }
     }
 
     #[test]
-    fn env_url_smtp_defaults_port_and_tls() {
+    fn env_url_smtp_omits_the_port_and_resolves_the_default_tls() {
         let cfg = build_notifications(
             HashMap::new(),
             env(&[(
@@ -1357,8 +1471,15 @@ mod tests {
                 password,
                 ..
             } => {
-                assert_eq!(*port, 587, "default submission port");
-                assert!(tls.is_none(), "no tls param → resolver default (STARTTLS)");
+                assert!(
+                    port.is_none(),
+                    "no port in the URL → defaulted from the tls mode later"
+                );
+                assert_eq!(
+                    *tls,
+                    Some(SmtpTls::Starttls),
+                    "no tls param → resolved to the default once, at parse time"
+                );
                 assert!(starttls.is_none());
                 assert!(username.is_none());
                 assert!(password.is_none());
@@ -1386,13 +1507,32 @@ mod tests {
     }
 
     #[test]
-    fn env_url_rejects_tls_and_starttls_together() {
+    fn env_url_rejects_a_contradictory_tls_and_starttls_pair() {
         let err = parse_notify_url(
             "mail",
             "smtp://h/?from=a@e.com&to=b@e.com&tls=none&starttls=false",
         )
         .unwrap_err();
-        assert!(err.contains("not both"), "{err}");
+        assert!(err.contains("tls = \"none\""), "{err}");
+        assert!(err.contains("starttls = false"), "{err}");
+    }
+
+    #[test]
+    fn env_url_accepts_an_agreeing_tls_and_starttls_pair() {
+        // Both params saying the same thing (a not-yet-cleaned-up migration)
+        // must resolve, not drop the target.
+        let target = parse_notify_url(
+            "mail",
+            "smtp://h/?from=a@e.com&to=b@e.com&tls=starttls&starttls=true",
+        )
+        .expect("an agreeing pair resolves");
+        match target {
+            NotificationTarget::Smtp { tls, starttls, .. } => {
+                assert_eq!(tls, Some(SmtpTls::Starttls));
+                assert!(starttls.is_none());
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
     }
 
     #[test]
