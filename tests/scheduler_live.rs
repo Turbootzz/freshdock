@@ -88,19 +88,36 @@ impl Drop for Cleanup {
     }
 }
 
+/// Is a daemon *required*? In CI's live gate job a missing daemon must be a
+/// loud failure, not a green no-op — see `.github/workflows/ci.yml`, which sets
+/// `FRESHDOCK_LIVE_REQUIRED=1` for exactly that reason.
+fn live_required() -> bool {
+    std::env::var("FRESHDOCK_LIVE_REQUIRED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Skip (or, with [`live_required`], fail) with `why`.
+fn skip_or_panic(why: String) -> Option<Docker> {
+    assert!(
+        !live_required(),
+        "FRESHDOCK_LIVE_REQUIRED is set, so this live gate must not be skipped: {why}"
+    );
+    eprintln!("{why}");
+    None
+}
+
 async fn connect_or_skip() -> Option<Docker> {
     match Docker::connect_with_local_defaults() {
         Ok(d) => match d.ping().await {
             Ok(_) => Some(d),
-            Err(e) => {
-                eprintln!("skipping live scheduler test: docker ping failed: {e}");
-                None
-            }
+            Err(e) => skip_or_panic(format!(
+                "skipping live scheduler test: docker ping failed: {e}"
+            )),
         },
-        Err(e) => {
-            eprintln!("skipping live scheduler test: cannot connect to docker: {e}");
-            None
-        }
+        Err(e) => skip_or_panic(format!(
+            "skipping live scheduler test: cannot connect to docker: {e}"
+        )),
     }
 }
 
@@ -167,6 +184,7 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
     let handle = tokio::spawn(async move {
         let credentials = Arc::new(CredentialStore::default());
         let fd = freshdock::docker::Docker::connect(credentials.clone())
+            .await
             .expect("freshdock docker connect");
         let registry = OciRegistry::new(credentials);
         let cfg = SchedulerConfig {

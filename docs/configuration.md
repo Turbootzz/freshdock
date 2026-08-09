@@ -106,7 +106,7 @@ upper-cased, with `-` → `_`.
 | `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
 | `NO_COLOR` | `--no-color` | Any non-empty value disables colored output. |
 | `RUST_LOG` | log verbosity | e.g. `info`, `freshdock=debug`, `trace`. Default `info`. |
-| `DOCKER_HOST` | Docker daemon endpoint | Honoured by the underlying Docker client (bollard). |
+| `DOCKER_HOST` | Docker daemon endpoint | `unix://`, `tcp://`, `http://`, `https://` or `ssh://`. Unset: `/var/run/docker.sock`, then Podman's sockets. See [deployment](deployment.md#which-socket-freshdock-uses). |
 
 `freshdock --help` prints the same override list (`after_long_help`).
 

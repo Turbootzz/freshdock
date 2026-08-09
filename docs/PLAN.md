@@ -72,7 +72,7 @@ There is **no full-cycle (check → pull → recreate → restart → cleanup) R
 
 What this project will do better than the existing landscape:
 
-1. **Modern Docker API.** Tested against Docker 24.x through 29+, auto-negotiated.
+1. **Modern Docker API.** The API version is negotiated with the daemon at connect time, so freshdock speaks whatever that daemon supports.
 2. **Health-gated updates.** A container is only considered "successfully updated" when the new instance reaches its `healthcheck` healthy state (or stays running for a configurable grace period if no healthcheck exists). Failed updates trigger automatic rollback to the previous image.
 3. **Per-container schedule mixing.** A single deployment can have container A on live updates, container B on nightly, container C on weekly, container D in watch-only mode — driven by Docker labels, no global compromise.
 4. **Dependency-aware ordering.** Containers with `depends_on` are stopped/started in the correct order (inspired by Tugtainer).
@@ -164,7 +164,7 @@ Environment variables override config file for credentials.
 | Plain Docker (24.x, 25.x, 27.x, 28.x, 29+) | Talks to `/var/run/docker.sock` | Primary target. |
 | Docker Desktop (Linux/macOS/Windows) | Same socket | Tested manually. |
 | Portainer (CE + BE) | Talks to the same Docker socket Portainer uses | Document the "Portainer's stack view may briefly show out-of-sync state after a recreate" caveat. |
-| Podman 4+ | Talks to Podman's socket via Bollard's automatic discovery | Rootless and rootful. |
+| Podman 4+ | Falls back to Podman's sockets (`$XDG_RUNTIME_DIR/podman/podman.sock`, `/run/user/$UID/podman/podman.sock`, `/run/podman/podman.sock`) when no Docker socket answers | Rootless and rootful. `DOCKER_HOST=unix://…` overrides for non-standard paths. |
 | Dockge / Komodo / other compose-based UIs | Updates individual containers via the daemon socket | Compose stack files are not edited; users see the new image once they re-run their compose. |
 
 ---
@@ -177,7 +177,7 @@ Environment variables override config file for credentials.
 |---|---|
 | Language | Rust (stable, edition 2024). |
 | Async runtime | Tokio. |
-| Docker client | `bollard` (mature, supports API 1.52, also handles Podman). |
+| Docker client | `bollard` (mature, supports API 1.53, also handles Podman). |
 | HTTP (registry) | `reqwest` with rustls. |
 | Serialization | `serde` + `serde_json` + `toml`. |
 | CLI | `clap` v4 with derive. |

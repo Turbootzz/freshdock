@@ -71,7 +71,7 @@ Prefer clean labels (or need the finer-grained knobs)? The native spelling:
 | `--notifications` + `WATCHTOWER_NOTIFICATION_URL` (shoutrrr) | `FRESHDOCK_NOTIFY_<NAME>_URL` (shoutrrr-style URL) or a `[notifications.<name>]` table | Near drop-in: `discord://token@id`, `telegram://token@telegram?chats=id`, `smtp://…`, or `https://…`. No file required. Add `FRESHDOCK_NOTIFY_<NAME>_TRIGGERS` to filter events. See [notifications](notifications.md#declaring-targets-from-the-environment). |
 | `WATCHTOWER_NOTIFICATIONS_LEVEL` / per-event config | per-target `triggers = ["available","succeeded","failed"]` | Subscribe each target to the events it cares about. |
 | `REPO_USER` / `REPO_PASS` (registry auth) | `FRESHDOCK_REGISTRY_*` env (or a `[registry.<name>]` table) | Per-registry credentials. An env token alone is enough; no file needed. |
-| `DOCKER_HOST` | `DOCKER_HOST` | Same — bollard honours the standard Docker env. |
+| `DOCKER_HOST` | `DOCKER_HOST` | Same — the standard Docker env var, with the same schemes: `unix://`, `tcp://`, `http://`, `https://`, `ssh://`. Unset, freshdock falls back to `/var/run/docker.sock` and then to Podman's sockets. |
 
 ## A worked example
 

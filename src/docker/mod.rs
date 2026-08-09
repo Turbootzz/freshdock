@@ -17,7 +17,7 @@ use bollard::query_parameters::{
     StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::CredentialStore;
 use crate::docker::recreate::{DockerOps, HookStatus};
@@ -26,22 +26,66 @@ use crate::health::{ContainerRuntimeState, HealthProbe};
 use crate::registry::ImageRef;
 use crate::registry::digest::split_repository;
 
+/// Daemon API version at which a create can attach a container to more than
+/// one network in a single call (Docker 25.0). Below it the daemon accepts one
+/// endpoint in `NetworkingConfig` and errors on the rest — which for a recreate
+/// lands *after* the original container has been stopped and renamed.
+const MULTI_NETWORK_MIN_API: (u32, u32) = (1, 44);
+
 #[derive(Debug, thiserror::Error)]
 pub enum DockerError {
     #[error("docker daemon error: {0}")]
     Bollard(#[from] bollard::errors::Error),
     #[error("container inspect produced an incomplete spec: {0}")]
     Spec(crate::docker::spec::SpecError),
+    #[error(
+        "the daemon speaks Docker API {api_version}, which cannot attach a container to \
+         {networks} networks in one create (that needs API 1.44 / Docker 25.0); upgrade \
+         the daemon, or detach the extra networks and re-attach them after the update"
+    )]
+    ApiTooOldForMultiNetwork {
+        api_version: String,
+        networks: usize,
+    },
 }
 
-pub struct Docker(pub(crate) bollard::Docker, Arc<CredentialStore>);
+pub struct Docker {
+    pub(crate) client: bollard::Docker,
+    credentials: Arc<CredentialStore>,
+    /// API version agreed with *this* daemon at connect time, as `MAJOR.MINOR`
+    /// (bollard's own `client_version()` after negotiation). Every request is
+    /// issued at this version, so it is also what the preflight guards read.
+    api_version: String,
+}
 
 impl Docker {
-    pub fn connect(credentials: Arc<CredentialStore>) -> Result<Self, DockerError> {
-        Ok(Self(
-            bollard::Docker::connect_with_local_defaults()?,
+    /// Connect to the daemon and negotiate the API version.
+    ///
+    /// The socket is chosen in this order:
+    ///
+    /// 1. `DOCKER_HOST`, when set — through bollard's scheme-dispatching
+    ///    constructor, so `tcp://`, `http://`, `https://` and `ssh://` are
+    ///    honoured, not only `unix://`.
+    /// 2. The local Docker socket (`/var/run/docker.sock`, or the named pipe on
+    ///    Windows).
+    /// 3. Podman's sockets (`$XDG_RUNTIME_DIR/podman/podman.sock`,
+    ///    `/run/user/$UID/podman/podman.sock`, `/run/podman/podman.sock`), so a
+    ///    Podman-only host works with no configuration at all.
+    ///
+    /// The negotiation is a `GET /version` that downgrades the client to the
+    /// daemon's newest supported API. That makes the documented "auto-negotiated"
+    /// claim true (freshdock's compiled-in default is newer than what older
+    /// daemons accept), and it surfaces an unreachable or wedged daemon here,
+    /// at connect time, instead of midway through a recreate.
+    pub async fn connect(credentials: Arc<CredentialStore>) -> Result<Self, DockerError> {
+        let client = connect_client()?.negotiate_version().await?;
+        let api_version = client.client_version().to_string();
+        info!(%api_version, "negotiated Docker API version");
+        Ok(Self {
+            client,
             credentials,
-        ))
+            api_version,
+        })
     }
 
     pub async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
@@ -49,7 +93,7 @@ impl Docker {
             all: false,
             ..Default::default()
         };
-        Ok(self.0.list_containers(Some(opts)).await?)
+        Ok(self.client.list_containers(Some(opts)).await?)
     }
 
     /// Pull the given image reference from its registry, draining the
@@ -63,7 +107,7 @@ impl Docker {
     /// (the registry HEAD check and this pull share one [`CredentialStore`]).
     pub async fn pull_image(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         let (host, _) = split_repository(&image_ref.repository);
-        let credentials = self.1.get(host).map(|c| DockerCredentials {
+        let credentials = self.credentials.get(host).map(|c| DockerCredentials {
             username: c.username.clone(),
             password: Some(c.token.expose().to_string()),
             ..Default::default()
@@ -72,7 +116,7 @@ impl Docker {
             .from_image(&image_ref.repository)
             .tag(&image_ref.tag)
             .build();
-        let mut stream = self.0.create_image(Some(opts), None, credentials);
+        let mut stream = self.client.create_image(Some(opts), None, credentials);
         while let Some(item) = stream.next().await {
             let info = item?;
             if let Some(status) = info.status {
@@ -98,12 +142,14 @@ impl Docker {
             // anything more than a few hours anyway).
             builder = builder.t(t.try_into().unwrap_or(i32::MAX));
         }
-        self.0.stop_container(name, Some(builder.build())).await?;
+        self.client
+            .stop_container(name, Some(builder.build()))
+            .await?;
         Ok(())
     }
 
     pub async fn start_container(&self, name_or_id: &str) -> Result<(), DockerError> {
-        self.0.start_container(name_or_id, None).await?;
+        self.client.start_container(name_or_id, None).await?;
         Ok(())
     }
 
@@ -117,7 +163,7 @@ impl Docker {
         let opts = bollard::query_parameters::CreateContainerOptionsBuilder::new()
             .name(name)
             .build();
-        let resp = self.0.create_container(Some(opts), body).await?;
+        let resp = self.client.create_container(Some(opts), body).await?;
         Ok(resp.id)
     }
 
@@ -131,7 +177,7 @@ impl Docker {
         force: bool,
     ) -> Result<(), DockerError> {
         let opts = RemoveContainerOptionsBuilder::new().force(force).build();
-        self.0.remove_container(name_or_id, Some(opts)).await?;
+        self.client.remove_container(name_or_id, Some(opts)).await?;
         Ok(())
     }
 
@@ -139,7 +185,7 @@ impl Docker {
     /// move `<name>-old-<ts>` back to its original name.
     pub async fn rename_container_to(&self, from: &str, to: &str) -> Result<(), DockerError> {
         let opts = RenameContainerOptionsBuilder::new().name(to).build();
-        self.0.rename_container(from, opts).await?;
+        self.client.rename_container(from, opts).await?;
         Ok(())
     }
 
@@ -160,7 +206,7 @@ impl Docker {
 
         let run = async {
             let created = self
-                .0
+                .client
                 .create_exec(
                     name_or_id,
                     CreateExecOptions {
@@ -173,7 +219,7 @@ impl Docker {
                 .await?;
 
             if let StartExecResults::Attached { mut output, .. } =
-                self.0.start_exec(&created.id, None).await?
+                self.client.start_exec(&created.id, None).await?
             {
                 while let Some(chunk) = output.next().await {
                     debug!(container = %name_or_id, output = %chunk?, "hook output");
@@ -185,13 +231,13 @@ impl Docker {
             // no exit code — poll briefly rather than misread a just-finished
             // hook. A code still missing after that is treated as a failure,
             // never a success.
-            let mut inspected = self.0.inspect_exec(&created.id).await?;
+            let mut inspected = self.client.inspect_exec(&created.id).await?;
             for _ in 0..20 {
                 if inspected.running != Some(true) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                inspected = self.0.inspect_exec(&created.id).await?;
+                inspected = self.client.inspect_exec(&created.id).await?;
             }
             Ok::<HookStatus, DockerError>(HookStatus::Completed {
                 exit_code: inspected.exit_code.unwrap_or(-1),
@@ -215,7 +261,7 @@ impl Docker {
     /// happened to address it by (`freshdock recreate <id>` would otherwise
     /// never match a name-based reference).
     pub async fn network_dependents_of(&self, name: &str) -> Result<Vec<String>, DockerError> {
-        let resp = self.0.inspect_container(name, None).await?;
+        let resp = self.client.inspect_container(name, None).await?;
         let full_id = resp.id.unwrap_or_default();
         let owner_name = resp
             .name
@@ -237,8 +283,88 @@ impl Docker {
         &self,
         name_or_id: &str,
     ) -> Result<ContainerRuntimeState, DockerError> {
-        let resp = self.0.inspect_container(name_or_id, None).await?;
+        let resp = self.client.inspect_container(name_or_id, None).await?;
         Ok(classify_runtime_state(resp.state))
+    }
+}
+
+/// Build the bollard client for whichever daemon this host exposes, without
+/// negotiating yet (see [`Docker::connect`] for the order and the rationale).
+///
+/// `connect_with_local_defaults` is deliberately *not* the entry point: it only
+/// ever opens the local socket and silently ignores a `tcp://`/`ssh://`
+/// `DOCKER_HOST`, which would point freshdock at the wrong daemon without a
+/// word. Only the socket *family* is logged — a `DOCKER_HOST` can carry
+/// credentials (`ssh://user@host`), so its value never reaches the log.
+fn connect_client() -> Result<bollard::Docker, bollard::errors::Error> {
+    if let Some(host) = std::env::var("DOCKER_HOST").ok().filter(|h| !h.is_empty()) {
+        // Scheme-less values ("/var/run/docker.sock") are not a thing bollard
+        // accepts, so don't report one that was never there.
+        let scheme = host.split_once("://").map_or("(none)", |(s, _)| s);
+        info!(%scheme, "connecting to the Docker daemon via DOCKER_HOST");
+        return bollard::Docker::connect_with_defaults();
+    }
+    match bollard::Docker::connect_with_local_defaults() {
+        Ok(client) => {
+            info!("connected to the local Docker socket");
+            Ok(client)
+        }
+        // No Docker socket at the default location. On a Podman-only host that
+        // is the normal state, not a misconfiguration — probe Podman's sockets
+        // before giving up so such a host needs no configuration at all.
+        #[cfg(unix)]
+        Err(bollard::errors::Error::SocketNotFoundError(path)) => {
+            info!(
+                missing = %path,
+                "no Docker socket; probing the Podman socket locations"
+            );
+            bollard::Docker::connect_with_podman_defaults()
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Parse a Docker API version (`MAJOR.MINOR`, optionally `v`-prefixed) into a
+/// comparable pair. Anything else — including an empty string — is `None`, and
+/// callers must treat that as "unknown", never as "old".
+fn parse_api_version(raw: &str) -> Option<(u32, u32)> {
+    let raw = raw.trim().trim_start_matches(['v', 'V']);
+    let (major, rest) = raw.split_once('.')?;
+    // A trailing component (`1.44.0`) is not part of an API version, but it
+    // must not make the version unreadable either.
+    let minor = rest.split(|c: char| !c.is_ascii_digit()).next()?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Refuse a recreate the daemon could not complete: re-attaching more than one
+/// network in a single create needs API [`MULTI_NETWORK_MIN_API`], and
+/// `ContainerSpec::to_create_body` replays *every* endpoint the container had.
+/// On an older daemon that create fails after the original has already been
+/// stopped and renamed, so the check has to happen before anything moves.
+///
+/// An unparseable version is treated as new enough: a daemon reporting a string
+/// we don't understand is not evidence that it is old, and refusing on it would
+/// brick working setups over cosmetics.
+fn multi_network_guard(api_version: &str, networks: usize) -> Result<(), DockerError> {
+    if networks <= 1 {
+        return Ok(());
+    }
+    match parse_api_version(api_version) {
+        Some(version) if version < MULTI_NETWORK_MIN_API => {
+            Err(DockerError::ApiTooOldForMultiNetwork {
+                api_version: api_version.to_owned(),
+                networks,
+            })
+        }
+        Some(_) => Ok(()),
+        None => {
+            debug!(
+                %api_version,
+                "could not parse the daemon's API version; assuming it is new \
+                 enough for a multi-network create"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -430,6 +556,15 @@ impl DockerOps for Docker {
         self.inspect_container_spec(name).await
     }
 
+    /// The one check the daemon itself makes unavoidable: a container attached
+    /// to several networks can only be re-created in one call from API 1.44
+    /// (Docker 25.0) onwards.
+    async fn preflight_recreate(&self, spec: &ContainerSpec) -> Result<(), DockerError> {
+        let networks = spec.network_endpoints.as_ref().map_or(0, |e| e.len());
+        debug!(container = %spec.name, networks, api_version = %self.api_version, "preflight");
+        multi_network_guard(&self.api_version, networks)
+    }
+
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
         self.pull_image(image_ref).await
@@ -482,7 +617,7 @@ impl DockerOps for Docker {
         // failure. `noprune` defaults false, so now-dangling parent layers are
         // also dropped (the intent of "prune the old image").
         let opts = RemoveImageOptionsBuilder::new().force(force).build();
-        self.0.remove_image(id, Some(opts), None).await?;
+        self.client.remove_image(id, Some(opts), None).await?;
         Ok(())
     }
 
@@ -490,7 +625,7 @@ impl DockerOps for Docker {
         debug!("prune_dangling_images");
         let filters = std::collections::HashMap::from([("dangling", vec!["true"])]);
         let opts = PruneImagesOptionsBuilder::new().filters(&filters).build();
-        self.0.prune_images(Some(opts)).await?;
+        self.client.prune_images(Some(opts)).await?;
         Ok(())
     }
 
@@ -521,6 +656,71 @@ impl HealthProbe for Docker {
 mod tests {
     use super::*;
     use bollard::models::Health;
+
+    // --- multi-network create preflight (API 1.44 / Docker 25.0 floor) ---
+
+    #[test]
+    fn api_versions_are_parsed_as_major_minor() {
+        assert_eq!(parse_api_version("1.43"), Some((1, 43)));
+        assert_eq!(parse_api_version("1.44"), Some((1, 44)));
+        assert_eq!(parse_api_version(" 1.55 "), Some((1, 55)));
+        // Docker writes the API version both bare and `v`-prefixed.
+        assert_eq!(parse_api_version("v1.47"), Some((1, 47)));
+        // A trailing patch component is not part of the API version, but must
+        // not make an otherwise-fine version unreadable.
+        assert_eq!(parse_api_version("1.44.0"), Some((1, 44)));
+    }
+
+    #[test]
+    fn unreadable_api_versions_parse_to_none() {
+        for raw in ["", "   ", "latest", "1", "1.", ".44", "x.y", "1.x"] {
+            assert_eq!(parse_api_version(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn multi_network_guard_refuses_below_api_1_44() {
+        let err = multi_network_guard("1.43", 2)
+            .expect_err("a 2-network create is not expressible on API 1.43");
+        assert!(matches!(
+            err,
+            DockerError::ApiTooOldForMultiNetwork {
+                ref api_version,
+                networks: 2,
+            } if api_version == "1.43"
+        ));
+        // The message has to tell the operator what to do about it.
+        let msg = err.to_string();
+        assert!(msg.contains("1.44"), "{msg}");
+        assert!(msg.contains("1.43"), "{msg}");
+    }
+
+    #[test]
+    fn multi_network_guard_allows_api_1_44_and_newer() {
+        assert!(multi_network_guard("1.44", 2).is_ok());
+        assert!(multi_network_guard("1.55", 5).is_ok());
+        assert!(multi_network_guard("2.0", 3).is_ok());
+    }
+
+    #[test]
+    fn multi_network_guard_ignores_single_network_containers() {
+        // The overwhelming majority of containers: one endpoint (or none) is
+        // expressible on every API version freshdock has ever talked to.
+        assert!(multi_network_guard("1.24", 1).is_ok());
+        assert!(multi_network_guard("1.24", 0).is_ok());
+    }
+
+    #[test]
+    fn an_unreadable_api_version_never_bricks_a_recreate() {
+        // A daemon reporting something we cannot parse is not evidence that it
+        // is old — refusing on it would break working setups over a string.
+        for raw in ["", "latest", "banana", "1.x"] {
+            assert!(
+                multi_network_guard(raw, 3).is_ok(),
+                "{raw:?} must be treated as new enough"
+            );
+        }
+    }
 
     fn state(
         status: ContainerStateStatusEnum,

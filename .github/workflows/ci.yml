@@ -56,6 +56,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # Both live suites skip themselves when no daemon answers, which is right
+      # for a developer running `--ignored` on a laptop but wrong here: this job
+      # exists to exercise a real daemon, so a skip would be a green no-op that
+      # proves nothing. This flips every skip into a failure.
+      FRESHDOCK_LIVE_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -67,13 +73,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The test skips gracefully if the daemon is unreachable; in this gate
-      # job a missing daemon must FAIL, not silently pass, so assert it first.
+      # Belt and braces alongside FRESHDOCK_LIVE_REQUIRED: fail on a dead
+      # daemon before spending a build on tests that cannot run.
       - name: Assert Docker daemon is up
         run: docker version
 
       - name: Live recreate round-trip (quality gate)
         run: cargo test --locked --test recreate_roundtrip_live -- --ignored --nocapture
+
+      # The other `#[ignore]`d live suite. It belongs in the same job because it
+      # needs the same thing (a real daemon) and covers the other half of the
+      # daemon surface: one scheduler tick end-to-end, including the connect +
+      # API-version negotiation path that every command shares.
+      - name: Live scheduler tick
+        run: cargo test --locked --test scheduler_live -- --ignored --nocapture
 
   cross-compile:
     name: Cross-compile (${{ matrix.target }})

@@ -77,7 +77,7 @@ impl super::Docker {
     /// bollard surfaces the daemon's 409.
     pub async fn rename_to_old(&self, original: &str, ts_unix: i64) -> Result<String, DockerError> {
         let new_name = {
-            let docker = self.0.clone();
+            let docker = self.client.clone();
             next_available_old_name_async(original, ts_unix, |candidate| {
                 let docker = docker.clone();
                 let candidate = candidate.to_owned();
@@ -88,7 +88,7 @@ impl super::Docker {
         let opts = bollard::query_parameters::RenameContainerOptionsBuilder::new()
             .name(&new_name)
             .build();
-        self.0.rename_container(original, opts).await?;
+        self.client.rename_container(original, opts).await?;
         Ok(new_name)
     }
 }

@@ -28,7 +28,7 @@ pub async fn run(
     notifications: NotificationConfig,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(credentials.clone())?;
+    let docker = Docker::connect(credentials.clone()).await?;
     let registry = OciRegistry::new(credentials);
     // Build the dispatcher once from config, sharing one HTTP client with the
     // backends. A misconfigured target is skipped with a WARN (resilient): a

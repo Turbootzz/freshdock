@@ -37,7 +37,7 @@ pub async fn run(
     credentials: Arc<CredentialStore>,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(credentials)?;
+    let docker = Docker::connect(credentials).await?;
     run_with(
         &docker,
         &name,

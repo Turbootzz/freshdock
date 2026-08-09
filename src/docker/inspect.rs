@@ -5,7 +5,7 @@ impl super::Docker {
     /// Inspect a running container by name or ID and return a [`ContainerSpec`]
     /// suitable for the recreate cycle.
     pub async fn inspect_container_spec(&self, name: &str) -> Result<ContainerSpec, DockerError> {
-        let resp = self.0.inspect_container(name, None).await?;
+        let resp = self.client.inspect_container(name, None).await?;
         Ok(ContainerSpec::from_inspect(resp)?)
     }
 
@@ -17,7 +17,7 @@ impl super::Docker {
         &self,
         image: &str,
     ) -> Result<Vec<String>, DockerError> {
-        let resp = self.0.inspect_image(image).await?;
+        let resp = self.client.inspect_image(image).await?;
         Ok(resp.repo_digests.unwrap_or_default())
     }
 }
