@@ -186,6 +186,9 @@ mod tests {
         ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
             unreachable!("rollback never runs lifecycle hooks")
         }
+        async fn list_network_dependents(&self, _name: &str) -> Result<Vec<String>, DockerError> {
+            unreachable!("dependents are captured by the recreate cycle, not by rollback")
+        }
     }
 
     #[tokio::test]

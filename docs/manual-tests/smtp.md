@@ -1,9 +1,10 @@
 # Manual smoke test: SMTP notifications
 
-The SMTP backend talks a real mail protocol, so CI can't exercise it without a
-relay. Message construction is covered automatically by the `build_message`
-unit tests in [src/notify/smtp.rs](https://github.com/Turbootzz/freshdock/blob/main/src/notify/smtp.rs); this procedure
-verifies the transport (connection, STARTTLS, auth) against a local catcher.
+The SMTP backend talks a real mail protocol, so CI can't exercise the TLS modes
+without a relay. Message construction is covered automatically by the
+`build_message` unit tests in [src/notify/smtp.rs](https://github.com/Turbootzz/freshdock/blob/main/src/notify/smtp.rs), and plaintext delivery by
+[tests/smtp_plaintext.rs](https://github.com/Turbootzz/freshdock/blob/main/tests/smtp_plaintext.rs) against an in-process fake server; this procedure
+verifies the transport (connection, STARTTLS, auth) against a real catcher.
 
 ## Prerequisites
 
@@ -17,8 +18,8 @@ verifies the transport (connection, STARTTLS, auth) against a local catcher.
 
 ## Plain delivery (no TLS, no auth)
 
-1. Write a `freshdock.toml` pointing at the catcher. `starttls = false` because
-   mailpit's default listener is plaintext:
+1. Write a `freshdock.toml` pointing at the catcher. `tls = "none"` because
+   mailpit's default listener speaks plaintext SMTP:
 
    ```toml
    [notifications.email]
@@ -27,7 +28,7 @@ verifies the transport (connection, STARTTLS, auth) against a local catcher.
    port = 1025
    from = "freshdock@example.com"
    to = ["admin@example.com"]
-   starttls = false
+   tls = "none"
    # triggers omitted → subscribes to available, succeeded, and failed
    ```
 
@@ -35,8 +36,16 @@ verifies the transport (connection, STARTTLS, auth) against a local catcher.
    [env URL](../notifications.md#declaring-targets-from-the-environment):
 
    ```bash
-   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://localhost:1025/?from=freshdock@example.com&to=admin@example.com&starttls=false'
+   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://localhost:1025/?from=freshdock@example.com&to=admin@example.com&tls=none'
    ```
+
+   Not `starttls = false`: that legacy key selects **implicit TLS** (SMTPS), so
+   the earlier version of these instructions opened a TLS handshake against
+   mailpit's plaintext listener and could never deliver (#57/#58). Only
+   `tls = "none"` disables encryption.
+
+   `port` is spelled out on purpose: an omitted port defaults from the mode, and
+   for `tls = "none"` that is the classic SMTP port 25 — mailpit listens on 1025.
 
 2. Trigger a notification. The quickest path is a watch-mode container with a
    newer image available; or force a failed update (a broken healthcheck) to
@@ -45,6 +54,10 @@ verifies the transport (connection, STARTTLS, auth) against a local catcher.
    ```bash
    cargo run -- run
    ```
+
+   Startup logs one WARN per plaintext target (`smtp target uses a PLAINTEXT
+   transport …`) — expected here, and the reason `tls = "none"` never belongs in
+   a deployment.
 
 3. Open the mailpit inbox at <http://localhost:8025> and confirm a message
    arrived with the rendered **Subject** (`Update available: …` /
@@ -56,7 +69,7 @@ STARTTLS and PLAIN/LOGIN auth must be verified against a server that requires
 them (mailpit's `--smtp-auth` modes, a real provider, or
 [smtp4dev](https://github.com/rnwood/smtp4dev) with TLS enabled):
 
-1. Point `host`/`port` at the TLS-capable relay, set `starttls = true`, and add
+1. Point `host`/`port` at the TLS-capable relay, set `tls = "starttls"`, and add
    credentials. The password may be supplied inline or via the environment
    override (so it stays out of the file):
 
@@ -68,7 +81,7 @@ them (mailpit's `--smtp-auth` modes, a real provider, or
    username = "freshdock@example.com"
    from = "freshdock@example.com"
    to = ["admin@example.com"]
-   starttls = true
+   tls = "starttls"
    ```
 
    ```bash
@@ -79,7 +92,7 @@ them (mailpit's `--smtp-auth` modes, a real provider, or
    Or as a single env URL (percent-encode `@`/`:` in the login as `%40`/`%3A`):
 
    ```bash
-   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://freshdock%40example.com:app-password@smtp.example.com:587/?from=freshdock@example.com&to=admin@example.com&starttls=true'
+   export FRESHDOCK_NOTIFY_EMAIL_URL='smtp://freshdock%40example.com:app-password@smtp.example.com:587/?from=freshdock@example.com&to=admin@example.com&tls=starttls'
    ```
 
 2. Confirm the message is delivered. A STARTTLS handshake failure surfaces as a

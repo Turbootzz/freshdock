@@ -11,6 +11,29 @@ pub fn old_name_for(original: &str, ts_unix: i64) -> String {
     format!("{original}-old-{ts_unix}")
 }
 
+/// Does `name` look like an archive produced by [`old_name_for`] —
+/// `<name>-old-<ts>`, or the `<name>-old-<ts>-<n>` form
+/// [`next_available_old_name`] falls back to on a collision? Archives are
+/// stopped (so normally absent from `list_running`); callers use this
+/// defensively against a stale archive left running by a crashed cycle.
+///
+/// This is a *heuristic on a name*, not proof: a user container legitimately
+/// called `redis-old-6` matches. Only use it where a false positive is
+/// harmless (the scheduler simply declines to update such a container).
+pub fn is_archive_name(name: &str) -> bool {
+    let Some((_, tail)) = name.rsplit_once("-old-") else {
+        return false;
+    };
+    match tail.split_once('-') {
+        Some((ts, seq)) => is_all_digits(ts) && is_all_digits(seq),
+        None => is_all_digits(tail),
+    }
+}
+
+fn is_all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Resolve a non-colliding `<original>-old-<ts>` archive name. If the base
 /// name is already taken, append `-1`, `-2`, … up to
 /// [`MAX_COLLISION_ATTEMPTS`]. The `exists` callback abstracts the daemon
@@ -88,4 +111,41 @@ where
         }
     }
     format!("{base}-{MAX_COLLISION_ATTEMPTS}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_names_are_detected() {
+        assert!(is_archive_name("web-old-1700000000"));
+        assert!(is_archive_name(&old_name_for("web", 1_700_000_000)));
+        assert!(!is_archive_name("web"));
+        assert!(!is_archive_name("web-old-")); // no timestamp
+        assert!(!is_archive_name("my-old-laptop")); // non-numeric suffix
+    }
+
+    #[test]
+    fn collision_suffixed_archive_names_are_detected() {
+        // The `-<n>` form `next_available_old_name` produces on a collision is
+        // just as much an archive as the base name.
+        assert!(is_archive_name("web-old-1700000000-1"));
+        assert!(is_archive_name("web-old-1700000000-64"));
+        assert!(!is_archive_name("web-old-1700000000-1-2")); // not a shape we emit
+        assert!(!is_archive_name("web-old-1700000000-x"));
+        assert!(!is_archive_name("web-old-1700000000-")); // dangling separator
+    }
+
+    #[test]
+    fn every_name_next_available_can_return_is_recognised_as_an_archive() {
+        // Round-trip guard: the producer and the recogniser must not drift.
+        let taken = [
+            "web-old-1700000000".to_owned(),
+            "web-old-1700000000-1".to_owned(),
+        ];
+        let name = next_available_old_name("web", 1_700_000_000, |c| taken.iter().any(|t| t == c));
+        assert_eq!(name, "web-old-1700000000-2");
+        assert!(is_archive_name(&name));
+    }
 }

@@ -27,4 +27,5 @@
 
 - [Recreate round-trip](manual-tests/recreate.md)
 - [Image cleanup](manual-tests/cleanup.md)
+- [Network-namespace dependents](manual-tests/network-dependents.md)
 - [SMTP notifications](manual-tests/smtp.md)

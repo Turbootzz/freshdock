@@ -3,16 +3,19 @@
 //! [`RenderedMessage`]: `title` → Subject, `body` → the plain-text part.
 //!
 //! Message construction is split into the free [`build_message`] so it can be
-//! unit-tested without a transport or a relay; CI cannot reach a real SMTP
-//! server, so transport behaviour is covered by the manual test in
-//! `docs/manual-tests/smtp.md`.
+//! unit-tested without a transport or a relay. The plaintext transport is
+//! covered end to end in CI by `tests/smtp_plaintext.rs`, which drives a real
+//! lettre client against an in-process SMTP server; the TLS modes need a relay
+//! CI has no way to reach, so `starttls` / `implicit` remain covered by the
+//! manual test in `docs/manual-tests/smtp.md`.
 
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use tracing::warn;
 
 use super::{Notifier, NotifyError, RenderedMessage};
-use crate::config::Secret;
+use crate::config::{Secret, SmtpTls};
 
 pub struct SmtpNotifier {
     name: String,
@@ -27,13 +30,16 @@ pub struct SmtpNotifier {
 pub struct SmtpParams {
     pub name: String,
     pub host: String,
+    /// Already resolved: an omitted config port has been replaced with the
+    /// default for [`Self::tls`] (587 / 465 / 25) by [`crate::notify`].
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<Secret>,
     pub from: String,
     pub to: Vec<String>,
-    /// STARTTLS on the submission port (587) vs implicit TLS (465).
-    pub starttls: bool,
+    /// Transport security, already resolved from `tls` / the legacy `starttls`
+    /// by [`crate::config::resolve_smtp_tls`].
+    pub tls: SmtpTls,
 }
 
 /// Parse one address, attributing a failure to the named target.
@@ -77,10 +83,21 @@ impl SmtpNotifier {
             });
         }
 
-        let relay = if params.starttls {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&params.host)
-        } else {
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&params.host)
+        if params.tls == SmtpTls::Plaintext {
+            warn!(
+                target_name = %params.name,
+                "smtp target uses a PLAINTEXT transport — credentials and message content \
+                 are unencrypted; local development only"
+            );
+        }
+        let relay = match params.tls {
+            SmtpTls::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&params.host),
+            SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&params.host),
+            // `builder_dangerous` is the unencrypted builder and cannot fail;
+            // `Ok` only unifies the arms with the fallible relay constructors.
+            SmtpTls::Plaintext => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+                &params.host,
+            )),
         }
         .map_err(|e| NotifyError::Config {
             name: params.name.clone(),
@@ -135,6 +152,7 @@ impl Notifier for SmtpNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SmtpTls;
     use crate::notify::NotifyEvent;
 
     fn rendered() -> RenderedMessage {
@@ -171,7 +189,7 @@ mod tests {
             password: None,
             from: "not-an-email".into(),
             to: vec!["admin@example.com".into()],
-            starttls: true,
+            tls: SmtpTls::Starttls,
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
     }
@@ -186,7 +204,7 @@ mod tests {
             password: None,
             from: "freshdock@example.com".into(),
             to: vec![],
-            starttls: true,
+            tls: SmtpTls::Starttls,
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
     }
@@ -201,7 +219,7 @@ mod tests {
             password: None,
             from: "freshdock@example.com".into(),
             to: vec!["ok@example.com".into(), "not-an-email".into()],
-            starttls: true,
+            tls: SmtpTls::Starttls,
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
     }
@@ -218,9 +236,28 @@ mod tests {
             password: None,
             from: "freshdock@example.com".into(),
             to: vec!["admin@example.com".into()],
-            starttls: true,
+            tls: SmtpTls::Starttls,
         });
         assert!(matches!(result, Err(NotifyError::Config { .. })));
+    }
+
+    #[test]
+    fn new_accepts_plaintext_mode() {
+        // `tls = "none"` builds a transport against a host that is not a valid
+        // TLS relay target (no certificate, no name) — the plaintext path must
+        // not run the relay constructors' validation. Delivery itself is covered
+        // by tests/smtp_plaintext.rs.
+        let result = SmtpNotifier::new(SmtpParams {
+            name: "email".into(),
+            host: "127.0.0.1".into(),
+            port: 1025,
+            username: None,
+            password: None,
+            from: "freshdock@example.com".into(),
+            to: vec!["admin@example.com".into()],
+            tls: SmtpTls::Plaintext,
+        });
+        assert!(result.is_ok(), "plaintext transport must build");
     }
 
     #[test]
