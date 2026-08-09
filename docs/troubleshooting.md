@@ -77,18 +77,34 @@ its sidecars share, so freshdock finds every running container whose
 each one afterwards — including after a rollback, since restarting the restored
 container also gives it a fresh namespace. Compose's `network_mode: service:X`
 becomes `container:<id of X>` on disk; that dead id is rewritten to the new
-container's id on the way through.
+container's id on the way through. The repair runs *before* X's `-old-` archive
+is removed, because Docker refuses to remove a container whose namespace a
+running container still holds.
 
 The sidecar needs **no freshdock labels** for this: it is not being updated,
 only repaired, so the `freshdock.enable` gate does not apply to it. Nothing else
-about it changes — same image, no health gate, no lifecycle hooks.
+about it changes — it is re-created from the exact **image ID** it was already
+running (a moved tag can never sneak an upgrade in through a repair), with no
+health gate and no lifecycle hooks.
+
+Two sidecars are deliberately skipped, each with a warning naming it:
+
+- one that **explicitly opts out** with `freshdock.enable=false` or
+  `freshdock.mode=off`. It keeps a dead namespace until you restart it yourself
+  — an *absent* label is not an opt-out, since repairing unlabelled bystanders
+  is the entire point.
+- **freshdock itself**, when deployed with `network_mode: container:<vpn>` and
+  pointed at that same container. Stopping it would kill the daemon mid-cycle,
+  so restart the freshdock container by hand afterwards.
 
 Re-attachment is best-effort. If it fails you'll see
 `failed to re-attach network-namespace dependent` in the log, naming the
-container; the update itself still stands and a manual
-`docker rm -f <sidecar> && docker run …` puts it back. Sidecars referencing X by
-an id prefix shorter than 12 characters are not recognised, and dependency
-chains are not followed transitively.
+container; the update itself still stands. When the failure lands after the
+sidecar was renamed away, freshdock renames it back and starts it again, so a
+failed repair leaves a running container rather than a stopped `-old-` one — if
+even that fails, the warning names the archive you have to recover by hand.
+Sidecars referencing X by an id prefix shorter than 12 characters are not
+recognised, and dependency chains are not followed transitively.
 
 → [Manual test: network-namespace dependents](manual-tests/network-dependents.md)
 
