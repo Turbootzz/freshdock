@@ -64,6 +64,12 @@ pub trait DockerOps {
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<HookStatus, DockerError>;
+    /// Names of RUNNING containers whose `HostConfig.NetworkMode` references
+    /// this container (`container:<name>` or `container:<id/prefix>`). Called
+    /// **before** the update so id-based references still resolve — compose
+    /// turns `network_mode: service:X` into `container:<id of X>` at create
+    /// time, and that id dies with the replaced container.
+    async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError>;
 }
 
 /// Post-update image cleanup, off by default (PLAN §5.2 step 8). Both steps are
@@ -93,6 +99,10 @@ pub struct CycleResult {
     /// Local image **ID** the replaced container ran (for cleanup). Captured at
     /// the pre-pull inspect; `None` when the daemon reported no image id.
     pub old_image_id: Option<String>,
+    /// Containers that shared the replaced container's network namespace,
+    /// captured while it still existed under its old id. They are re-created
+    /// by [`reattach_dependents`] once the update settles (either way).
+    pub dependents: Vec<String>,
 }
 
 /// Outcome of the pure recreate cycle: either it ran to completion, or the
@@ -132,6 +142,18 @@ pub async fn recreate_one(
     if let Some(reason) = run_pre_update_hook(ops, name, hooks.pre_update.as_ref()).await {
         return Ok(CycleOutcome::Skipped(reason));
     }
+    // Captured after the hook cleared the update (a skipped container keeps
+    // its namespace, so nothing to repair) and before the stop, while the
+    // container still exists under the id its dependents reference. A listing
+    // failure is not worth blocking an otherwise-fine update: degrade to "no
+    // dependents" and say so.
+    let dependents = match ops.list_network_dependents(name).await {
+        Ok(dependents) => dependents,
+        Err(e) => {
+            warn!(container = %name, error = %e, "could not list network-namespace dependents; continuing without re-attaching any");
+            Vec::new()
+        }
+    };
     ops.stop(
         name,
         spec.config.stop_signal.as_deref(),
@@ -147,7 +169,79 @@ pub async fn recreate_one(
         old_image_ref: spec.image_ref.clone(),
         new_image_ref: spec.image_ref,
         old_image_id: spec.image_id,
+        dependents,
     }))
+}
+
+/// Re-create each container that shared the replaced container's network
+/// namespace, so it re-attaches to the live one. `new_owner_id: Some(id)`
+/// repoints id-based `container:<id>` references at the replacement (success
+/// path); `None` leaves references untouched (rollback path — the original
+/// container, and therefore its id, is back).
+///
+/// A dependent is **not** updated here, only repaired: no pull, no health
+/// gate, no lifecycle hooks, and deliberately no `freshdock.enable`/policy
+/// gate. Its namespace was broken by *our* update of the owner, and refusing
+/// to fix an unlabelled bystander would leave it permanently offline. By the
+/// same reasoning the whole pass is best-effort: every failure is logged and
+/// the owner's [`RecreateOutcome`] stands.
+async fn reattach_dependents(
+    ops: &impl DockerOps,
+    owner_name: &str,
+    new_owner_id: Option<&str>,
+    dependents: &[String],
+    ts_provider: &impl Fn() -> i64,
+) {
+    for dependent in dependents {
+        info!(container = %dependent, owner = %owner_name, "re-attaching network-namespace dependent");
+        if let Err(e) = reattach_one(ops, owner_name, new_owner_id, dependent, ts_provider).await {
+            warn!(container = %dependent, owner = %owner_name, error = %e, "failed to re-attach network-namespace dependent; its network namespace is dead — recreate it manually");
+        }
+    }
+}
+
+/// One dependent's repair cycle: `inspect → rewrite NetworkMode → stop →
+/// rename → create → start → remove archive`.
+async fn reattach_one(
+    ops: &impl DockerOps,
+    owner_name: &str,
+    new_owner_id: Option<&str>,
+    dependent: &str,
+    ts_provider: &impl Fn() -> i64,
+) -> Result<(), DockerError> {
+    let mut spec = ops.inspect(dependent).await?;
+    if let Some(host_config) = spec.host_config.as_mut() {
+        let rewritten = host_config
+            .network_mode
+            .as_deref()
+            .and_then(|mode| mode.strip_prefix("container:"))
+            // A name-based reference resolves to whatever currently owns the
+            // name, which is already the replacement — rewriting it would only
+            // make it brittle.
+            .filter(|reference| *reference != owner_name)
+            .and(new_owner_id)
+            .map(|id| format!("container:{id}"));
+        if let Some(mode) = rewritten {
+            host_config.network_mode = Some(mode);
+        }
+    }
+    ops.stop(
+        dependent,
+        spec.config.stop_signal.as_deref(),
+        spec.config.stop_timeout,
+    )
+    .await?;
+    let archive = ops.rename(dependent, ts_provider()).await?;
+    // The dependent's ORIGINAL `Config.Image` string, same as the owner's
+    // cycle — issue #25 applies here too.
+    let new_id = ops
+        .create_from_spec(dependent, &spec, &spec.image_ref)
+        .await?;
+    ops.start(&new_id).await?;
+    if let Err(e) = ops.remove(&archive, false).await {
+        warn!(archive = %archive, error = %e, "re-attached dependent but failed to remove its archived container; remove it manually");
+    }
+    Ok(())
 }
 
 /// Run the pre-update hook in the *old* (still running) container. Returns
@@ -204,7 +298,7 @@ pub async fn recreate_with_health(
     hooks: &LifecycleHooks,
     ts_provider: impl Fn() -> i64,
 ) -> Result<RecreateOutcome, DockerError> {
-    let cycle = match recreate_one(ops, name, hooks, ts_provider).await? {
+    let cycle = match recreate_one(ops, name, hooks, &ts_provider).await? {
         CycleOutcome::Completed(cycle) => cycle,
         CycleOutcome::Skipped(reason) => {
             // Exit 75 is the hook *asking* to defer — expected traffic, not a
@@ -229,6 +323,17 @@ pub async fn recreate_with_health(
             if let Err(e) = ops.remove(&cycle.old_name, false).await {
                 warn!(archive = %cycle.old_name, error = %e, "new container healthy but failed to remove archived old container; remove it manually");
             }
+            // Dependents first: they lost their network namespace the moment
+            // the old container was stopped, so their downtime is already
+            // running while hooks and cleanup are not.
+            reattach_dependents(
+                ops,
+                name,
+                Some(&cycle.new_id),
+                &cycle.dependents,
+                &ts_provider,
+            )
+            .await;
             // App maintenance first, image housekeeping last (so the dangling
             // prune stays the final step of a successful update).
             run_post_update_hook(ops, name, &cycle.new_id, hooks.post_update.as_ref()).await;
@@ -251,6 +356,10 @@ pub async fn recreate_with_health(
         reason,
     )
     .await?;
+    // The restored container owns its original id again, so `container:<id>`
+    // references are valid as written — but the restart built a *new* network
+    // namespace behind them, so the dependents still have to be re-created.
+    reattach_dependents(ops, name, None, &cycle.dependents, &ts_provider).await;
     Ok(RecreateOutcome::RolledBack(event))
 }
 
@@ -310,12 +419,14 @@ mod tests {
 
     /// Recording fake that captures the sequence of `DockerOps` calls (with the
     /// target name + force flag, so the success-vs-rollback removal contract is
-    /// checkable) and the image handed to `create_from_spec` (issue-#25). The
-    /// health probe replays a scripted sequence; an empty script is healthy.
+    /// checkable) and, per created container, the image (issue-#25) and
+    /// `NetworkMode` handed to `create_from_spec`. The health probe replays a
+    /// scripted sequence; an empty script is healthy.
     #[derive(Default)]
     struct RecordingOps {
         calls: Mutex<Vec<String>>,
-        created_image: Mutex<Option<String>>,
+        /// `(container, image, network_mode)` per `create_from_spec`.
+        created: Mutex<Vec<(String, String, Option<String>)>>,
         probe: Mutex<VecDeque<ContainerRuntimeState>>,
         /// When set, `remove_image` errors — exercises the best-effort contract
         /// (a cleanup failure must not fail the update).
@@ -330,6 +441,15 @@ mod tests {
         hook_status: Option<HookStatus>,
         /// When set, `exec_hook` errors — the exec-transport-failure path.
         exec_fails: bool,
+        /// Names `list_network_dependents` reports for the updated container.
+        dependents: Vec<String>,
+        /// `HostConfig.NetworkMode` a dependent's `inspect` reports.
+        dependent_network_mode: Option<String>,
+        /// When set, inspecting a dependent errors — the per-dependent
+        /// failure path.
+        dependent_inspect_fails: bool,
+        /// When set, `list_network_dependents` errors.
+        list_dependents_fails: bool,
     }
 
     impl RecordingOps {
@@ -375,12 +495,69 @@ mod tests {
             }
         }
 
+        /// One running container sharing the updated container's network
+        /// namespace, whose inspect reports `network_mode`.
+        fn with_dependent(name: &str, network_mode: &str) -> Self {
+            Self {
+                dependents: vec![name.to_owned()],
+                dependent_network_mode: Some(network_mode.to_owned()),
+                ..Default::default()
+            }
+        }
+
+        /// Make the replacement container crash so the health gate rolls back.
+        fn crashing(mut self) -> Self {
+            self.probe = Mutex::new(VecDeque::from([ContainerRuntimeState::Exited {
+                exit_code: 1,
+            }]));
+            self
+        }
+
+        fn with_failing_dependent_inspect(mut self) -> Self {
+            self.dependent_inspect_fails = true;
+            self
+        }
+
+        fn with_failing_dependent_listing(mut self) -> Self {
+            self.list_dependents_fails = true;
+            self
+        }
+
+        fn is_dependent(&self, name: &str) -> bool {
+            self.dependents.iter().any(|d| d == name)
+        }
+
+        /// Ids `create_from_spec` hands back: the updated container always gets
+        /// `new-id` (pinned by the existing call-order assertions); a dependent
+        /// gets `new-<name>` so its `start`/`remove` calls stay distinguishable.
+        fn new_id_for(&self, name: &str) -> String {
+            if self.is_dependent(name) {
+                format!("new-{name}")
+            } else {
+                "new-id".to_owned()
+            }
+        }
+
         fn record(&self, label: String) {
             self.calls.lock().unwrap().push(label);
         }
 
-        fn created_image(&self) -> Option<String> {
-            self.created_image.lock().unwrap().clone()
+        fn created_image_for(&self, name: &str) -> Option<String> {
+            self.created
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(c, _, _)| c == name)
+                .map(|(_, image, _)| image.clone())
+        }
+
+        fn created_network_mode_for(&self, name: &str) -> Option<String> {
+            self.created
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(c, _, _)| c == name)
+                .and_then(|(_, _, mode)| mode.clone())
         }
 
         fn into_calls(self) -> Vec<String> {
@@ -391,7 +568,27 @@ mod tests {
     #[async_trait]
     impl DockerOps for RecordingOps {
         async fn inspect(&self, name: &str) -> Result<ContainerSpec, DockerError> {
-            self.record("inspect".to_owned());
+            self.record(format!("inspect:{name}"));
+            if self.is_dependent(name) {
+                if self.dependent_inspect_fails {
+                    return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                        "dependent-inspect",
+                    )));
+                }
+                // A dependent runs its own image and carries the
+                // `container:<ref>` network mode under test.
+                return Ok(ContainerSpec {
+                    name: name.to_owned(),
+                    image_ref: "alpine:3.20".to_owned(),
+                    image_id: Some("sha256:depimg".to_owned()),
+                    config: bollard::models::ContainerConfig::default(),
+                    host_config: Some(bollard::models::HostConfig {
+                        network_mode: self.dependent_network_mode.clone(),
+                        ..Default::default()
+                    }),
+                    network_endpoints: None,
+                });
+            }
             Ok(ContainerSpec {
                 name: name.to_owned(),
                 image_ref: "nginx:alpine".to_owned(),
@@ -417,20 +614,26 @@ mod tests {
             Ok(())
         }
 
-        async fn rename(&self, _name: &str, _ts_unix: i64) -> Result<String, DockerError> {
-            self.record("rename".to_owned());
-            Ok("fd-smoke-old-1700000000".to_owned())
+        async fn rename(&self, name: &str, ts_unix: i64) -> Result<String, DockerError> {
+            self.record(format!("rename:{name}"));
+            Ok(crate::docker::rename::old_name_for(name, ts_unix))
         }
 
         async fn create_from_spec(
             &self,
-            _name: &str,
-            _spec: &ContainerSpec,
+            name: &str,
+            spec: &ContainerSpec,
             image: &str,
         ) -> Result<String, DockerError> {
-            self.record("create".to_owned());
-            *self.created_image.lock().unwrap() = Some(image.to_owned());
-            Ok("new-id".to_owned())
+            self.record(format!("create:{name}"));
+            self.created.lock().unwrap().push((
+                name.to_owned(),
+                image.to_owned(),
+                spec.host_config
+                    .as_ref()
+                    .and_then(|hc| hc.network_mode.clone()),
+            ));
+            Ok(self.new_id_for(name))
         }
 
         async fn start(&self, name_or_id: &str) -> Result<(), DockerError> {
@@ -484,6 +687,16 @@ mod tests {
                 .hook_status
                 .unwrap_or(HookStatus::Completed { exit_code: 0 }))
         }
+
+        async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError> {
+            self.record(format!("list_dependents:{name}"));
+            if self.list_dependents_fails {
+                return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                    "list-dependents",
+                )));
+            }
+            Ok(self.dependents.clone())
+        }
     }
 
     #[async_trait]
@@ -519,10 +732,11 @@ mod tests {
                 old_image_ref: "nginx:alpine".to_owned(),
                 new_image_ref: "nginx:alpine".to_owned(),
                 old_image_id: Some("sha256:oldimg".to_owned()),
+                dependents: vec![],
             })
         );
         assert_eq!(
-            ops.created_image().as_deref(),
+            ops.created_image_for("fd-smoke").as_deref(),
             Some("nginx:alpine"),
             "the new container must be created from the original image ref, not \
              the `library/`-prefixed pull return (issue #25)"
@@ -530,11 +744,12 @@ mod tests {
         assert_eq!(
             ops.into_calls(),
             vec![
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
                 "stop:fd-smoke".to_owned(),
-                "rename".to_owned(),
-                "create".to_owned(),
+                "rename:fd-smoke".to_owned(),
+                "create:fd-smoke".to_owned(),
                 "start:new-id".to_owned(),
             ],
             "the orchestrator must drive operations in this exact order — \
@@ -579,11 +794,12 @@ mod tests {
         assert_eq!(
             ops.into_calls(),
             vec![
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
                 "stop:fd-smoke".to_owned(),
-                "rename".to_owned(),
-                "create".to_owned(),
+                "rename:fd-smoke".to_owned(),
+                "create:fd-smoke".to_owned(),
                 "start:new-id".to_owned(),
                 "probe_state".to_owned(),
                 "remove:fd-smoke-old-1700000000:false".to_owned(),
@@ -617,11 +833,12 @@ mod tests {
         assert_eq!(
             ops.into_calls(),
             vec![
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
                 "stop:fd-smoke".to_owned(),
-                "rename".to_owned(),
-                "create".to_owned(),
+                "rename:fd-smoke".to_owned(),
+                "create:fd-smoke".to_owned(),
                 "start:new-id".to_owned(),
                 "probe_state".to_owned(),
                 "remove:fd-smoke-old-1700000000:false".to_owned(),
@@ -776,15 +993,17 @@ mod tests {
 
         assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
         assert_eq!(
-            &ops.into_calls()[..4],
+            &ops.into_calls()[..5],
             &[
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
                 "exec_hook:fd-smoke:/app/drain.sh".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
                 "stop:fd-smoke".to_owned(),
             ],
             "the pre-update hook must run in the OLD container, after the pull \
-             (image ready) and before the stop (app still up)"
+             (image ready) and before the stop (app still up); dependents are \
+             captured only once the hook has cleared the update"
         );
     }
 
@@ -812,7 +1031,7 @@ mod tests {
         assert_eq!(
             ops.into_calls(),
             vec![
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
                 "exec_hook:fd-smoke:/app/drain.sh".to_owned(),
             ],
@@ -996,11 +1215,12 @@ mod tests {
         assert_eq!(
             ops.into_calls(),
             vec![
-                "inspect".to_owned(),
+                "inspect:fd-smoke".to_owned(),
                 "pull".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
                 "stop:fd-smoke".to_owned(),
-                "rename".to_owned(),
-                "create".to_owned(),
+                "rename:fd-smoke".to_owned(),
+                "create:fd-smoke".to_owned(),
                 "start:new-id".to_owned(),
                 "probe_state".to_owned(),
                 // rollback: force-remove the new container, restore the archive.
@@ -1045,6 +1265,201 @@ mod tests {
         assert!(
             !calls.contains(&"remove:fd-smoke-old-1700000000:false".to_owned()),
             "the archive must be restored, never removed, on timeout"
+        );
+    }
+
+    // --- #68: network-namespace dependents (`network_mode: container:X`) ---
+
+    /// The dependent's own recreate cycle, as it appears in the recorded call
+    /// sequence. No `pull` (same image, already local), no health probe, no
+    /// hooks — see [`reattach_dependents`].
+    fn dependent_cycle(name: &str) -> Vec<String> {
+        vec![
+            format!("inspect:{name}"),
+            format!("stop:{name}"),
+            format!("rename:{name}"),
+            format!("create:{name}"),
+            format!("start:new-{name}"),
+            format!("remove:{name}-old-1700000000:false"),
+        ]
+    }
+
+    async fn recreate_fd_smoke(ops: &RecordingOps) -> RecreateOutcome {
+        use crate::health::TokioClock;
+
+        recreate_with_health(
+            ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &LifecycleHooks::default(),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("recording fake never errors")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_update_reattaches_id_based_dependent() {
+        // Compose resolves `network_mode: service:fd-smoke` to the container
+        // id at create time; that id dies with the replaced container, so the
+        // reference must be rewritten to the replacement's id.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef");
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+        assert_eq!(
+            ops.created_network_mode_for("vpn-peer").as_deref(),
+            Some("container:new-id"),
+            "a stale id-based reference must be repointed at the replacement"
+        );
+        let calls = ops.into_calls();
+        let tail = &calls[calls.len() - 6..];
+        assert_eq!(
+            tail,
+            dependent_cycle("vpn-peer").as_slice(),
+            "the dependent is re-created after the archive removal, with no \
+             pull and no health gate of its own"
+        );
+        assert_eq!(
+            calls[calls.len() - 7],
+            "remove:fd-smoke-old-1700000000:false",
+            "re-attachment runs only once the update itself is complete"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_update_keeps_name_based_dependent_ref() {
+        // `container:fd-smoke` still resolves after the update — the
+        // replacement carries the same name — so it must not be rewritten.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:fd-smoke");
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+        assert_eq!(
+            ops.created_network_mode_for("vpn-peer").as_deref(),
+            Some("container:fd-smoke"),
+            "a name-based reference must round-trip byte-identical"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_cycle_creates_from_original_image_ref() {
+        // Issue-#25 invariant holds for dependents too: create is fed the
+        // dependent's own original `Config.Image`, never a parsed ref.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef");
+        recreate_fd_smoke(&ops).await;
+
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("alpine:3.20")
+        );
+        assert_eq!(
+            ops.into_calls().iter().filter(|c| *c == "pull").count(),
+            1,
+            "only the updated container is pulled — a dependent already has \
+             the image it runs"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rollback_reattaches_dependents_without_rewrite() {
+        // The restored container has its old id back, so references are valid
+        // again — but the namespace was recreated by the restart, so the
+        // dependents still have to be re-created.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef").crashing();
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(matches!(outcome, RecreateOutcome::RolledBack(_)));
+        assert_eq!(
+            ops.created_network_mode_for("vpn-peer").as_deref(),
+            Some("container:0123456789abcdef"),
+            "after a rollback the original id is back — rewriting would break it"
+        );
+        let calls = ops.into_calls();
+        assert_eq!(
+            &calls[calls.len() - 6..],
+            dependent_cycle("vpn-peer").as_slice(),
+        );
+        assert_eq!(
+            calls[calls.len() - 7],
+            "start:fd-smoke",
+            "dependents are re-attached only after the rollback has restored \
+             the original container"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_failure_does_not_fail_update() {
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_failing_dependent_inspect();
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(
+            matches!(outcome, RecreateOutcome::Recreated { .. }),
+            "re-attachment is collateral repair — its failure must not change \
+             the update outcome"
+        );
+        let calls = ops.into_calls();
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("inspect:vpn-peer"),
+            "the failed dependent must not be stopped or renamed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_listing_failure_does_not_block_the_update() {
+        let ops = RecordingOps::default().with_failing_dependent_listing();
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(
+            matches!(outcome, RecreateOutcome::Recreated { .. }),
+            "a listing failure must not hold up the update it precedes"
+        );
+        assert_eq!(
+            ops.into_calls(),
+            vec![
+                "inspect:fd-smoke".to_owned(),
+                "pull".to_owned(),
+                "list_dependents:fd-smoke".to_owned(),
+                "stop:fd-smoke".to_owned(),
+                "rename:fd-smoke".to_owned(),
+                "create:fd-smoke".to_owned(),
+                "start:new-id".to_owned(),
+                "probe_state".to_owned(),
+                "remove:fd-smoke-old-1700000000:false".to_owned(),
+            ],
+            "an unusable dependent list degrades to no dependents"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hook_skip_touches_no_dependents() {
+        use crate::health::TokioClock;
+
+        let mut ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef");
+        ops.hook_status = Some(HookStatus::Completed { exit_code: 75 });
+        let outcome = recreate_with_health(
+            &ops,
+            "fd-smoke",
+            &HealthConfig::default(),
+            &TokioClock,
+            Cleanup::default(),
+            &hooks(Some("/app/drain.sh"), None),
+            || 1_700_000_000,
+        )
+        .await
+        .expect("a deferred hook is a graceful skip, not an error");
+
+        assert_eq!(
+            outcome,
+            RecreateOutcome::SkippedByHook(HookSkipReason::NonZeroExit(75))
+        );
+        assert!(
+            !ops.into_calls().iter().any(|c| c.contains("vpn-peer")),
+            "nothing was taken down, so no dependent may be touched"
         );
     }
 }

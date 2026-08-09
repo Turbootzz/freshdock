@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use bollard::models::ContainerSummary;
 use chrono::{DateTime, Local, TimeDelta};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -26,7 +25,9 @@ use tracing::{debug, info, warn};
 use crate::config::ResolvedSettings;
 use crate::cron::CronExpr;
 use crate::docker::check::DockerCheck;
+use crate::docker::container_name;
 use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
+use crate::docker::rename::is_archive_name;
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe};
 use crate::labels::{self, Mode, Policy};
@@ -130,24 +131,6 @@ fn due(
 
 fn to_delta(d: Duration) -> TimeDelta {
     TimeDelta::from_std(d).unwrap_or(TimeDelta::MAX)
-}
-
-/// Container name from a summary (leading `/` trimmed), falling back to id.
-fn container_name(c: &ContainerSummary) -> String {
-    c.names
-        .as_ref()
-        .and_then(|n| n.first())
-        .map(|s| s.trim_start_matches('/').to_string())
-        .or_else(|| c.id.clone())
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// A transient `<name>-old-<ts>` archive from an in-flight recreate. Such
-/// containers are stopped (so normally absent from `list_running`); the filter
-/// is defensive against a stale archive left running by a crashed cycle.
-fn is_archive_name(name: &str) -> bool {
-    name.rsplit_once("-old-")
-        .is_some_and(|(_, ts)| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Run the scheduler until `shutdown` flips to `true` (or its sender drops).
@@ -457,7 +440,7 @@ mod tests {
     use crate::health::{ContainerRuntimeState, TokioClock};
     use crate::registry::{Digest, ImageRef, RegistryError};
     use async_trait::async_trait;
-    use bollard::models::ContainerConfig;
+    use bollard::models::{ContainerConfig, ContainerSummary};
     use chrono::TimeZone;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -560,14 +543,6 @@ mod tests {
             now() + TimeDelta::days(30),
             cfg().poll_interval
         ));
-    }
-
-    #[test]
-    fn archive_names_are_detected() {
-        assert!(is_archive_name("web-old-1700000000"));
-        assert!(!is_archive_name("web"));
-        assert!(!is_archive_name("web-old-")); // no timestamp
-        assert!(!is_archive_name("my-old-laptop")); // non-numeric suffix
     }
 
     // --- run_tick behaviour with a recording fake ---
@@ -714,6 +689,9 @@ mod tests {
             _timeout: Option<std::time::Duration>,
         ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
             Ok(self.hook_status)
+        }
+        async fn list_network_dependents(&self, _name: &str) -> Result<Vec<String>, DockerError> {
+            Ok(vec![])
         }
     }
 

@@ -10,6 +10,7 @@ the reference page with the full story.
 - [My container doesn't appear in `check` at all](#my-container-doesnt-appear-in-check-at-all)
 - [A container is reported as `pinned (no check)`](#a-container-is-reported-as-pinned-no-check)
 - [Updates fail with a read-only socket](#updates-fail-with-a-read-only-socket)
+- [A sidecar on `network_mode: container:X` lost its network](#a-sidecar-on-network_mode-containerx-lost-its-network)
 - [Where are the logs?](#where-are-the-logs)
 
 ---
@@ -67,6 +68,29 @@ A socket mounted `:ro` is enough for `check` and `watch`, but an updating mode
 containers — that needs a writable socket mount (drop the `:ro`).
 
 → [Deployment: socket read-only vs writable](deployment.md#socket-read-only-vs-writable)
+
+## A sidecar on `network_mode: container:X` lost its network
+
+It shouldn't any more. Recreating X necessarily destroys the network namespace
+its sidecars share, so freshdock finds every running container whose
+`HostConfig.NetworkMode` is `container:X` **before** stopping X, and re-creates
+each one afterwards — including after a rollback, since restarting the restored
+container also gives it a fresh namespace. Compose's `network_mode: service:X`
+becomes `container:<id of X>` on disk; that dead id is rewritten to the new
+container's id on the way through.
+
+The sidecar needs **no freshdock labels** for this: it is not being updated,
+only repaired, so the `freshdock.enable` gate does not apply to it. Nothing else
+about it changes — same image, no health gate, no lifecycle hooks.
+
+Re-attachment is best-effort. If it fails you'll see
+`failed to re-attach network-namespace dependent` in the log, naming the
+container; the update itself still stands and a manual
+`docker rm -f <sidecar> && docker run …` puts it back. Sidecars referencing X by
+an id prefix shorter than 12 characters are not recognised, and dependency
+chains are not followed transitively.
+
+→ [Manual test: network-namespace dependents](manual-tests/network-dependents.md)
 
 ## Where are the logs?
 

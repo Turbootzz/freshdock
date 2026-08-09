@@ -11,6 +11,15 @@ pub fn old_name_for(original: &str, ts_unix: i64) -> String {
     format!("{original}-old-{ts_unix}")
 }
 
+/// Does `name` look like a `<name>-old-<ts>` archive produced by
+/// [`old_name_for`]? Archives are stopped (so normally absent from
+/// `list_running`); callers use this defensively against a stale archive left
+/// running by a crashed cycle.
+pub fn is_archive_name(name: &str) -> bool {
+    name.rsplit_once("-old-")
+        .is_some_and(|(_, ts)| !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Resolve a non-colliding `<original>-old-<ts>` archive name. If the base
 /// name is already taken, append `-1`, `-2`, … up to
 /// [`MAX_COLLISION_ATTEMPTS`]. The `exists` callback abstracts the daemon
@@ -88,4 +97,18 @@ where
         }
     }
     format!("{base}-{MAX_COLLISION_ATTEMPTS}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_names_are_detected() {
+        assert!(is_archive_name("web-old-1700000000"));
+        assert!(is_archive_name(&old_name_for("web", 1_700_000_000)));
+        assert!(!is_archive_name("web"));
+        assert!(!is_archive_name("web-old-")); // no timestamp
+        assert!(!is_archive_name("my-old-laptop")); // non-numeric suffix
+    }
 }

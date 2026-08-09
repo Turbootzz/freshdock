@@ -21,6 +21,7 @@ use tracing::debug;
 
 use crate::config::CredentialStore;
 use crate::docker::recreate::{DockerOps, HookStatus};
+use crate::docker::rename::is_archive_name;
 use crate::docker::spec::ContainerSpec;
 use crate::health::{ContainerRuntimeState, HealthProbe};
 use crate::registry::ImageRef;
@@ -207,6 +208,24 @@ impl Docker {
         }
     }
 
+    /// Running containers sharing this container's network namespace via
+    /// `HostConfig.NetworkMode = container:<ref>`. The owner's full id is
+    /// resolved first because the reference is stored exactly as it was given
+    /// at create time — a name, a full id, or an id prefix.
+    pub async fn network_dependents_of(&self, name: &str) -> Result<Vec<String>, DockerError> {
+        let full_id = self
+            .0
+            .inspect_container(name, None)
+            .await?
+            .id
+            .unwrap_or_default();
+        Ok(network_dependent_names(
+            &self.list_running().await?,
+            name,
+            &full_id,
+        ))
+    }
+
     /// Inspect a container and classify its lifecycle + health into the
     /// daemon-agnostic [`ContainerRuntimeState`] the health gate polls on.
     pub async fn probe_runtime_state(
@@ -216,6 +235,55 @@ impl Docker {
         let resp = self.0.inspect_container(name_or_id, None).await?;
         Ok(classify_runtime_state(resp.state))
     }
+}
+
+/// Container name from a summary (leading `/` trimmed), falling back to id.
+/// Shared by the scheduler's per-tick sweep and the network-dependent scan.
+pub(crate) fn container_name(c: &ContainerSummary) -> String {
+    c.names
+        .as_ref()
+        .and_then(|n| n.first())
+        .map(|s| s.trim_start_matches('/').to_string())
+        .or_else(|| c.id.clone())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Names in `running` that share the network namespace of the container
+/// identified by `name`/`full_id` (`""` when the id could not be resolved).
+/// Pure so the matching and exclusion rules stay testable without a daemon.
+fn network_dependent_names(running: &[ContainerSummary], name: &str, full_id: &str) -> Vec<String> {
+    running
+        .iter()
+        .filter_map(|summary| {
+            let mode = summary
+                .host_config
+                .as_ref()
+                .and_then(|hc| hc.network_mode.as_deref())?;
+            if !network_mode_references(mode, name, full_id) {
+                return None;
+            }
+            let dependent = container_name(summary);
+            // A container never depends on itself, and a `-old-` archive left
+            // running by a crashed cycle is about to be removed — neither is
+            // worth re-creating.
+            (dependent != name && !is_archive_name(&dependent)).then_some(dependent)
+        })
+        .collect()
+}
+
+/// Does `mode` (a `HostConfig.NetworkMode`) join the network namespace of the
+/// container identified by `name`/`full_id`? Docker stores the reference
+/// verbatim from create time, so all three shapes the CLI/compose can emit are
+/// matched: the container name, its full 64-char id, or an id prefix. Prefixes
+/// shorter than 12 characters are rejected — Docker's own short-id width — as
+/// too weak to attribute the reference to this container.
+fn network_mode_references(mode: &str, name: &str, full_id: &str) -> bool {
+    let Some(reference) = mode.strip_prefix("container:") else {
+        return false;
+    };
+    reference == name
+        || (!full_id.is_empty()
+            && (reference == full_id || (reference.len() >= 12 && full_id.starts_with(reference))))
 }
 
 /// Map bollard's `State` into the health gate's projection. `Running` +
@@ -326,6 +394,11 @@ impl DockerOps for Docker {
         debug!(container = %name_or_id, %command, timeout_s = ?timeout.map(|t| t.as_secs()), "exec_hook");
         self.exec_in_container(name_or_id, command, timeout).await
     }
+
+    async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError> {
+        debug!(container = %name, "list_network_dependents");
+        self.network_dependents_of(name).await
+    }
 }
 
 #[async_trait]
@@ -417,6 +490,137 @@ mod tests {
         assert_eq!(
             classify_runtime_state(None),
             ContainerRuntimeState::Exited { exit_code: 0 }
+        );
+    }
+
+    const FULL_ID: &str = "9f8e7d6c5b4a3210fedcba98765432100123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn network_mode_matches_name_full_id_and_long_prefix() {
+        assert!(network_mode_references(
+            "container:fd-base",
+            "fd-base",
+            FULL_ID
+        ));
+        assert!(network_mode_references(
+            &format!("container:{FULL_ID}"),
+            "fd-base",
+            FULL_ID
+        ));
+        // Docker's own short id is 12 chars — compose and `docker inspect`
+        // both surface references at that width.
+        assert!(network_mode_references(
+            "container:9f8e7d6c5b4a",
+            "fd-base",
+            FULL_ID
+        ));
+    }
+
+    #[test]
+    fn network_mode_rejects_short_id_prefixes() {
+        assert!(
+            !network_mode_references("container:9f8e7d6c5b4", "fd-base", FULL_ID),
+            "an 11-char prefix is not unique enough to attribute the reference"
+        );
+        assert!(!network_mode_references(
+            "container:9f8e",
+            "fd-base",
+            FULL_ID
+        ));
+    }
+
+    #[test]
+    fn network_mode_rejects_other_containers_and_non_container_modes() {
+        assert!(!network_mode_references(
+            "container:other",
+            "fd-base",
+            FULL_ID
+        ));
+        for mode in [
+            "host",
+            "none",
+            "bridge",
+            "fd-base",
+            "container",
+            "service:x",
+        ] {
+            assert!(
+                !network_mode_references(mode, "fd-base", FULL_ID),
+                "{mode} does not share a network namespace with fd-base"
+            );
+        }
+    }
+
+    #[test]
+    fn network_mode_with_unknown_owner_id_still_matches_by_name() {
+        // The owner's id could not be resolved: name matching must still work,
+        // and an empty id must never prefix-match everything.
+        assert!(network_mode_references("container:fd-base", "fd-base", ""));
+        assert!(!network_mode_references(
+            "container:9f8e7d6c5b4a",
+            "fd-base",
+            ""
+        ));
+    }
+
+    fn summary(name: &str, network_mode: Option<&str>) -> ContainerSummary {
+        ContainerSummary {
+            names: Some(vec![format!("/{name}")]),
+            host_config: Some(bollard::models::ContainerSummaryHostConfig {
+                network_mode: network_mode.map(str::to_owned),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dependent_listing_keeps_only_namespace_sharers() {
+        let running = [
+            summary("fd-base", Some("bridge")),
+            summary("fd-peer", Some("container:fd-base")),
+            summary("fd-peer-by-id", Some(&format!("container:{FULL_ID}"))),
+            summary("fd-unrelated", Some("container:other")),
+            summary("fd-host", Some("host")),
+            summary("fd-no-hostconfig", None),
+        ];
+        assert_eq!(
+            network_dependent_names(&running, "fd-base", FULL_ID),
+            vec!["fd-peer".to_owned(), "fd-peer-by-id".to_owned()]
+        );
+    }
+
+    #[test]
+    fn dependent_listing_excludes_the_owner_and_stale_archives() {
+        // A container joined to its own namespace is nonsense the daemon would
+        // never produce; a still-running `-old-` archive is about to be
+        // removed. Neither may be dragged through a re-attach cycle.
+        let running = [
+            summary("fd-base", Some("container:fd-base")),
+            summary("fd-peer-old-1700000000", Some("container:fd-base")),
+            summary("fd-peer", Some("container:fd-base")),
+        ];
+        assert_eq!(
+            network_dependent_names(&running, "fd-base", FULL_ID),
+            vec!["fd-peer".to_owned()]
+        );
+    }
+
+    #[test]
+    fn container_name_trims_slash_and_falls_back_to_id() {
+        assert_eq!(
+            container_name(&ContainerSummary {
+                names: Some(vec!["/fd-peer".to_owned()]),
+                ..Default::default()
+            }),
+            "fd-peer"
+        );
+        assert_eq!(
+            container_name(&ContainerSummary {
+                id: Some("deadbeef".to_owned()),
+                ..Default::default()
+            }),
+            "deadbeef"
         );
     }
 }

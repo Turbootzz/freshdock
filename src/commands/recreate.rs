@@ -237,6 +237,9 @@ mod tests {
         ) -> Result<crate::docker::recreate::HookStatus, DockerError> {
             panic!("policy gate must refuse before exec_hook");
         }
+        async fn list_network_dependents(&self, _name: &str) -> Result<Vec<String>, DockerError> {
+            panic!("policy gate must refuse before list_network_dependents");
+        }
     }
 
     #[async_trait]
