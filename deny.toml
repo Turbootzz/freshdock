@@ -21,7 +21,13 @@ exceptions = []
 multiple-versions = "deny"
 wildcards = "deny"
 deny = []
-skip = []
+skip = [
+    # thiserror 2.0.19+ moved its proc-macro onto syn 3 while the rest of the
+    # tree (displaydoc → icu → idna → lettre/bollard) is still on syn 2.
+    # Build-time proc-macro only — no binary-size or runtime cost. Drop this
+    # once the icu/idna stack has migrated to syn 3.
+    { name = "syn", version = "2" },
+]
 skip-tree = []
 
 [advisories]
