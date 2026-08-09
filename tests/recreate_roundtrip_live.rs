@@ -116,22 +116,40 @@ impl Drop for Cleanup {
     }
 }
 
+/// Is a daemon *required*? In CI this gate job exists precisely to run these
+/// tests, so a missing daemon there must be a loud failure — a graceful skip
+/// would turn the release-blocker quality gate into a green no-op that proves
+/// nothing. Set `FRESHDOCK_LIVE_REQUIRED=1` (as `.github/workflows/ci.yml`
+/// does) to make the skip a panic.
+fn live_required() -> bool {
+    std::env::var("FRESHDOCK_LIVE_REQUIRED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Skip (or, with [`live_required`], fail) with `why`.
+fn skip_or_panic(why: String) -> Option<Docker> {
+    assert!(
+        !live_required(),
+        "FRESHDOCK_LIVE_REQUIRED is set, so this live gate must not be skipped: {why}"
+    );
+    eprintln!("{why}");
+    None
+}
+
 /// Connect + ping; on any failure print a skip notice and return `None` so a
 /// developer running `--ignored` without a daemon gets a graceful no-op rather
-/// than a failure (mirrors the network-unavailable skip convention).
+/// than a failure (mirrors the network-unavailable skip convention) — unless
+/// `FRESHDOCK_LIVE_REQUIRED` says otherwise.
 async fn connect_or_skip() -> Option<Docker> {
     match Docker::connect_with_local_defaults() {
         Ok(d) => match d.ping().await {
             Ok(_) => Some(d),
-            Err(e) => {
-                eprintln!("skipping live round-trip: docker ping failed: {e}");
-                None
-            }
+            Err(e) => skip_or_panic(format!("skipping live round-trip: docker ping failed: {e}")),
         },
-        Err(e) => {
-            eprintln!("skipping live round-trip: cannot connect to docker: {e}");
-            None
-        }
+        Err(e) => skip_or_panic(format!(
+            "skipping live round-trip: cannot connect to docker: {e}"
+        )),
     }
 }
 
@@ -292,6 +310,7 @@ async fn weird_config_recreate_roundtrip_is_byte_identical() {
         .expect("inspect before");
 
     let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
+        .await
         .expect("freshdock docker connect");
     let outcome = recreate_one(
         &fd,
@@ -431,6 +450,7 @@ async fn recreate_with_health_removes_archive_on_live_success() {
     let (_network, name, _static_ip) = spawn_weird(&docker, &prefix, 78).await;
 
     let fd = freshdock::docker::Docker::connect(Arc::new(CredentialStore::default()))
+        .await
         .expect("freshdock docker connect");
     // `Cleanup::default()` is fully qualified: this file has a local `Cleanup`
     // (a test Drop-guard) that would otherwise shadow the recreate type.

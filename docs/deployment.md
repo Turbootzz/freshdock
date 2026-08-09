@@ -137,12 +137,33 @@ deliberately.
 
 | Platform | Status |
 |---|---|
-| Plain Docker (24.x – 29+) | Primary target. |
+| Plain Docker | Primary target. The API version is negotiated with your daemon at connect time; CI exercises the Docker engine shipped on GitHub's `ubuntu-latest` runners. |
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
-| Podman 4+ | Supported via the Docker-compatible socket. |
+| Podman 4+ | Supported via the Docker-compatible socket (discovery below). |
 | Compose-based UIs (Dockge, Komodo, …) | Containers are updated individually; compose files are not edited. |
 | Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
+
+One daemon-version floor applies: re-creating a container attached to **more than
+one network** requires Docker API 1.44 (Docker 25.0), because older daemons cannot
+attach several networks in a single create call. freshdock checks the negotiated
+API version *before* it stops anything, so on an older daemon such a container is
+refused with an explanatory error instead of being taken down and then failing to
+come back. Detach the extra networks (re-attaching them after the update) or
+upgrade the daemon.
+
+### Which socket freshdock uses
+
+freshdock connects in this order at startup and logs which family answered:
+
+1. `DOCKER_HOST`, if set — `unix://`, `tcp://`, `http://`, `https://` and `ssh://`
+   are all honoured. Only the scheme is logged; the value may carry credentials.
+2. The local Docker socket: `/var/run/docker.sock` (named pipe on Windows).
+3. Podman's sockets: `$XDG_RUNTIME_DIR/podman/podman.sock`,
+   `/run/user/$UID/podman/podman.sock`, then `/run/podman/podman.sock`.
+
+So a rootless or rootful Podman host in the standard location works with no
+configuration. For anything else, set `DOCKER_HOST=unix:///path/to/podman.sock`.
 
 A recreate replaces the container with a new ID, so a UI that pinned the old ID may
 briefly show it "out of sync" until its next refresh. freshdock never edits your

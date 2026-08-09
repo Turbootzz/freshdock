@@ -33,7 +33,7 @@ pub async fn run(
     store: Arc<CredentialStore>,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(store.clone())?;
+    let docker = Docker::connect(store.clone()).await?;
     let registry = OciRegistry::new(store);
     let cells = collect_cells(&docker, &registry, settings.policy_defaults()).await?;
     let mut table = build_table(no_color);

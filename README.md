@@ -130,7 +130,7 @@ auto-updater for years — was archived by its maintainers on 17 December 2025, 
 shipped an embedded Docker SDK (API 1.25) incompatible with Docker Engine 29+. The
 community has forks, but none combine what matters for a small homelab:
 
-1. **Modern Docker API** — tested against Docker 24.x through 29+, auto-negotiated via [bollard](https://github.com/fussybeaver/bollard).
+1. **Modern Docker API** — the API version is negotiated with your daemon at connect time via [bollard](https://github.com/fussybeaver/bollard), so freshdock speaks the newest API that daemon actually supports.
 2. **Safe updates** — a broken new image rolls back automatically instead of leaving a dead container.
 3. **Small footprint** — a single static binary, not a 100+ MB image to manage your other containers.
 
@@ -138,12 +138,31 @@ community has forks, but none combine what matters for a small homelab:
 
 | Platform | Status |
 |---|---|
-| Plain Docker (24.x – 29+) | Primary target. |
+| Plain Docker | Primary target. The API version is negotiated per daemon; CI exercises the Docker engine shipped on GitHub's `ubuntu-latest` runners. |
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
-| Podman 4+ | Supported via the Docker-compatible socket. |
+| Podman 4+ | Supported via the Docker-compatible socket (see [socket discovery](#which-socket-freshdock-uses)). |
 | Compose-based UIs (Dockge, Komodo, …) | Containers updated individually; compose files untouched. |
 | Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
+
+One known daemon-version floor: re-creating a container attached to **more than one
+network** needs Docker API 1.44 (Docker 25.0) — older daemons cannot attach several
+networks in a single create. freshdock checks this before it stops anything and
+refuses with an explanatory error rather than taking the container down first.
+Single-network containers (the vast majority) are unaffected.
+
+### Which socket freshdock uses
+
+At startup freshdock connects in this order and logs which family answered:
+
+1. `DOCKER_HOST`, if set — `unix://`, `tcp://`, `http://`, `https://` and `ssh://`
+   are all honoured.
+2. The local Docker socket: `/var/run/docker.sock` (named pipe on Windows).
+3. Podman's sockets: `$XDG_RUNTIME_DIR/podman/podman.sock`,
+   `/run/user/$UID/podman/podman.sock`, then `/run/podman/podman.sock`.
+
+A Podman host in a non-standard location needs no special support — point
+`DOCKER_HOST=unix:///path/to/podman.sock` at it.
 
 ## Status & roadmap
 

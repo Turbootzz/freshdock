@@ -23,9 +23,27 @@ pub enum HookStatus {
 /// Daemon operations the recreate orchestrator depends on. Abstracted as a
 /// trait so unit tests can substitute a recording fake without spinning up
 /// a real Docker socket.
+///
+/// `Sync` is a supertrait because [`preflight_recreate`](DockerOps::preflight_recreate)
+/// carries a default body: `async_trait` desugars a *defaulted* method to a
+/// boxed future over `&self`, which is only `Send` when `Self: Sync`. Every
+/// implementor — the daemon wrapper and each fake — already satisfies it.
 #[async_trait]
-pub trait DockerOps {
+pub trait DockerOps: Sync {
     async fn inspect(&self, name: &str) -> Result<ContainerSpec, DockerError>;
+    /// Refuse, *before* anything is taken down, a recreate this daemon could
+    /// not finish. The cycle's point of no return is the stop + rename: past
+    /// it a rejected create leaves the container down under an archive name and
+    /// only the restore machinery can put it back, so anything knowable in
+    /// advance must be decided here.
+    ///
+    /// Defaulted to "no objection" because the only checks so far turn on the
+    /// negotiated API version — something only the production daemon wrapper
+    /// knows. Test fakes have no version to speak for and deliberately inherit
+    /// the default rather than each restating it.
+    async fn preflight_recreate(&self, _spec: &ContainerSpec) -> Result<(), DockerError> {
+        Ok(())
+    }
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError>;
     async fn stop(
         &self,
@@ -222,6 +240,10 @@ pub async fn recreate_one(
     ts_provider: impl Fn() -> i64,
 ) -> Result<CycleOutcome, DockerError> {
     let spec = ops.inspect(name).await?;
+    // Everything the daemon can rule out up front is ruled out here, while the
+    // container is still running and untouched — before even the pull, so a
+    // doomed update costs nothing.
+    ops.preflight_recreate(&spec).await?;
     // Pull uses the `library/`-prefixed parse (registry-correct); the create
     // inside `swap_container` gets the original `spec.image_ref` so
     // `Config.Image` round-trips byte-identical (issue #25). In Phase 3 the
@@ -1933,6 +1955,142 @@ mod tests {
                 "remove:fd-smoke-old-1700000000:false".to_owned(),
             ],
             "an unusable dependent list degrades to no dependents"
+        );
+    }
+
+    // --- preflight guard: refuse before anything is taken down ---
+
+    /// Fake whose [`DockerOps::preflight_recreate`] refuses, so the guard can
+    /// be checked where it matters. Written from scratch rather than bolted
+    /// onto [`RecordingOps`] precisely because the *default* implementation is
+    /// the contract every other fake relies on — this one is the only place
+    /// that overrides it.
+    #[derive(Default)]
+    struct RefusingPreflightOps {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RefusingPreflightOps {
+        fn record(&self, label: &str) {
+            self.calls.lock().unwrap().push(label.to_owned());
+        }
+
+        fn into_calls(self) -> Vec<String> {
+            self.calls.into_inner().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl DockerOps for RefusingPreflightOps {
+        async fn preflight_recreate(&self, _spec: &ContainerSpec) -> Result<(), DockerError> {
+            self.record("preflight");
+            Err(DockerError::ApiTooOldForMultiNetwork {
+                api_version: "1.43".to_owned(),
+                networks: 2,
+            })
+        }
+
+        async fn inspect(&self, name: &str) -> Result<ContainerSpec, DockerError> {
+            self.record("inspect");
+            Ok(ContainerSpec {
+                name: name.to_owned(),
+                image_ref: "nginx:alpine".to_owned(),
+                image_id: None,
+                config: bollard::models::ContainerConfig::default(),
+                host_config: None,
+                network_endpoints: None,
+            })
+        }
+
+        async fn pull(&self, _image_ref: &ImageRef) -> Result<(), DockerError> {
+            self.record("pull");
+            Ok(())
+        }
+
+        async fn stop(
+            &self,
+            _name: &str,
+            _signal: Option<&str>,
+            _timeout_s: Option<i64>,
+        ) -> Result<(), DockerError> {
+            self.record("stop");
+            Ok(())
+        }
+
+        async fn rename(&self, name: &str, ts_unix: i64) -> Result<String, DockerError> {
+            self.record("rename");
+            Ok(crate::docker::rename::old_name_for(name, ts_unix))
+        }
+
+        async fn create_from_spec(
+            &self,
+            _name: &str,
+            _spec: &ContainerSpec,
+            _image: &str,
+        ) -> Result<String, DockerError> {
+            self.record("create");
+            Ok("new-id".to_owned())
+        }
+
+        async fn start(&self, _name_or_id: &str) -> Result<(), DockerError> {
+            self.record("start");
+            Ok(())
+        }
+
+        async fn remove(&self, _name_or_id: &str, _force: bool) -> Result<(), DockerError> {
+            self.record("remove");
+            Ok(())
+        }
+
+        async fn rename_to(&self, _from: &str, _to: &str) -> Result<(), DockerError> {
+            self.record("rename_to");
+            Ok(())
+        }
+
+        async fn remove_image(&self, _id: &str, _force: bool) -> Result<(), DockerError> {
+            self.record("remove_image");
+            Ok(())
+        }
+
+        async fn prune_dangling_images(&self) -> Result<(), DockerError> {
+            self.record("prune_dangling_images");
+            Ok(())
+        }
+
+        async fn exec_hook(
+            &self,
+            _name_or_id: &str,
+            _command: &str,
+            _timeout: Option<Duration>,
+        ) -> Result<HookStatus, DockerError> {
+            self.record("exec_hook");
+            Ok(HookStatus::Completed { exit_code: 0 })
+        }
+
+        async fn list_network_dependents(&self, _name: &str) -> Result<Vec<String>, DockerError> {
+            self.record("list_dependents");
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_preflight_stops_the_cycle_before_anything_is_touched() {
+        // The whole point of the preflight: a create the daemon cannot accept
+        // must be caught while the container is still running, not after the
+        // stop + rename have already taken it down.
+        let ops = RefusingPreflightOps::default();
+        let err = recreate_one(&ops, "fd-smoke", &LifecycleHooks::default(), || {
+            1_700_000_000
+        })
+        .await
+        .expect_err("a refused preflight must surface as an error");
+
+        assert!(matches!(err, DockerError::ApiTooOldForMultiNetwork { .. }));
+        assert_eq!(
+            ops.into_calls(),
+            vec!["inspect".to_owned(), "preflight".to_owned()],
+            "the preflight runs on the inspected spec and before the pull — \
+             nothing may be pulled, stopped, renamed or created after it refuses"
         );
     }
 

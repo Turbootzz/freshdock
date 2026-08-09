@@ -5,6 +5,7 @@ the reference page with the full story.
 
 ## Contents
 
+- [freshdock can't reach the daemon / wrong socket](#freshdock-cant-reach-the-daemon--wrong-socket)
 - [`permission denied` on the Docker socket](#permission-denied-on-the-docker-socket)
 - [freshdock sees my container but never updates it](#freshdock-sees-my-container-but-never-updates-it)
 - [My container doesn't appear in `check` at all](#my-container-doesnt-appear-in-check-at-all)
@@ -14,6 +15,31 @@ the reference page with the full story.
 - [Where are the logs?](#where-are-the-logs)
 
 ---
+
+## freshdock can't reach the daemon / wrong socket
+
+freshdock probes, in order: **`DOCKER_HOST`** (any scheme — `unix://`, `tcp://`,
+`http://`, `https://`, `ssh://`), then **`/var/run/docker.sock`**, then
+**Podman's sockets** (`$XDG_RUNTIME_DIR/podman/podman.sock`,
+`/run/user/$UID/podman/podman.sock`, `/run/podman/podman.sock`). The startup log
+says which family answered and which API version was negotiated:
+
+```
+INFO freshdock::docker: connected to the local Docker socket
+INFO freshdock::docker: negotiated Docker API version api_version=1.53
+```
+
+If those lines are missing, freshdock never reached a daemon — it now fails at
+connect time rather than part-way through a cycle. Point it at the right socket
+with `DOCKER_HOST=unix:///path/to/podman.sock` (or a `tcp://` endpoint). Note
+that `DOCKER_HOST`, once set, is authoritative: there is no fallback to the
+local socket if that endpoint is dead.
+
+In CI, the live test suites skip themselves when no daemon answers. Set
+`FRESHDOCK_LIVE_REQUIRED=1` (as the repo's own live gate job does) to turn that
+skip into a failure, so a missing daemon can't pass as a green run.
+
+→ [Deployment: which socket freshdock uses](deployment.md#which-socket-freshdock-uses)
 
 ## `permission denied` on the Docker socket
 
