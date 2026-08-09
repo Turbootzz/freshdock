@@ -77,15 +77,18 @@ its sidecars share, so freshdock finds every running container whose
 each one afterwards — including after a rollback, since restarting the restored
 container also gives it a fresh namespace. Compose's `network_mode: service:X`
 becomes `container:<id of X>` on disk; that dead id is rewritten to the new
-container's id on the way through. The repair runs *before* X's `-old-` archive
+container's id on the way through (a literal name reference is left alone, and
+after a rollback nothing is rewritten — the restored container owns its
+original id again). The repair runs *before* X's `-old-` archive
 is removed, because Docker refuses to remove a container whose namespace a
 running container still holds.
 
 The sidecar needs **no freshdock labels** for this: it is not being updated,
 only repaired, so the `freshdock.enable` gate does not apply to it. Nothing else
 about it changes — it is re-created from the exact **image ID** it was already
-running (a moved tag can never sneak an upgrade in through a repair), with no
-health gate and no lifecycle hooks.
+running (a moved tag can never sneak an upgrade in through a repair; only when
+the daemon reports no image id does the existing image reference stand in),
+with no health gate and no lifecycle hooks.
 
 Two sidecars are deliberately skipped, each with a warning naming it:
 

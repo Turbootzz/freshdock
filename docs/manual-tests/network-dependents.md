@@ -7,17 +7,19 @@ namespace its dependents were attached to: without repair they keep running but
 have no network at all, and any `container:<old id>` reference is now dangling.
 
 freshdock captures the dependents *before* stopping X and re-creates each one
-afterwards — on the success path with its reference repointed at the new
-container id, and on the rollback path with the reference left as-is (the
-restored container owns its original id again, but the namespace behind it is
-new either way). The repair runs **before** X's `-old-` archive is removed:
+afterwards — on the success path with an **id-based** reference repointed at
+the new container id (a literal name reference is left name-based), and on the
+rollback path with the reference left as-is (the restored container owns its
+original id again, but the namespace behind it is new either way). The repair runs **before** X's `-old-` archive is removed:
 Docker refuses to remove a container whose namespace a running container still
 holds.
 
 Each dependent is re-created from the exact **image ID** it was running, not
 from its (mutable) tag — a repair must never double as an unrequested upgrade.
-Its `Config.Image` therefore reads as an image id afterwards; that is
-deliberate, and the opposite of the owner's own cycle (issue #25).
+(When the daemon reports no image id for it — rare — the existing image
+reference is used instead.) Its `Config.Image` therefore reads as an image id
+afterwards; that is deliberate, and the opposite of the owner's own cycle
+(issue #25).
 
 The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdock/blob/main/src/docker/recreate.rs)
 (`healthy_update_reattaches_id_based_dependent`,
@@ -80,7 +82,8 @@ docker inspect fd-peer --format '{{.Image}}'                    # image ID
   (freshdock still has a branch that leaves a *literal* name reference untouched;
   it only fires on daemons that store the reference verbatim.)
 - `docker inspect fd-peer --format '{{.Image}}'` is **unchanged** from step 4:
-  the dependent is re-created from the exact image ID it was running.
+  the dependent is re-created from the exact image ID it was running (the
+  image-ref fallback only applies when the daemon reported no image id).
 - `docker exec fd-peer wget -qO- 127.0.0.1 | head -1` reaches the **new** nginx.
   This is the headline assertion — before #68 it failed with no route to host.
 - `docker ps -a` shows no `fd-peer-old-<ts>` left over: the dependent's own
@@ -161,7 +164,10 @@ mid-cycle.
 ## Cleanup
 
 ```bash
-docker rm -f fd-peer fd-base $(docker ps -a --filter name=-old- -q) 2>/dev/null
+# Scoped to THIS test's archives — a bare `name=-old-` filter would catch
+# unrelated containers on the host.
+docker rm -f fd-peer fd-base 2>/dev/null
+docker ps -aq --filter name=fd-base-old- --filter name=fd-peer-old- | xargs -r docker rm -f
 ```
 
 ## Current limitations (do not file as bugs)

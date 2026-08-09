@@ -260,7 +260,10 @@ pub(crate) fn container_name(c: &ContainerSummary) -> String {
 fn own_hostname() -> Option<String> {
     let from_file = std::fs::read_to_string("/etc/hostname")
         .ok()
-        .map(|s| s.trim().to_owned());
+        .map(|s| s.trim().to_owned())
+        // An empty (whitespace-only) file must fall through to $HOSTNAME, not
+        // pin the chain to `Some("")` and disable self-recognition entirely.
+        .filter(|h| !h.is_empty());
     from_file
         .or_else(|| std::env::var("HOSTNAME").ok())
         .filter(|h| !h.is_empty())
