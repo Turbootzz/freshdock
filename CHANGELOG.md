@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1](https://github.com/Turbootzz/freshdock/compare/v1.4.0...v1.4.1) - 2026-08-09
+
+### Fixed
+
+- *(docker)* negotiate the API version and honour every DOCKER_HOST scheme ([#71](https://github.com/Turbootzz/freshdock/pull/71))
+
+### Other
+
+- *(deps)* bump the cargo-minor-patch group across 1 directory with 8 updates ([#65](https://github.com/Turbootzz/freshdock/pull/65))
+- SMTP tls modes incl. plaintext (#57, #58) + re-attach network_mode dependents ([#68](https://github.com/Turbootzz/freshdock/pull/68)) ([#69](https://github.com/Turbootzz/freshdock/pull/69))
+
 ## [1.4.0](https://github.com/Turbootzz/freshdock/compare/v1.3.0...v1.4.0) - 2026-07-28
 
 ### Added
