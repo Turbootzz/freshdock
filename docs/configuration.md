@@ -225,7 +225,7 @@ username = "freshdock@example.com"    # username + password together, or neither
 password = "s3cr3t"                   # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 from     = "freshdock@example.com"
 to       = ["admin@example.com"]      # non-empty list
-starttls = true                       # default true; false → implicit TLS (465)
+tls      = "starttls"                 # starttls (default) | implicit (465) | none
 triggers = ["succeeded", "failed"]
 ```
 
@@ -236,7 +236,7 @@ Per-type keys:
 | `webhook` | `url` (secret) | Generic JSON POST. |
 | `discord` | `webhook_url` (secret) | Posts a coloured embed. |
 | `telegram` | `bot_token` (secret), `chat_id` | Plain-text message via the Bot API. |
-| `smtp` | `host`, `port` (=587), `username`?, `password`? (secret), `from`, `to` (list), `starttls` (=true) | `username`+`password` must be set together or both omitted (anonymous relay). |
+| `smtp` | `host`, `port` (=587), `username`?, `password`? (secret), `from`, `to` (list), `tls` (=`"starttls"`) | `tls` is `"starttls"` \| `"implicit"` (465) \| `"none"` (plaintext, dev only — logged as a warning). The legacy `starttls = true\|false` maps to starttls/implicit; setting both keys is an error. `username`+`password` must be set together or both omitted (anonymous relay). |
 
 All targets also accept `triggers = ["available", "succeeded", "failed"]` (subset
 allowed).

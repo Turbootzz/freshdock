@@ -65,4 +65,4 @@
 # password = "s3cr3t"                   # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 # from     = "freshdock@example.com"
 # to       = ["admin@example.com"]
-# starttls = true                       # default true; false → implicit TLS (465)
+# tls      = "starttls"                 # starttls (default) | implicit (465) | none

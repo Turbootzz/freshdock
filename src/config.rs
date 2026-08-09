@@ -218,20 +218,80 @@ pub enum NotificationTarget {
         password: Option<Secret>,
         from: String,
         to: Vec<String>,
-        #[serde(default = "default_true")]
-        starttls: bool,
+        /// Transport security. Both this and the legacy `starttls` are raw
+        /// `Option`s here; [`resolve_smtp_tls`] is the single place that turns
+        /// the pair into one mode (and rejects setting both).
+        #[serde(default)]
+        tls: Option<SmtpTls>,
+        /// Legacy alias for `tls`: `true` → STARTTLS, `false` → **implicit
+        /// TLS**, never plaintext.
+        #[serde(default)]
+        starttls: Option<bool>,
         #[serde(default)]
         triggers: Option<Vec<String>>,
     },
 }
 
+/// How the SMTP connection is secured. Three-valued because `starttls: bool`
+/// could not express "no TLS at all", which is what a local catcher
+/// (mailpit/MailHog) speaks — issue #57.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub enum SmtpTls {
+    /// Upgrade a plain connection with STARTTLS (submission port 587).
+    Starttls,
+    /// TLS from the first byte (SMTPS, typically port 465).
+    Implicit,
+    /// No TLS at all. Local development only; credentials and message content
+    /// travel in the clear, so [`crate::notify::smtp`] logs a warning.
+    Plaintext,
+}
+
+impl SmtpTls {
+    /// One case-insensitive matcher for both the TOML `tls = "…"` value and the
+    /// env URL's `?tls=…`, so the two can never accept different tokens.
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "starttls" => Some(SmtpTls::Starttls),
+            "implicit" => Some(SmtpTls::Implicit),
+            "none" => Some(SmtpTls::Plaintext),
+            _ => None,
+        }
+    }
+}
+
+impl TryFrom<String> for SmtpTls {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(&raw).ok_or_else(|| {
+            format!("unknown smtp tls mode `{raw}` (expected starttls, implicit, or none)")
+        })
+    }
+}
+
+/// Collapse the `tls` / legacy `starttls` pair into the one mode the transport
+/// is built from. Setting both is an error rather than a precedence rule: the
+/// operator's two statements may contradict each other and guessing which they
+/// meant is worse than saying so.
+pub fn resolve_smtp_tls(tls: Option<SmtpTls>, starttls: Option<bool>) -> Result<SmtpTls, String> {
+    match (tls, starttls) {
+        (Some(_), Some(_)) => {
+            Err("set either `tls` or the legacy `starttls`, not both".to_string())
+        }
+        (Some(tls), None) => Ok(tls),
+        // `starttls = false` predates the plaintext mode and always meant
+        // implicit TLS; keep that meaning so an existing config can't silently
+        // downgrade to cleartext.
+        (None, Some(true)) => Ok(SmtpTls::Starttls),
+        (None, Some(false)) => Ok(SmtpTls::Implicit),
+        (None, None) => Ok(SmtpTls::Starttls),
+    }
+}
+
 /// SMTP submission port — STARTTLS on 587 is the modern default.
 fn default_smtp_port() -> u16 {
     587
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Notification targets after the secret env-overlay, ready for the dispatcher.
@@ -379,7 +439,8 @@ overrides the config file:\n  FRESHDOCK_REGISTRY_<NAME>_USERNAME   e.g. FRESHDOC
 FRESHDOCK_REGISTRY_<NAME>_TOKEN      e.g. FRESHDOCK_REGISTRY_GHCR_TOKEN\n<NAME> is dockerhub, ghcr, quay, \
 lscr, or a registry host.\nNotification targets can be declared from the environment alone (no file) via a \
 shoutrrr-style URL, with an optional trigger filter:\n  FRESHDOCK_NOTIFY_<NAME>_URL          discord://token@id | \
-telegram://token@telegram?chats=id | smtp://user:pass@host:port/?from=a&to=b | https://host/hook\n  \
+telegram://token@telegram?chats=id | smtp://user:pass@host:port/?from=a&to=b&tls=starttls|implicit|none | \
+https://host/hook\n  \
 FRESHDOCK_NOTIFY_<NAME>_TRIGGERS     comma list of available,succeeded,failed (default all)\nA target's secret may \
 also be overridden on its own (<NAME> is the [notifications.<NAME>] table name, upper-cased with '-' as '_'):\n  \
 FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
@@ -569,7 +630,7 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
                 triggers: None,
             })
         }
-        // smtp://[user:pass@]host[:port]/?from=…&to=a,b&starttls=true.
+        // smtp://[user:pass@]host[:port]/?from=…&to=a,b&tls=starttls|implicit|none.
         "smtp" => {
             let host = url
                 .host_str()
@@ -582,14 +643,16 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
 
             let mut from = None;
             let mut to: Vec<String> = Vec::new();
-            let mut starttls = default_true();
+            let mut tls = None;
+            let mut starttls = None;
             for (key, value) in url.query_pairs() {
                 match key.as_ref() {
                     "from" => from = Some(value.into_owned()),
                     "to" => to.extend(split_csv(&value)),
+                    "tls" => tls = Some(SmtpTls::try_from(value.into_owned())?),
                     "starttls" => {
                         if let Some(flag) = parse_env_bool("smtp starttls", &value) {
-                            starttls = flag;
+                            starttls = Some(flag);
                         }
                     }
                     _ => {}
@@ -599,6 +662,10 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
             if to.is_empty() {
                 return Err("smtp:// requires ?to=<addr>[,<addr>…]".to_string());
             }
+            // Validate the pair now so a contradictory URL is skipped at
+            // declaration time; the raw values are kept so `notify::build_target`
+            // stays the single place that resolves them.
+            resolve_smtp_tls(tls, starttls)?;
             Ok(NotificationTarget::Smtp {
                 host,
                 port,
@@ -606,6 +673,7 @@ fn parse_notify_url(name: &str, raw: &str) -> Result<NotificationTarget, String>
                 password,
                 from,
                 to,
+                tls,
                 starttls,
                 triggers: None,
             })
@@ -1008,12 +1076,14 @@ mod tests {
         match &t["mail"] {
             NotificationTarget::Smtp {
                 port,
+                tls,
                 starttls,
                 triggers,
                 ..
             } => {
                 assert_eq!(*port, 587, "default submission port");
-                assert!(*starttls, "starttls defaults on");
+                assert!(tls.is_none(), "omitted tls → None (resolver defaults it)");
+                assert!(starttls.is_none(), "legacy alias omitted → None");
                 assert!(
                     triggers.is_none(),
                     "omitted triggers → None (subscribe all)"
@@ -1021,6 +1091,43 @@ mod tests {
             }
             other => panic!("expected smtp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn smtp_tls_none_parses() {
+        let t = notifications(
+            "[notifications.mail]\ntype = \"smtp\"\nhost = \"h\"\nfrom = \"a@e.com\"\nto = [\"b@e.com\"]\ntls = \"none\"\n",
+        );
+        match &t["mail"] {
+            NotificationTarget::Smtp { tls, starttls, .. } => {
+                assert_eq!(*tls, Some(SmtpTls::Plaintext));
+                assert!(starttls.is_none(), "the legacy alias stays unset");
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smtp_unknown_tls_mode_is_a_parse_error() {
+        let err = Config::from_toml(
+            "[notifications.mail]\ntype = \"smtp\"\nhost = \"h\"\nfrom = \"a@e.com\"\nto = [\"b@e.com\"]\ntls = \"ssl\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("ssl"), "{err}");
+    }
+
+    #[test]
+    fn resolve_smtp_tls_matrix() {
+        assert_eq!(resolve_smtp_tls(None, None), Ok(SmtpTls::Starttls));
+        assert_eq!(
+            resolve_smtp_tls(Some(SmtpTls::Plaintext), None),
+            Ok(SmtpTls::Plaintext)
+        );
+        // The legacy alias: true → STARTTLS, false → implicit TLS (never plaintext).
+        assert_eq!(resolve_smtp_tls(None, Some(true)), Ok(SmtpTls::Starttls));
+        assert_eq!(resolve_smtp_tls(None, Some(false)), Ok(SmtpTls::Implicit));
+        let err = resolve_smtp_tls(Some(SmtpTls::Starttls), Some(true)).unwrap_err();
+        assert!(err.contains("not both"), "{err}");
     }
 
     #[test]
@@ -1226,14 +1333,14 @@ mod tests {
                 assert_eq!(password.as_ref().unwrap().expose(), "pa:ss");
                 assert_eq!(from, "ops@example.com");
                 assert_eq!(to, &["a@x.com".to_string(), "b@y.com".to_string()]);
-                assert!(!*starttls, "explicit starttls=false honoured");
+                assert_eq!(*starttls, Some(false), "explicit starttls=false honoured");
             }
             other => panic!("expected smtp, got {other:?}"),
         }
     }
 
     #[test]
-    fn env_url_smtp_defaults_port_and_starttls() {
+    fn env_url_smtp_defaults_port_and_tls() {
         let cfg = build_notifications(
             HashMap::new(),
             env(&[(
@@ -1244,18 +1351,55 @@ mod tests {
         match &cfg.targets["mail"] {
             NotificationTarget::Smtp {
                 port,
+                tls,
                 starttls,
                 username,
                 password,
                 ..
             } => {
                 assert_eq!(*port, 587, "default submission port");
-                assert!(*starttls, "starttls defaults on");
+                assert!(tls.is_none(), "no tls param → resolver default (STARTTLS)");
+                assert!(starttls.is_none());
                 assert!(username.is_none());
                 assert!(password.is_none());
             }
             other => panic!("expected smtp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn env_url_tls_param() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[(
+                "FRESHDOCK_NOTIFY_MAIL_URL",
+                "smtp://mail.example.com:1025/?from=a@e.com&to=b@e.com&tls=none",
+            )]),
+        );
+        match &cfg.targets["mail"] {
+            NotificationTarget::Smtp { tls, starttls, .. } => {
+                assert_eq!(*tls, Some(SmtpTls::Plaintext));
+                assert!(starttls.is_none());
+            }
+            other => panic!("expected smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_url_rejects_tls_and_starttls_together() {
+        let err = parse_notify_url(
+            "mail",
+            "smtp://h/?from=a@e.com&to=b@e.com&tls=none&starttls=false",
+        )
+        .unwrap_err();
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn env_url_rejects_an_unknown_tls_mode() {
+        let err =
+            parse_notify_url("mail", "smtp://h/?from=a@e.com&to=b@e.com&tls=ssl").unwrap_err();
+        assert!(err.contains("ssl"), "the bad value is named: {err}");
     }
 
     #[test]

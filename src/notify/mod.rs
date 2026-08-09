@@ -21,7 +21,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::config::{NotificationConfig, NotificationTarget};
+use crate::config::{NotificationConfig, NotificationTarget, resolve_smtp_tls};
 use crate::format::short_digest;
 use crate::rollback::RollbackReason;
 use discord::DiscordNotifier;
@@ -229,6 +229,7 @@ fn build_target(
             password,
             from,
             to,
+            tls,
             starttls,
             triggers,
         } => (
@@ -241,7 +242,12 @@ fn build_target(
                 password,
                 from,
                 to,
-                starttls,
+                // A contradictory `tls` + `starttls` pair fails the target the
+                // same way a bad address does: warned and skipped, never fatal.
+                tls: resolve_smtp_tls(tls, starttls).map_err(|reason| NotifyError::Config {
+                    name: name.to_string(),
+                    reason,
+                })?,
             })?),
         ),
     };

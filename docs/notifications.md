@@ -82,9 +82,16 @@ chat_id   = "987654321"
 
 ### SMTP (email)
 
-An email with the message title as the subject. Defaults to STARTTLS on port 587;
-set `starttls = false` for implicit TLS (typically 465). `username` and `password`
-must be set together, or both omitted for an anonymous relay.
+An email with the message title as the subject. `username` and `password` must be
+set together, or both omitted for an anonymous relay.
+
+`tls` selects the transport security:
+
+| `tls` | Meaning | Typical port |
+|---|---|---|
+| `"starttls"` | upgrade the connection with STARTTLS — **the default** | 587 |
+| `"implicit"` | TLS from the first byte (SMTPS) | 465 |
+| `"none"` | no encryption at all — local catchers and development only | 1025 |
 
 ```toml
 [notifications.email]
@@ -95,9 +102,18 @@ username = "freshdock@example.com"
 password = "s3cr3t"              # or FRESHDOCK_NOTIFY_EMAIL_PASSWORD
 from     = "freshdock@example.com"
 to       = ["admin@example.com"]
-starttls = true
+tls      = "starttls"            # default
 triggers = ["failed"]
 ```
+
+`starttls = true|false` is the legacy alias kept for existing configs: `true` means
+`tls = "starttls"`, `false` means `tls = "implicit"` — never plaintext. Setting both
+`tls` and `starttls` is an error and the target is skipped, so pick one (prefer
+`tls`).
+
+`tls = "none"` sends credentials and message content in the clear. freshdock logs a
+warning for every plaintext target at startup; use it only against a catcher such as
+mailpit on `localhost`.
 
 See the [SMTP smoke-test playbook](manual-tests/smtp.md) to verify delivery against
 a local catcher.
@@ -121,7 +137,7 @@ backend:
 | `https` / `http` | `https://example.com/hooks/freshdock` | a generic **webhook** |
 | `discord` | `discord://TOKEN@WEBHOOK_ID` | a **Discord** webhook |
 | `telegram` | `telegram://BOT_TOKEN@telegram?chats=CHAT_ID` | a **Telegram** message |
-| `smtp` | `smtp://user:pass@host:587/?from=ops@x.com&to=a@x.com,b@y.com&starttls=true` | an **SMTP** email |
+| `smtp` | `smtp://user:pass@host:587/?from=ops@x.com&to=a@x.com,b@y.com&tls=starttls` | an **SMTP** email |
 
 ```bash
 # one Discord target, succeeded + failed only — no file involved
@@ -136,6 +152,9 @@ Notes:
   decodes them back. A Telegram token written as `id:secret` is rejoined for you.
 - SMTP `?to=` takes a comma list or repeated `to=`; Telegram uses the first
   `chats=` value.
+- SMTP `?tls=starttls|implicit|none` mirrors the file key and defaults to
+  `starttls`; the legacy `?starttls=true|false` still works, but passing both is an
+  error and the target is skipped.
 - An invalid URL or unknown scheme is **warned and skipped**, never fatal — the
   same resilience as a malformed file target.
 - If a `<NAME>` is already declared in the file, the file target wins and the env
