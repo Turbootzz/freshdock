@@ -32,6 +32,7 @@ leaving you with a dead service.
 | **Five registries** | Docker Hub, GHCR, Quay.io, lscr.io, and any OCI bearer-token registry — anonymous or authenticated. |
 | **Four notifiers** | Webhook, Discord, Telegram, and SMTP, each subscribable to the events it cares about. |
 | **Lifecycle hooks** | Run commands inside the container around an update: a pre-update hook can veto/defer (exit 75), a post-update hook handles maintenance like cache clears. |
+| **VPN stacks survive updates** | Containers that route through another container's network (`network_mode: container:X` — the gluetun pattern) are re-attached automatically after that container updates, instead of being left offline. |
 | **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly — migrate a fleet without relabelling. |
 | **Optional cleanup** | Remove superseded images after a healthy update; optionally prune dangling images. |
 | **Single static binary** | ≤ 10 MB, no runtime dependencies. No JVM, no Go runtime, no 100 MB image to manage your homelab. |
@@ -166,7 +167,7 @@ A Podman host in a non-standard location needs no special support — point
 
 ## Status & roadmap
 
-Phases 0–7 are complete and freshdock is at its first stable release, `1.0.0`.
+Phases 0–7 are complete and freshdock has been stable since `1.0.0`.
 The full plan and architecture live in [the roadmap](https://turbootzz.github.io/freshdock/PLAN.html);
 release mechanics in [RELEASE.md](RELEASE.md); per-version notes in
 [CHANGELOG.md](CHANGELOG.md).
