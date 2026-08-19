@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2](https://github.com/Turbootzz/freshdock/compare/v1.4.1...v1.4.2) - 2026-08-19
+
+### Fixed
+
+- *(probe)* treat a republished multi-arch index as up to date ([#75](https://github.com/Turbootzz/freshdock/pull/75))
+
+### Other
+
+- *(readme)* refresh status line and mention network-mode re-attach ([#72](https://github.com/Turbootzz/freshdock/pull/72))
+
 ## [1.4.1](https://github.com/Turbootzz/freshdock/compare/v1.4.0...v1.4.1) - 2026-08-09
 
 ### Fixed
