@@ -9,6 +9,7 @@ the reference page with the full story.
 - [`permission denied` on the Docker socket](#permission-denied-on-the-docker-socket)
 - [freshdock sees my container but never updates it](#freshdock-sees-my-container-but-never-updates-it)
 - [My container doesn't appear in `check` at all](#my-container-doesnt-appear-in-check-at-all)
+- [`check` reports an update that never goes away](#check-reports-an-update-that-never-goes-away)
 - [A container is reported as `pinned (no check)`](#a-container-is-reported-as-pinned-no-check)
 - [Updates fail with a read-only socket](#updates-fail-with-a-read-only-socket)
 - [A sidecar on `network_mode: container:X` lost its network](#a-sidecar-on-network_mode-containerx-lost-its-network)
@@ -78,6 +79,24 @@ docker inspect --format '{{json .Config.Labels}}' <container> | grep freshdock
 ```
 
 → [Configuration: labels](configuration.md#labels)
+
+## `check` reports an update that never goes away
+
+Older versions compared upstream against a single entry of the local image's
+`RepoDigests`. Docker records one image under **several** manifest digests once
+a multi-arch index is republished without a change to your platform's manifest,
+so the comparison could never match again: `update? = yes` survived
+`docker pull`, `freshdock recreate`, and every scheduled run.
+
+Upgrade past [#74](https://github.com/Turbootzz/freshdock/issues/74). On an
+older build, drop the stale digest references:
+
+```bash
+docker image inspect <image> --format '{{json .RepoDigests}}'
+docker rmi <repo>@sha256:<stale digest>
+```
+
+→ [`freshdock check`](cli-reference.md#freshdock-check)
 
 ## A container is reported as `pinned (no check)`
 

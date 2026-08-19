@@ -88,3 +88,8 @@ matches if **either** matches — the classic Vixie-cron union. `0 4 13 * 5` fir
    [notification](notifications.md) is dispatched (once per distinct digest).
 3. For the updating modes: if a newer digest exists, the container is recreated and
    [health-gated, with rollback on failure](health-and-rollback.md).
+
+The digest is compared for **membership**: Docker can record one local image
+under several manifest digests, and the container counts as up to date when
+upstream's digest is any of them — otherwise a republished multi-arch index
+would recreate a healthy container on every run.
