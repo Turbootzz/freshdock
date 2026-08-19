@@ -124,13 +124,16 @@ fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String)
     let dash = || "-".to_string();
     match outcome {
         ProbeOutcome::Fetched { local, latest } => {
-            let current = local.as_deref().map(short_digest).unwrap_or_else(dash);
-            let update = local
-                .as_deref()
-                .map(|l| if l == latest { "no" } else { "yes" })
-                .unwrap_or("?")
-                .to_string();
-            (current, short_digest(latest), update)
+            let current = local
+                .current_for(latest)
+                .map(short_digest)
+                .unwrap_or_else(dash);
+            let update = match local.update_available(latest) {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "?",
+            };
+            (current, short_digest(latest), update.to_string())
         }
         ProbeOutcome::Pinned => {
             let current = pinned_digest(image).map(short_digest).unwrap_or_else(dash);
@@ -224,6 +227,7 @@ mod tests {
 
     const DIG_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIG_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
         ContainerSummary {
@@ -250,13 +254,29 @@ mod tests {
 
     impl FakeDocker {
         fn new(containers: Vec<ContainerSummary>, repo_digests: &[(&str, &str)]) -> Self {
-            let repo_digests = repo_digests
+            let one_each: Vec<(&str, &[&str])> = repo_digests
                 .iter()
-                .map(|(img, rd)| ((*img).to_owned(), vec![(*rd).to_owned()]))
+                .map(|(img, rd)| (*img, std::slice::from_ref(rd)))
                 .collect();
+            Self::with_digests(containers, &one_each)
+        }
+        /// Images recorded under several manifest digests each — what a
+        /// republished multi-arch index leaves behind (#74).
+        fn with_digests(
+            containers: Vec<ContainerSummary>,
+            repo_digests: &[(&str, &[&str])],
+        ) -> Self {
             Self {
                 containers,
-                repo_digests,
+                repo_digests: repo_digests
+                    .iter()
+                    .map(|(img, rds)| {
+                        (
+                            (*img).to_owned(),
+                            rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                        )
+                    })
+                    .collect(),
                 inspect_calls: AtomicUsize::new(0),
             }
         }
@@ -353,6 +373,79 @@ mod tests {
             cells[0][5], "yes",
             "differing digests must report an update"
         );
+    }
+
+    #[tokio::test]
+    async fn republished_index_already_pulled_renders_no() {
+        // Issue #74: Docker appends an index digest per pull, so the oldest one
+        // sits at RepoDigests[0] forever. Upstream's current digest is further
+        // down the list — membership decides, not position.
+        let docker = FakeDocker::with_digests(
+            vec![summary(
+                "caddy",
+                "caddy:latest",
+                &[("freshdock.enable", "true")],
+            )],
+            &[(
+                "caddy:latest",
+                &[&format!("caddy@{DIG_A}"), &format!("caddy@{DIG_B}")],
+            )],
+        );
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
+        assert_eq!(cells[0][5], "no", "the upstream digest is already local");
+        assert_eq!(
+            cells[0][3],
+            short_digest(DIG_B),
+            "the current digest must be the one upstream resolves to, not the oldest recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_local_image_still_renders_yes() {
+        // The guard on the fix: several local digests, none of them upstream's.
+        let docker = FakeDocker::with_digests(
+            vec![summary(
+                "caddy",
+                "caddy:latest",
+                &[("freshdock.enable", "true")],
+            )],
+            &[(
+                "caddy:latest",
+                &[&format!("caddy@{DIG_A}"), &format!("caddy@{DIG_B}")],
+            )],
+        );
+        let registry = FakeRegistry::new(DIG_C);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
+        assert_eq!(cells[0][5], "yes");
+        assert_eq!(
+            cells[0][3],
+            short_digest(DIG_A),
+            "with no match the first recorded digest is still what we show"
+        );
+    }
+
+    #[tokio::test]
+    async fn locally_built_image_with_no_repo_digests_renders_unknown() {
+        // Nothing to compare against: report `?`, never `yes` — recreating
+        // would replace a local build with an unrelated registry image.
+        let docker = FakeDocker::with_digests(
+            vec![summary("app", "myapp:dev", &[("freshdock.enable", "true")])],
+            &[("myapp:dev", &[])],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+            .await
+            .unwrap();
+        assert_eq!(cells[0][3], "-", "no current digest is known");
+        assert_eq!(cells[0][5], "?");
     }
 
     #[tokio::test]

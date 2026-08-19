@@ -51,6 +51,11 @@ can't be resolved, the **`latest digest`** column shows the reason instead:
 | `network unavailable` | The registry couldn't be reached; nothing is assumed. |
 | `error: …` | The probe failed for another reason (the message follows). |
 
+Docker can record one local image under **several** manifest digests — pulling a tag
+whose multi-arch index was republished without a change to your platform's manifest
+adds the new index digest beside the old one. freshdock reports `no` when the upstream
+digest is any of them, and shows that digest as `current digest`.
+
 Examples:
 
 ```bash

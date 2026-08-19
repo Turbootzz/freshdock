@@ -13,15 +13,45 @@ use tracing::warn;
 use crate::docker::check::DockerCheck;
 use crate::registry::{ImageRef, Registry, RegistryError};
 
+/// Every manifest digest the local image is recorded under. A republished
+/// multi-arch index leaves one image carrying several, so upstream is compared
+/// for membership rather than against one entry (#74).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LocalDigests(Vec<String>);
+
+impl LocalDigests {
+    pub fn new(digests: Vec<String>) -> Self {
+        Self(digests)
+    }
+
+    /// `None` when no local digest is known (a locally-built image, or a failed
+    /// inspect) — an `Option` so no caller can silently read unknown as an
+    /// available update and recreate a container it cannot pull.
+    pub fn update_available(&self, latest: &str) -> Option<bool> {
+        (!self.0.is_empty()).then(|| !self.contains(latest))
+    }
+
+    /// The digest to show as "current": the one upstream serves when we already
+    /// carry it, otherwise whichever Docker reports first.
+    pub fn current_for<'a>(&'a self, latest: &'a str) -> Option<&'a str> {
+        if self.contains(latest) {
+            return Some(latest);
+        }
+        self.0.first().map(String::as_str)
+    }
+
+    fn contains(&self, digest: &str) -> bool {
+        self.0.iter().any(|d| d == digest)
+    }
+}
+
 /// Verdict of probing one image reference for an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// The upstream digest was fetched. `local` is the resolved local manifest
-    /// digest (`None` when it couldn't be determined); `latest` is upstream.
-    Fetched {
-        local: Option<String>,
-        latest: String,
-    },
+    /// The upstream digest was fetched. `local` holds every manifest digest the
+    /// local image is recorded under; ask
+    /// [`update_available`](LocalDigests::update_available) for the verdict.
+    Fetched { local: LocalDigests, latest: String },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
     /// The registry needs credentials we don't have. Reported, not errored —
@@ -54,10 +84,10 @@ pub async fn probe_image(
     // digest the registry returns via Docker-Content-Digest. Resolve the local
     // manifest digest from `image inspect → RepoDigests`.
     let local = match docker.inspect_image_repo_digests(image).await {
-        Ok(digests) => manifest_digest_for(image, &digests),
+        Ok(digests) => LocalDigests::new(local_manifest_digests(image, &digests)),
         Err(e) => {
             warn!(image = %image, error = %e, "image inspect failed; current digest will be unknown");
-            None
+            LocalDigests::default()
         }
     };
 
@@ -106,16 +136,23 @@ pub(crate) fn pinned_digest(image: &str) -> Option<&str> {
     }
 }
 
-/// Find the manifest digest for an image reference inside an `ImageInspect.RepoDigests`
-/// list. RepoDigests entries look like `repo@sha256:<hex>`; we match on the repo
-/// portion (everything before `@`) against the image's repo (the input with any
-/// `@digest` and any trailing `:tag` stripped) and return the digest.
-pub(crate) fn manifest_digest_for(image: &str, repo_digests: &[String]) -> Option<String> {
-    let want_repo = strip_tag(image.split('@').next()?);
-    repo_digests.iter().find_map(|rd| {
-        let (repo, digest) = rd.split_once('@')?;
-        (repo == want_repo).then(|| digest.to_owned())
-    })
+/// Collect every manifest digest for an image reference from an
+/// `ImageInspect.RepoDigests` list. RepoDigests entries look like
+/// `repo@sha256:<hex>`; we match on the repo portion (everything before `@`)
+/// against the image's repo (the input with any `@digest` and any trailing
+/// `:tag` stripped) and keep the digest.
+///
+/// All matching entries are returned: they name the same local image, and any
+/// of them may be the one upstream currently resolves to.
+pub(crate) fn local_manifest_digests(image: &str, repo_digests: &[String]) -> Vec<String> {
+    let want_repo = strip_tag(image.split('@').next().unwrap_or(image));
+    repo_digests
+        .iter()
+        .filter_map(|rd| {
+            let (repo, digest) = rd.split_once('@')?;
+            (repo == want_repo).then(|| digest.to_owned())
+        })
+        .collect()
 }
 
 /// Strip a trailing `:tag` from an image reference without confusing it for a
@@ -143,8 +180,90 @@ mod tests {
 
     const DIG_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIG_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-    // --- manifest_digest_for / strip_tag ---
+    // --- republished multi-arch index (issue #74) ---
+
+    #[test]
+    fn collects_every_repo_digest_recorded_for_the_image() {
+        // One local image, several index digests — what repeated pulls of a
+        // republished multi-arch tag leave behind.
+        let repo_digests = [
+            format!("caddy@{DIG_A}"),
+            format!("caddy@{DIG_B}"),
+            format!("caddy@{DIG_C}"),
+        ];
+        assert_eq!(
+            local_manifest_digests("caddy:latest", &repo_digests).as_slice(),
+            [DIG_A.to_owned(), DIG_B.to_owned(), DIG_C.to_owned()]
+        );
+    }
+
+    #[test]
+    fn collecting_digests_ignores_other_repos() {
+        let repo_digests = [format!("redis@{DIG_A}"), format!("caddy@{DIG_B}")];
+        assert_eq!(
+            local_manifest_digests("caddy:latest", &repo_digests).as_slice(),
+            [DIG_B.to_owned()]
+        );
+    }
+
+    #[test]
+    fn local_digests_match_upstream_anywhere_in_the_list() {
+        let local = LocalDigests::new(vec![DIG_A.to_owned(), DIG_C.to_owned()]);
+        assert_eq!(
+            local.update_available(DIG_C),
+            Some(false),
+            "a later entry still counts as local"
+        );
+        assert_eq!(local.update_available(DIG_B), Some(true));
+    }
+
+    #[test]
+    fn no_local_digest_is_unknown_rather_than_an_update() {
+        assert_eq!(LocalDigests::default().update_available(DIG_A), None);
+    }
+
+    #[test]
+    fn current_digest_prefers_the_entry_upstream_resolves_to() {
+        let local = LocalDigests::new(vec![DIG_A.to_owned(), DIG_C.to_owned()]);
+        assert_eq!(local.current_for(DIG_C), Some(DIG_C));
+        assert_eq!(
+            local.current_for(DIG_B),
+            Some(DIG_A),
+            "with no match the first entry is shown, as before"
+        );
+        assert_eq!(LocalDigests::default().current_for(DIG_A), None);
+    }
+
+    #[tokio::test]
+    async fn republished_index_carrying_the_upstream_digest_is_up_to_date() {
+        // Issue #74: comparing upstream against one entry of RepoDigests can
+        // never match once the platform manifest stops changing.
+        let docker = FakeDocker::with_digests(&[(
+            "caddy:latest",
+            &[
+                &format!("caddy@{DIG_A}"),
+                &format!("caddy@{DIG_B}"),
+                &format!("caddy@{DIG_C}"),
+            ],
+        )]);
+        let registry = FakeRegistry::new(DIG_C);
+
+        let ProbeOutcome::Fetched { local, latest } =
+            probe_image(&docker, &registry, "caddy:latest").await
+        else {
+            panic!("expected a fetched outcome");
+        };
+        assert_eq!(
+            local.update_available(&latest),
+            Some(false),
+            "the upstream digest is already present locally"
+        );
+        assert_eq!(local.current_for(&latest), Some(DIG_C));
+    }
+
+    // --- local_manifest_digests / strip_tag ---
 
     #[test]
     fn extracts_manifest_digest_when_repo_matches() {
@@ -154,8 +273,11 @@ mod tests {
                 .to_owned(),
         ];
         assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            local_manifest_digests(image, &repo_digests).as_slice(),
+            [
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned()
+            ]
         );
     }
 
@@ -169,21 +291,24 @@ mod tests {
                 .to_owned(),
         ];
         assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+            local_manifest_digests(image, &repo_digests).as_slice(),
+            [
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    .to_owned()
+            ]
         );
     }
 
     #[test]
-    fn returns_none_when_no_repo_digest_matches() {
+    fn returns_no_digests_when_no_repo_digest_matches() {
         let image = "nginx:alpine";
         let repo_digests = ["redis@sha256:dead".to_owned()];
-        assert_eq!(manifest_digest_for(image, &repo_digests), None);
+        assert!(local_manifest_digests(image, &repo_digests).is_empty());
     }
 
     #[test]
-    fn returns_none_for_empty_repo_digests() {
-        assert_eq!(manifest_digest_for("nginx:alpine", &[]), None);
+    fn returns_no_digests_for_empty_repo_digests() {
+        assert!(local_manifest_digests("nginx:alpine", &[]).is_empty());
     }
 
     #[test]
@@ -197,8 +322,11 @@ mod tests {
                 .to_owned(),
         ];
         assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+            local_manifest_digests(image, &repo_digests).as_slice(),
+            [
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_owned()
+            ]
         );
     }
 
@@ -211,8 +339,11 @@ mod tests {
                 .to_owned(),
         ];
         assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:4444444444444444444444444444444444444444444444444444444444444444")
+            local_manifest_digests(image, &repo_digests).as_slice(),
+            [
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+                    .to_owned()
+            ]
         );
     }
 
@@ -226,8 +357,11 @@ mod tests {
                 .to_owned(),
         ];
         assert_eq!(
-            manifest_digest_for(image, &repo_digests).as_deref(),
-            Some("sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef")
+            local_manifest_digests(image, &repo_digests).as_slice(),
+            [
+                "sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
+                    .to_owned()
+            ]
         );
     }
 
@@ -263,6 +397,22 @@ mod tests {
                 repo_digests: repo_digests
                     .iter()
                     .map(|(img, rd)| ((*img).to_owned(), vec![(*rd).to_owned()]))
+                    .collect(),
+                inspect_calls: AtomicUsize::new(0),
+            }
+        }
+        /// Several RepoDigests entries for one image — what a republished
+        /// multi-arch index leaves behind (issue #74).
+        fn with_digests(repo_digests: &[(&str, &[&str])]) -> Self {
+            Self {
+                repo_digests: repo_digests
+                    .iter()
+                    .map(|(img, rds)| {
+                        (
+                            (*img).to_owned(),
+                            rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                        )
+                    })
                     .collect(),
                 inspect_calls: AtomicUsize::new(0),
             }
@@ -337,7 +487,7 @@ mod tests {
         assert_eq!(
             outcome,
             ProbeOutcome::Fetched {
-                local: Some(DIG_A.to_owned()),
+                local: LocalDigests::new(vec![DIG_A.to_owned()]),
                 latest: DIG_A.to_owned(),
             }
         );
@@ -351,7 +501,7 @@ mod tests {
         assert_eq!(
             outcome,
             ProbeOutcome::Fetched {
-                local: Some(DIG_A.to_owned()),
+                local: LocalDigests::new(vec![DIG_A.to_owned()]),
                 latest: DIG_B.to_owned(),
             }
         );
@@ -367,7 +517,7 @@ mod tests {
         assert_eq!(
             outcome,
             ProbeOutcome::Fetched {
-                local: None,
+                local: LocalDigests::default(),
                 latest: DIG_A.to_owned(),
             }
         );

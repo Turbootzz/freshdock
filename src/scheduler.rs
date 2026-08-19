@@ -304,13 +304,16 @@ async fn process_container<D, R>(
 {
     match probe::probe_image(docker, registry, image).await {
         ProbeOutcome::Fetched { local, latest } => {
-            let Some(local) = local.as_deref() else {
-                debug!(container = %name, %latest, "scheduler: local digest unknown; not updating");
-                return;
-            };
-            if local == latest {
-                debug!(container = %name, "scheduler: up to date");
-                return;
+            match local.update_available(&latest) {
+                None => {
+                    debug!(container = %name, %latest, "scheduler: local digest unknown; not updating");
+                    return;
+                }
+                Some(false) => {
+                    debug!(container = %name, "scheduler: up to date");
+                    return;
+                }
+                Some(true) => {}
             }
             match policy.mode {
                 Mode::Watch => {
@@ -566,7 +569,9 @@ mod tests {
     /// counts `create_from_spec` calls so "did a recreate happen?" is checkable.
     struct FakeNode {
         containers: Mutex<Vec<ContainerSummary>>,
-        local_digest: String,
+        /// Every digest the local image is recorded under — a list so the
+        /// republished-index case (#74) is expressible.
+        local_digests: Vec<String>,
         list_fails: bool,
         creates: AtomicUsize,
         /// State the (recreated) container reports to the health gate. Default
@@ -578,9 +583,14 @@ mod tests {
 
     impl FakeNode {
         fn new(containers: Vec<ContainerSummary>, local_digest: &str) -> Self {
+            Self::with_digests(containers, &[local_digest])
+        }
+        /// The image recorded under several manifest digests, as a republished
+        /// multi-arch index leaves it (#74).
+        fn with_digests(containers: Vec<ContainerSummary>, local_digests: &[&str]) -> Self {
             Self {
                 containers: Mutex::new(containers),
-                local_digest: local_digest.to_owned(),
+                local_digests: local_digests.iter().map(|d| (*d).to_owned()).collect(),
                 list_fails: false,
                 creates: AtomicUsize::new(0),
                 health_state: ContainerRuntimeState::HealthHealthy,
@@ -628,7 +638,11 @@ mod tests {
             // Report the local digest under the image's repo so the probe's
             // RepoDigests match succeeds.
             let repo = image.split(':').next().unwrap_or(image);
-            Ok(vec![format!("{repo}@{}", self.local_digest)])
+            Ok(self
+                .local_digests
+                .iter()
+                .map(|d| format!("{repo}@{d}"))
+                .collect())
         }
     }
 
@@ -820,6 +834,45 @@ mod tests {
         let reg = FakeRegistry::new(DIG_A); // same digest
         one_tick(&node, &reg).await;
         assert_eq!(node.creates(), 0, "matching digests must not recreate");
+    }
+
+    #[tokio::test]
+    async fn live_container_is_not_recreated_when_the_index_was_republished() {
+        // Issue #74: the local image is still recorded under an older index
+        // digest, but upstream's current digest is among its RepoDigests — the
+        // platform manifest never changed, so there is nothing to apply.
+        let node = FakeNode::with_digests(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[("freshdock.enable", "true"), ("freshdock.mode", "live")],
+            )],
+            &[DIG_A, DIG_B],
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        one_tick(&node, &reg).await;
+        assert_eq!(
+            node.creates(),
+            0,
+            "the upstream digest is already present locally — recreating would loop forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn locally_built_container_with_no_repo_digests_is_not_recreated() {
+        // Nothing to compare against; recreating would pull an unrelated
+        // registry image over a local build.
+        let node = FakeNode::with_digests(
+            vec![summary(
+                "app",
+                "alpine:3.19",
+                &[("freshdock.enable", "true"), ("freshdock.mode", "live")],
+            )],
+            &[],
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        one_tick(&node, &reg).await;
+        assert_eq!(node.creates(), 0, "an unknown local digest must not update");
     }
 
     #[tokio::test]
