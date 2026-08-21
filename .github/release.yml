@@ -1,0 +1,6 @@
+# Config for GitHub's auto-generated release notes (used by release.yml).
+# Hides the release-plz version-bump PR, which is authored by the Actions bot.
+changelog:
+  exclude:
+    authors:
+      - github-actions[bot]

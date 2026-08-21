@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["docker", "container", "watchtower", "auto-update", "devops"]
 categories = ["command-line-utilities", "development-tools"]
 # Ship code + README/LICENSE only; repo guides/CI don't help `cargo install`.
-exclude = [".github/", "docs/", "examples/", "RELEASE.md", "RELEASE_NOTES.md", "freshdock.toml.example", "book.toml", "book/"]
+exclude = [".github/", "docs/", "examples/", "RELEASE.md", "freshdock.toml.example", "book.toml", "book/"]
 
 [dependencies]
 bollard = "0.21"
