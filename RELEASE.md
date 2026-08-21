@@ -54,8 +54,10 @@ release-plz here runs `release-pr` **only**; it never tags, releases, or publish
 - [ ] The release-plz PR is merged, so `Cargo.toml` `version` and `CHANGELOG.md`
       are updated. The tag you push must equal that version (the `publish` job
       hard-fails on a mismatch).
-- [ ] `RELEASE_NOTES.md` is updated for this version, including the `blob/<tag>`
-      links (they must point at the tag being released).
+
+Release notes need no manual step: the GitHub Release body is auto-generated
+from the merged PRs since the previous tag (`generate_release_notes` in
+`release.yml`).
 
 ## Cut the release (MANUAL)
 
@@ -77,7 +79,7 @@ Then in the Actions tab:
 - [ ] `docker pull ghcr.io/turbootzz/freshdock:<version>` and `:latest` work for
       amd64, arm64, and armv7.
 - [ ] The GitHub Release page lists the three binaries and `SHA256SUMS`.
-- [ ] Release notes link to `docs/PLAN.md` and the migration guide.
+- [ ] The release body shows the auto-generated list of merged PRs.
 
 ## Recommended: rehearse with a release candidate first
 
@@ -88,5 +90,5 @@ Cut `v1.0.0-rc.1` exactly as above. Because the tag contains a hyphen:
   opt in with `cargo install freshdock --version 1.0.0-rc.1`).
 
 This exercises the whole pipeline — including the approval gate — without burning
-the `1.0.0` number. After beta sign-off, bump `Cargo.toml` to `1.0.0`, update the
-notes, and tag `v1.0.0`.
+the `1.0.0` number. After beta sign-off, bump `Cargo.toml` to `1.0.0` and tag
+`v1.0.0`.

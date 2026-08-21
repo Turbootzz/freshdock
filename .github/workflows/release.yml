@@ -164,12 +164,16 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The release body is GitHub's auto-generated notes (the list of merged
+      # PRs since the previous tag). A hand-written RELEASE_NOTES.md used to be
+      # attached here, but it was forgotten on every release after v1.0.0 and
+      # each release shipped with the stale v1.0.0 text.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           prerelease: ${{ steps.pre.outputs.prerelease }}
-          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
           files: |
             dist/freshdock-amd64
             dist/freshdock-arm64
