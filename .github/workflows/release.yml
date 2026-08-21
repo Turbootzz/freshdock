@@ -164,10 +164,7 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The release body is GitHub's auto-generated notes (the list of merged
-      # PRs since the previous tag). A hand-written RELEASE_NOTES.md used to be
-      # attached here, but it was forgotten on every release after v1.0.0 and
-      # each release shipped with the stale v1.0.0 text.
+      # Body = GitHub's auto-generated notes (merged PRs since previous tag).
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
