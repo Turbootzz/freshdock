@@ -81,7 +81,8 @@ docker run -d --name freshdock --restart unless-stopped \
 ```
 
 Prebuilt static-musl binaries (amd64 / arm64 / armv7) are attached to each
-[release](https://github.com/Turbootzz/freshdock/releases). From source:
+[release](https://github.com/Turbootzz/freshdock/releases), together with a
+`SHA256SUMS` file to verify them (`sha256sum -c SHA256SUMS`). From source:
 `git clone … && just build` (binary at `target/release/freshdock`).
 
 ## Update modes

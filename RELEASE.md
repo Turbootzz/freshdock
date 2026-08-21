@@ -56,8 +56,15 @@ release-plz here runs `release-pr` **only**; it never tags, releases, or publish
       hard-fails on a mismatch).
 
 Release notes need no manual step: the GitHub Release body is auto-generated
-from the merged PRs since the previous tag (`generate_release_notes` in
-`release.yml`).
+from the merged PRs since the previous release (`generate_release_notes` in
+`release.yml`, filtered by `.github/release.yml`). Two caveats, both fixable
+after the fact with `gh release edit`:
+
+- GitHub picks the previous *release* as the baseline, prereleases included. A
+  stable release cut right after an `-rc` rehearsal only lists the PRs merged
+  since the rc; regenerate against the last stable tag if that matters.
+- Re-running the `release` job on an existing release *appends* the generated
+  notes to the body instead of replacing it.
 
 ## Cut the release (MANUAL)
 
