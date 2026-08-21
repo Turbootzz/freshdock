@@ -162,6 +162,19 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # On a re-run the action appends freshly generated notes to the existing
+      # body (softprops/action-gh-release#827), so only generate on first create.
+      - name: Check for existing release
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Body = GitHub's auto-generated notes: merged PRs since the previous
       # release (prereleases count as "previous"). Filtered by .github/release.yml.
       - name: Create GitHub Release
@@ -169,7 +182,7 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           prerelease: ${{ steps.pre.outputs.prerelease }}
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.exists.outputs.new == 'true' }}
           files: |
             dist/freshdock-amd64
             dist/freshdock-arm64
