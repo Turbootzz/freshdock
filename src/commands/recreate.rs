@@ -179,7 +179,9 @@ fn print_rollout(report: &RolloutReport) {
             RolloutStep::OneShotCompleted { container } => {
                 println!("  {container}: re-ran to a successful exit")
             }
-            RolloutStep::Updated { container, new_id } => {
+            RolloutStep::Updated {
+                container, new_id, ..
+            } => {
                 println!("  {container}: updated and healthy (new id {new_id})")
             }
             RolloutStep::Restarted { container } => {

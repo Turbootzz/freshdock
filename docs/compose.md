@@ -73,6 +73,16 @@ There is exactly one exception, and it is deliberately narrow.
 > precisely the case above. Requiring a label there would leave the sharp edge
 > in place, since nobody labels their migration service.
 
+The exception covers an *absent* label, not a quiet one. A service in
+[`watch` mode](scheduling.md#modes) is never touched, one-shot or not, because
+watch means "tell me, never restart me" and re-running a one-shot is a restart.
+
+> **This matters under [`watch_all`](configuration.md#watching-every-container).**
+> `watch_all` enables every container but leaves its mode at `watch` until
+> `[settings] default_mode` says otherwise, so on that configuration a rollout
+> has nothing it is allowed to do. Set `default_mode` to an updating mode, or
+> label the services you want rolled out.
+
 Everything else follows the ordinary rules:
 
 | Project member | Rolled out? |
@@ -80,6 +90,7 @@ Everything else follows the ordinary rules:
 | Labelled `freshdock.enable=true` (or enabled by `watch_all`), on the moved image | **Yes.** |
 | Unlabelled, and another service waits on it with `service_completed_successfully` | **Yes**, re-run as a one-shot. |
 | Unlabelled and long-running, even on the same image | No. Sharing an image is not consent. |
+| In `watch` mode | No. Watch means detect and report, never restart, and re-running a one-shot is a restart. Sharing an image with a container that does update is not a way around it. |
 | `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or `freshdock.mode=off` | No. An explicit opt-out always wins, one-shots included. |
 | Stopped, and not a one-shot | No. If you stopped it, freshdock will not start it. |
 | A one-shot that is currently running | No. It is mid-run, and stomping it would kill a migration in flight. This holds even for an explicit `freshdock recreate` of that container. |

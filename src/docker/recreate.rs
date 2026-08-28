@@ -659,6 +659,10 @@ pub async fn recreate_one_shot(
                 archive = %cycle.old_name,
                 "one-shot failed; leaving the failed container and its archive in place so the logs survive"
             );
+            // Past the stop their namespace is already gone, and an exited
+            // one-shot is nothing to re-attach to. Name them so they are not
+            // lost from the record.
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
             Ok(OneShotOutcome::Failed { exit_code })
         }
         ExitOutcome::TimedOut => {
@@ -667,6 +671,7 @@ pub async fn recreate_one_shot(
                 archive = %cycle.old_name,
                 "one-shot did not finish within its timeout; leaving it running so its logs survive"
             );
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
             Ok(OneShotOutcome::TimedOut)
         }
     }

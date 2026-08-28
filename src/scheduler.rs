@@ -509,7 +509,9 @@ where
 }
 
 /// Log a finished rollout and notify on it. Success stays per-container, the
-/// notification operators already have rules for; an abort is per project.
+/// notification operators already have rules for, and each one honours its own
+/// `freshdock.notify`. An abort is per project, so it follows the policy of the
+/// container that triggered the rollout.
 async fn report_rollout(
     report: &RolloutReport,
     policy: &Policy,
@@ -522,9 +524,16 @@ async fn report_rollout(
             RolloutStep::OneShotCompleted { container } => {
                 info!(project = %report.project, %container, "scheduler: rollout re-ran one-shot")
             }
-            RolloutStep::Updated { container, new_id } => {
+            RolloutStep::Updated {
+                container,
+                new_id,
+                notify,
+            } => {
                 info!(project = %report.project, %container, %new_id, "scheduler: rollout updated service");
-                if policy.notify {
+                // This container's own `freshdock.notify`, not the trigger's: a
+                // sibling that opted out of notifications must not be announced
+                // just because the container that started the rollout opted in.
+                if *notify {
                     dispatcher
                         .dispatch(&NotifyEvent::UpdateSucceeded {
                             container: container.clone(),
@@ -1399,17 +1408,20 @@ mod tests {
 
     /// A running, live-mode compose member of project `stack`.
     fn compose_summary(service: &str, deps: &str) -> ContainerSummary {
-        summary(
-            &format!("stack-{service}-1"),
-            COMPOSE_IMAGE,
-            &[
-                ("freshdock.enable", "true"),
-                ("freshdock.mode", "live"),
-                (crate::compose::LABEL_PROJECT, "stack"),
-                (crate::compose::LABEL_SERVICE, service),
-                (crate::compose::LABEL_DEPENDS_ON, deps),
-            ],
-        )
+        compose_summary_with(service, deps, &[])
+    }
+
+    /// As [`compose_summary`], plus any extra freshdock labels.
+    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerSummary {
+        let mut labels = vec![
+            ("freshdock.enable", "true"),
+            ("freshdock.mode", "live"),
+            (crate::compose::LABEL_PROJECT, "stack"),
+            (crate::compose::LABEL_SERVICE, service),
+            (crate::compose::LABEL_DEPENDS_ON, deps),
+        ];
+        labels.extend_from_slice(extra);
+        summary(&format!("stack-{service}-1"), COMPOSE_IMAGE, &labels)
     }
 
     /// The same container as `list_project` reports it.
@@ -1504,6 +1516,54 @@ mod tests {
             1,
             "the aborted rollout owns every member it planned, reached or not"
         );
+    }
+
+    #[tokio::test]
+    async fn a_sibling_that_opted_out_of_notifications_is_not_announced() {
+        // Both are updated by one rollout, but only `web` asked to be told
+        // about it. The trigger's policy must not speak for the other.
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "succeeded", "container": "stack-web-1"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "succeeded", "container": "stack-worker-1"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let running = vec![
+            compose_summary_with("web", "", &[("freshdock.notify", "true")]),
+            compose_summary_with("worker", "", &[("freshdock.notify", "false")]),
+        ];
+        let members = running.iter().map(compose_member).collect();
+        let node = FakeNode::new(running, DIG_A).in_project(members);
+        let reg = FakeRegistry::new(DIG_B);
+
+        let (_tx, rx) = watch::channel(false);
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &rx,
+            &webhook_dispatcher(server.uri()),
+            ResolvedSettings::default(),
+        )
+        .await;
+
+        assert_eq!(node.creates(), 2, "both are still updated");
     }
 
     #[tokio::test]

@@ -87,6 +87,8 @@ pub enum SkipReason {
     OptedOut,
     /// No enable label, and nothing in the project waits for it to complete.
     NotEnabled,
+    /// `freshdock.mode=watch`: detect and report, never restart.
+    WatchOnly,
     /// Labels present but unparseable.
     InvalidLabels(String),
     /// Stopped and not a one-shot. freshdock does not start what you stopped.
@@ -104,6 +106,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NotEnabled => f.write_str(
                 "not opted into freshdock, and nothing in the project waits for it to complete",
             ),
+            SkipReason::WatchOnly => f.write_str("in watch mode, which never restarts a container"),
             SkipReason::InvalidLabels(e) => write!(f, "invalid freshdock labels: {e}"),
             SkipReason::StoppedService => {
                 f.write_str("stopped, and not a one-shot; leaving it stopped")
@@ -257,6 +260,15 @@ pub fn plan(
                 continue;
             }
         };
+        // Watch means detect and report, never restart, and re-running a
+        // one-shot is a restart. Checked ahead of the bypass below so an
+        // explicit `freshdock.mode=watch` on a migration is still honoured.
+        // Note this is the *resolved* mode, so under `watch_all` with the
+        // default mode left at `watch` a rollout has nothing to do at all.
+        if policy.mode == Mode::Watch {
+            skip(SkipReason::WatchOnly);
+            continue;
+        }
         // The narrow bypass, see the module docs.
         let opted_in = policy.enabled && policy.mode != Mode::Off;
         if !opted_in && !one_shot {
@@ -382,9 +394,20 @@ impl std::fmt::Display for AbortReason {
 /// What one step of a rollout did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RolloutStep {
-    OneShotCompleted { container: String },
-    Updated { container: String, new_id: String },
-    Restarted { container: String },
+    OneShotCompleted {
+        container: String,
+    },
+    Updated {
+        container: String,
+        new_id: String,
+        /// This container's own `freshdock.notify`. Carried per step because a
+        /// rollout spans containers whose policies differ, and the one that
+        /// triggered it does not speak for the rest.
+        notify: bool,
+    },
+    Restarted {
+        container: String,
+    },
 }
 
 /// The result of one rollout, logged and notified as a unit.
@@ -598,6 +621,7 @@ where
                         report.steps.push(RolloutStep::Updated {
                             container: target.container.clone(),
                             new_id,
+                            notify: target.policy.notify,
                         });
                         updated_services.insert(target.service.clone());
                         None
@@ -794,7 +818,10 @@ mod tests {
     }
 
     #[test]
-    fn watch_all_makes_an_unlabelled_sibling_a_target() {
+    fn watch_all_alone_still_restarts_nothing() {
+        // watch_all enables every container but leaves the mode at `watch`
+        // until `default_mode` says otherwise, and watch never restarts. A
+        // rollout must not be the loophole that starts recreating them.
         let mut members = stack();
         members.push(member("worker", ""));
         let plan = plan(
@@ -807,7 +834,70 @@ mod tests {
             },
             None,
         );
+        assert!(!target_names(&plan).contains(&"stack-worker-1"));
+        assert_eq!(
+            skip_reason(&plan, "stack-worker-1"),
+            Some(&SkipReason::WatchOnly)
+        );
+    }
+
+    #[test]
+    fn watch_all_with_an_updating_default_mode_makes_a_sibling_a_target() {
+        let mut members = stack();
+        members.push(member("worker", ""));
+        let plan = plan(
+            PROJECT,
+            &members,
+            "stack-web-1",
+            PolicyDefaults {
+                watch_all: true,
+                mode: Some(Mode::Live),
+                ..Default::default()
+            },
+            None,
+        );
         assert!(target_names(&plan).contains(&"stack-worker-1"));
+    }
+
+    #[test]
+    fn a_watch_mode_sibling_is_never_recreated_by_someone_elses_rollout() {
+        // `freshdock.mode=watch` is "tell me, never restart me". Sharing an
+        // image with a container that does update is not a way around that.
+        let members = vec![
+            enabled(member("web", "")),
+            labelled(
+                member("worker", ""),
+                &[("freshdock.enable", "true"), ("freshdock.mode", "watch")],
+            ),
+        ];
+        let plan = plan_of(&members);
+        assert_eq!(target_names(&plan), vec!["stack-web-1"]);
+        assert_eq!(
+            skip_reason(&plan, "stack-worker-1"),
+            Some(&SkipReason::WatchOnly)
+        );
+    }
+
+    #[test]
+    fn a_watch_mode_one_shot_is_not_re_run_either() {
+        // The unlabelled bypass covers an *absent* label. An explicit watch on
+        // a migration is a statement, and re-running it is a restart.
+        let members = vec![
+            enabled(member(
+                "web",
+                "migrate:service_completed_successfully:false",
+            )),
+            labelled(
+                exited(member("migrate", "")),
+                &[("freshdock.enable", "true"), ("freshdock.mode", "watch")],
+            ),
+        ];
+        let plan = plan_of(&members);
+        assert_eq!(target_names(&plan), vec!["stack-web-1"]);
+        assert_eq!(
+            skip_reason(&plan, "stack-migrate-1"),
+            Some(&SkipReason::WatchOnly)
+        );
     }
 
     #[test]
@@ -1261,6 +1351,7 @@ mod tests {
                 RolloutStep::Updated {
                     container: "stack-web-1".to_owned(),
                     new_id: "new-stack-web-1".to_owned(),
+                    notify: false,
                 },
             ]
         );
@@ -1434,6 +1525,32 @@ mod tests {
             Some(AbortReason::StepFailed { ref container, .. }) if container == "stack-migrate-1"
         ));
         assert_eq!(report.not_completed, vec!["stack-migrate-1", "stack-web-1"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_updated_step_carries_its_own_notify_policy() {
+        // A rollout spans containers whose policies differ, so the one that
+        // triggered it must not decide who gets announced.
+        let members = vec![
+            labelled(enabled(member("web", "")), &[("freshdock.notify", "true")]),
+            labelled(
+                enabled(member("worker", "")),
+                &[("freshdock.notify", "false")],
+            ),
+        ];
+        let ops = StackOps::new(members.clone());
+        let report = run(&ops, &plan_of(&members)).await;
+
+        let notify_for = |name: &str| {
+            report.steps.iter().find_map(|s| match s {
+                RolloutStep::Updated {
+                    container, notify, ..
+                } if container == name => Some(*notify),
+                _ => None,
+            })
+        };
+        assert_eq!(notify_for("stack-web-1"), Some(true));
+        assert_eq!(notify_for("stack-worker-1"), Some(false));
     }
 
     #[tokio::test(start_paused = true)]
