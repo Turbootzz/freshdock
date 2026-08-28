@@ -618,7 +618,12 @@ pub enum OneShotOutcome {
 /// may have half-applied; restoring the previous container object changes
 /// nothing about that and destroys the only logs explaining it. The failed
 /// container and the archive are both kept and the caller aborts the rollout.
-/// Post-update hooks are skipped: the container has already exited.
+/// **Lifecycle hooks are skipped entirely**, both of them, for the same reason:
+/// a one-shot has already exited when the cycle starts and has exited again
+/// when it ends, and `docker exec` refuses a container that is not running. A
+/// pre-update hook here could therefore only ever fail, and a failing
+/// pre-update hook aborts the rollout, so honouring it would let one label
+/// silently block every update in the project forever.
 #[allow(clippy::too_many_arguments)]
 pub async fn recreate_one_shot(
     ops: &(impl DockerOps + HealthProbe),
@@ -630,7 +635,13 @@ pub async fn recreate_one_shot(
     hooks: &LifecycleHooks,
     ts_provider: impl Fn() -> i64,
 ) -> Result<OneShotOutcome, DockerError> {
-    let cycle = match recreate_one(ops, name, hooks, &ts_provider).await? {
+    if hooks.pre_update.is_some() || hooks.post_update.is_some() {
+        warn!(
+            container = %name,
+            "ignoring lifecycle hooks on a one-shot: it is not running, so neither hook could be exec'd"
+        );
+    }
+    let cycle = match recreate_one(ops, name, &LifecycleHooks::default(), &ts_provider).await? {
         CycleOutcome::Completed(cycle) => cycle,
         CycleOutcome::Skipped(reason) => return Ok(OneShotOutcome::SkippedByHook(reason)),
     };

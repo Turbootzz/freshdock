@@ -14,12 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use tracing::{info, warn};
 use url::Url;
 
 use crate::labels::{Mode, PolicyDefaults};
+use crate::rollout::DEFAULT_ONE_SHOT_TIMEOUT;
 
 /// A credential value (password / personal access token) that must never appear
 /// in logs. `Debug` prints `Secret("[REDACTED]")`; there is deliberately no
@@ -95,6 +97,11 @@ pub struct Settings {
     /// `bool` whose `Default` would be `false`.
     #[serde(default)]
     pub compose_aware: Option<bool>,
+    /// Seconds a compose one-shot may run before a rollout gives up on it
+    /// (issue #78). A migration that outlives this leaves the rollout aborted
+    /// and its dependents on the old image, so a slow one needs room here.
+    #[serde(default)]
+    pub one_shot_timeout: Option<u64>,
 }
 
 /// Validated [`Settings`], ready for the commands. `Copy` so it threads cheaply
@@ -106,6 +113,7 @@ pub struct ResolvedSettings {
     pub prune_dangling: bool,
     pub watch_all: bool,
     pub compose_aware: bool,
+    pub one_shot_timeout: Duration,
 }
 
 /// Hand-written so `compose_aware` keeps its non-`false` default here too; a
@@ -118,6 +126,7 @@ impl Default for ResolvedSettings {
             prune_dangling: false,
             watch_all: false,
             compose_aware: true,
+            one_shot_timeout: DEFAULT_ONE_SHOT_TIMEOUT,
         }
     }
 }
@@ -199,6 +208,13 @@ where
                     settings.compose_aware = Some(flag);
                 }
             }
+            "FRESHDOCK_ONE_SHOT_TIMEOUT" => match value.trim().parse::<u64>() {
+                Ok(secs) => settings.one_shot_timeout = Some(secs),
+                Err(_) => warn!(
+                    value = %value,
+                    "ignoring invalid FRESHDOCK_ONE_SHOT_TIMEOUT (expected a whole number of seconds)"
+                ),
+            },
             _ => {}
         }
     }
@@ -222,6 +238,9 @@ where
         prune_dangling: settings.prune_dangling,
         watch_all: settings.watch_all,
         compose_aware: settings.compose_aware.unwrap_or(true),
+        one_shot_timeout: settings
+            .one_shot_timeout
+            .map_or(DEFAULT_ONE_SHOT_TIMEOUT, Duration::from_secs),
     }
 }
 
@@ -450,7 +469,7 @@ impl Config {
     /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` /
     /// `FRESHDOCK_NOTIFY_*` / `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
     /// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` /
-    /// `FRESHDOCK_COMPOSE_AWARE` env vars on top.
+    /// `FRESHDOCK_COMPOSE_AWARE` / `FRESHDOCK_ONE_SHOT_TIMEOUT` env vars on top.
     ///
     /// An *explicit* path that doesn't exist is an error; a missing *default*
     /// file is not (it just yields env-only / empty config).
@@ -519,7 +538,8 @@ same variable (e.g. `ops-mail` and `ops_mail` collide).\n[settings] defaults may
 the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthly|watch|off\n  \
 FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n  \
 FRESHDOCK_WATCH_ALL                  true/false/1/0 (watch every container unless it opts out)\n  \
-FRESHDOCK_COMPOSE_AWARE              true/false/1/0 (roll a compose project out as one unit; on by default)\n\
+FRESHDOCK_COMPOSE_AWARE              true/false/1/0 (roll a compose project out as one unit; on by default)\n  \
+FRESHDOCK_ONE_SHOT_TIMEOUT           seconds a compose one-shot may run before a rollout gives up (default 600)\n\
 Run flags have env forms too, the flag winning: FRESHDOCK_INTERVAL, FRESHDOCK_TICK, FRESHDOCK_STOP_TIMEOUT \
 (see `freshdock run --help`).\nNO_COLOR (any non-empty value) disables colored output.\nFRESHDOCK_CONFIG \
 sets the config file path.";
@@ -1810,6 +1830,38 @@ mod tests {
         let cfg = Config::from_toml("[settings]\ncompose_aware = false\n").unwrap();
         let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_COMPOSE_AWARE", "yes")]));
         assert!(!resolved.compose_aware);
+    }
+
+    #[test]
+    fn one_shot_timeout_defaults_and_can_be_raised() {
+        // A migration that outlives it aborts the rollout, so a slow one needs
+        // to be able to buy more room without turning the feature off.
+        assert_eq!(
+            resolve_settings(Config::default().settings, env(&[])).one_shot_timeout,
+            DEFAULT_ONE_SHOT_TIMEOUT
+        );
+        let cfg = Config::from_toml("[settings]\none_shot_timeout = 5400\n").unwrap();
+        assert_eq!(
+            resolve_settings(cfg.settings, env(&[])).one_shot_timeout,
+            Duration::from_secs(5400)
+        );
+    }
+
+    #[test]
+    fn env_one_shot_timeout_overrides_file_and_junk_is_ignored() {
+        let cfg = Config::from_toml("[settings]\none_shot_timeout = 60\n").unwrap();
+        assert_eq!(
+            resolve_settings(cfg.settings, env(&[("FRESHDOCK_ONE_SHOT_TIMEOUT", "1800")]))
+                .one_shot_timeout,
+            Duration::from_secs(1800)
+        );
+        let cfg = Config::from_toml("[settings]\none_shot_timeout = 60\n").unwrap();
+        assert_eq!(
+            resolve_settings(cfg.settings, env(&[("FRESHDOCK_ONE_SHOT_TIMEOUT", "ages")]))
+                .one_shot_timeout,
+            Duration::from_secs(60),
+            "a bad env value keeps the file value"
+        );
     }
 
     #[test]

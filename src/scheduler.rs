@@ -447,7 +447,7 @@ where
             &RolloutConfig {
                 health: cfg.health.clone(),
                 prune_dangling: settings.prune_dangling,
-                one_shot_timeout: rollout::DEFAULT_ONE_SHOT_TIMEOUT,
+                one_shot_timeout: settings.one_shot_timeout,
             },
             clock,
             settings.policy_defaults(),

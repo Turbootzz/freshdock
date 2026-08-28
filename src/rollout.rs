@@ -1458,6 +1458,43 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_lifecycle_hook_on_a_one_shot_cannot_block_the_project() {
+        // `docker exec` refuses a container that is not running, so a
+        // pre-update hook on a one-shot could only ever fail, and a failing
+        // pre-update hook aborts the rollout. Honouring it would let one label
+        // silently block every update in the project forever.
+        let members = vec![
+            enabled(member(
+                "web",
+                "migrate:service_completed_successfully:false",
+            )),
+            labelled(
+                exited(member("migrate", "")),
+                &[
+                    ("freshdock.enable", "true"),
+                    ("freshdock.mode", "live"),
+                    ("freshdock.lifecycle.pre-update", "/bin/quiesce"),
+                ],
+            ),
+        ];
+        let ops = StackOps::new(members.clone()).with_successful_migration();
+        let report = run(&ops, &plan_of(&members)).await;
+
+        assert!(
+            report.aborted.is_none(),
+            "the hook must not abort the rollout"
+        );
+        assert!(
+            !ops.calls().iter().any(|c| c.starts_with("exec:")),
+            "no exec is attempted against a container that is not running"
+        );
+        assert_eq!(
+            ops.visits(),
+            vec!["create:stack-migrate-1", "create:stack-web-1"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_failed_one_shot_keeps_its_container_and_archive_for_inspection() {
         // Its logs are the only thing left that says why the migration failed,
         // so neither a rollback nor a cleanup may remove them.
