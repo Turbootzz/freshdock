@@ -444,7 +444,6 @@ where
             docker,
             name,
             container_labels,
-            image,
             &RolloutConfig {
                 health: cfg.health.clone(),
                 prune_dangling: settings.prune_dangling,
@@ -517,7 +516,7 @@ async fn report_rollout(
     image: &str,
     dispatcher: &Dispatcher,
 ) -> Vec<String> {
-    let touched: Vec<String> = report.touched().into_iter().map(str::to_string).collect();
+    let claimed = report.claimed();
     for step in &report.steps {
         match step {
             RolloutStep::OneShotCompleted { container } => {
@@ -547,17 +546,15 @@ async fn report_rollout(
                 .dispatch(&NotifyEvent::RolloutAborted {
                     project: report.project.clone(),
                     reason: reason.to_string(),
-                    completed: report
-                        .updated_containers()
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
+                    // `touched`, not `updated_containers`: a migration that
+                    // completed before the abort has already moved the schema.
+                    completed: report.touched().into_iter().map(str::to_string).collect(),
                     remaining: report.not_completed.clone(),
                 })
                 .await;
         }
     }
-    touched
+    claimed
 }
 
 #[cfg(test)]
@@ -1421,6 +1418,7 @@ mod tests {
             name: container_name(summary),
             id: summary.id.clone().unwrap_or_default(),
             image_ref: COMPOSE_IMAGE.to_owned(),
+            image_id: Some("sha256:app".to_owned()),
             labels: summary.labels.clone().unwrap_or_default(),
             running: true,
         }
@@ -1486,6 +1484,25 @@ mod tests {
             reg.calls.load(Ordering::SeqCst),
             2,
             "with rollouts off, each container is probed and updated on its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aborted_rollout_is_not_re_triggered_by_the_members_it_never_reached() {
+        // Without this, every remaining member re-enters the rollout later in
+        // the same tick and re-runs the step that already failed, once each.
+        let (node, _) = compose_node();
+        let node = FakeNode {
+            health_state: ContainerRuntimeState::Exited { exit_code: 1 },
+            ..node
+        };
+        let reg = FakeRegistry::new(DIG_B);
+        tick_with_settings(&node, &reg, ResolvedSettings::default()).await;
+
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            1,
+            "the aborted rollout owns every member it planned, reached or not"
         );
     }
 

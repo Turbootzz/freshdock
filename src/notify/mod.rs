@@ -642,6 +642,42 @@ mod tests {
         assert!(f.body.contains("web-old-1700000000"));
     }
 
+    #[test]
+    fn an_aborted_rollout_renders_per_project_and_names_both_sides() {
+        // The operator's first question is what already moved and what did not,
+        // so a migration that completed before the abort has to be listed as
+        // completed even though it is not an "updated container".
+        let event = NotifyEvent::RolloutAborted {
+            project: "shop".into(),
+            reason: "shop-api-1 failed its health gate and was rolled back".into(),
+            completed: vec!["shop-migrate-1".into()],
+            remaining: vec!["shop-api-1".into(), "shop-web-1".into()],
+        };
+        assert_eq!(event.trigger(), Trigger::Failed);
+        assert_eq!(
+            event.container(),
+            "shop",
+            "a rollout's subject is the project"
+        );
+
+        let r = event.render();
+        assert!(r.title.contains("Rollout aborted: shop"));
+        assert!(r.body.contains("shop-migrate-1"));
+        assert!(r.body.contains("shop-api-1, shop-web-1"));
+    }
+
+    #[test]
+    fn an_aborted_rollout_with_nothing_completed_says_so() {
+        let r = NotifyEvent::RolloutAborted {
+            project: "shop".into(),
+            reason: "shop-migrate-1 exited with code 1".into(),
+            completed: Vec::new(),
+            remaining: vec!["shop-web-1".into()],
+        }
+        .render();
+        assert!(r.body.contains("Updated before stopping: none"));
+    }
+
     #[tokio::test]
     async fn empty_dispatcher_is_a_noop() {
         Dispatcher::noop().dispatch(&succeeded()).await; // must not panic

@@ -402,6 +402,7 @@ fn project_member(c: &ContainerSummary) -> ProjectMember {
         name: container_name(c),
         id: c.id.clone().unwrap_or_default(),
         image_ref: c.image.clone().unwrap_or_default(),
+        image_id: c.image_id.clone(),
         labels: c.labels.clone().unwrap_or_default(),
         running: matches!(
             c.state,

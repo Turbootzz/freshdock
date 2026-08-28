@@ -95,7 +95,6 @@ pub async fn run_with(
             docker,
             &spec.name,
             spec.config.labels.as_ref().unwrap_or(&empty),
-            &spec.image_ref,
             &RolloutConfig {
                 health: health.clone(),
                 prune_dangling: settings.prune_dangling,
@@ -189,6 +188,12 @@ fn print_rollout(report: &RolloutReport) {
         }
     }
     match &report.aborted {
+        None if report.steps.is_empty() => {
+            println!("rollout did nothing:");
+            for skipped in &report.skipped {
+                println!("  {}: {}", skipped.container, skipped.reason);
+            }
+        }
         None => println!("rollout complete: {} step(s)", report.steps.len()),
         Some(reason) => println!(
             "rollout ABORTED: {reason}. The services after this point were not touched \

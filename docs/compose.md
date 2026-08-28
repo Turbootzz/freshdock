@@ -82,8 +82,9 @@ Everything else follows the ordinary rules:
 | Unlabelled and long-running, even on the same image | No. Sharing an image is not consent. |
 | `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or `freshdock.mode=off` | No. An explicit opt-out always wins, one-shots included. |
 | Stopped, and not a one-shot | No. If you stopped it, freshdock will not start it. |
-| A one-shot that is currently running | No. It is mid-run; stomping it would kill a migration in flight. |
-| On a different image than the one that moved | No. |
+| A one-shot that is currently running | No. It is mid-run, and stomping it would kill a migration in flight. This holds even for an explicit `freshdock recreate` of that container. |
+| A `<name>-old-<ts>` archive | No. Archives keep the original's compose labels, so a kept one would otherwise be re-run as a one-shot. |
+| On a different image than the one that moved | No. Members are matched on the image reference, or on the image id when the tag has since moved and the daemon reports a bare id. |
 | freshdock's own container | No, same self-guard as [`watch_all`](configuration.md#watching-every-container). |
 | A `docker compose run` one-off | No. |
 
@@ -124,9 +125,10 @@ landed:
 ```
 
 This is a **restart**, not an update: the dependent's own image never moves, so
-there is no pull and no rollback surface. A dependent that explicitly opts out
-is left alone, a stopped one is not started, and a restart that fails is logged
-without failing the rollout.
+there is no pull and no rollback surface. The stop honours the container's own
+`stop_signal` and `stop_grace_period`, exactly as a recreate would. A dependent
+that explicitly opts out is left alone, a stopped one is not started, and a
+restart that fails is logged without failing the rollout.
 
 ## When a one-shot fails
 
@@ -142,7 +144,9 @@ The rollout stops immediately. Concretely:
   of its work; restoring the previous *container object* would change nothing
   about the database and would throw the evidence away.
 - Every service after it in the order is **untouched** and still serving its
-  previous image. Your stack keeps working on the old version.
+  previous image. Your stack keeps working on the old version. It stays that way
+  for the rest of the cycle too: the rollout claims the members it never
+  reached, so nothing re-triggers it and re-runs the failed step per member.
 - Services updated *before* the failure stay updated. There is no safe way to
   un-apply a migration, so freshdock does not pretend there is.
 - With [notifications](notifications.md) configured, one `failed`-trigger event

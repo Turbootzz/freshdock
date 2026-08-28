@@ -32,6 +32,7 @@ use crate::docker::DockerError;
 use crate::docker::recreate::{
     Cleanup, DockerOps, OneShotOutcome, recreate_one_shot, recreate_with_health,
 };
+use crate::docker::rename::is_archive_name;
 use crate::health::{Clock, HealthConfig, HealthProbe};
 use crate::labels::{self, Mode, Policy, PolicyDefaults};
 use crate::registry::ImageRef;
@@ -162,26 +163,59 @@ impl RolloutPlan {
     pub fn covers(&self, container: &str) -> bool {
         self.targets.iter().any(|t| t.container == container)
     }
+
+    /// Why the plan left `container` out, if it deliberately did.
+    pub fn skip_reason_for(&self, container: &str) -> Option<&SkipReason> {
+        self.skipped
+            .iter()
+            .find(|s| s.container == container)
+            .map(|s| &s.reason)
+    }
 }
 
-/// Build the plan for `project` after `image_ref` moved. `members` must include
-/// stopped containers: the exited one-shots are the entire point.
+/// Build the plan for `project` after the image `trigger` runs moved. `members`
+/// must include stopped containers: the exited one-shots are the entire point.
+///
+/// The image to match on is read off `trigger`'s own row rather than passed in,
+/// so both sides of the comparison come from the same listing. A tag the
+/// daemon can no longer resolve is reported as a bare image id in a listing but
+/// still as the tag in an inspect, and mixing the two sources would silently
+/// match nothing, which is exactly the skipped-migration bug this exists to fix.
 pub fn plan(
     project: &str,
     members: &[ProjectMember],
-    image_ref: &str,
+    trigger: &str,
     defaults: PolicyDefaults,
     own_id_prefix: Option<&str>,
 ) -> RolloutPlan {
-    let graph = compose::graph_of(members);
+    // Archives are `<name>-old-<ts>` copies that keep the original's compose
+    // labels and image. A kept one-shot archive (deliberate after a failed
+    // migration) would otherwise be planned as a one-shot and re-run.
+    let members: Vec<ProjectMember> = members
+        .iter()
+        .filter(|m| !is_archive_name(&m.name))
+        .cloned()
+        .collect();
+    let graph = compose::graph_of(&members);
     let awaited = compose::services_awaited_for_completion(&graph);
-    let updated_image = ImageRef::parse(image_ref);
+    let Some(origin) = members.iter().find(|m| m.name == trigger) else {
+        debug!(%project, container = %trigger, "rollout: container is not in its own project listing");
+        return RolloutPlan {
+            project: project.to_owned(),
+            targets: Vec::new(),
+            skipped: Vec::new(),
+            restart_candidates: HashMap::new(),
+            graph,
+        };
+    };
+    let updated_image = ImageRef::parse(&origin.image_ref);
+    let updated_image_id = origin.image_id.clone();
 
     let mut by_service: HashMap<String, Vec<PlannedTarget>> = HashMap::new();
     let mut skipped = Vec::new();
     let mut restart_candidates: HashMap<String, Vec<String>> = HashMap::new();
 
-    for member in members {
+    for member in &members {
         let Some(info) = compose::parse(&member.labels) else {
             continue;
         };
@@ -197,7 +231,7 @@ pub fn plan(
                 .push(member.name.clone());
         }
 
-        if ImageRef::parse(&member.image_ref) != updated_image {
+        if !same_image(member, &updated_image, updated_image_id.as_deref()) {
             continue;
         }
         let one_shot = awaited.contains(&info.service);
@@ -281,6 +315,21 @@ pub fn plan(
     }
 }
 
+/// Is this member running the image the rollout is about?
+///
+/// Either spelling counts. A listing reports a bare image id once the tag it was
+/// created from has moved elsewhere, so ref equality alone would miss exactly
+/// the containers a moved tag is supposed to sweep in.
+fn same_image(member: &ProjectMember, image: &ImageRef, image_id: Option<&str>) -> bool {
+    if ImageRef::parse(&member.image_ref) == *image {
+        return true;
+    }
+    match (member.image_id.as_deref(), image_id) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Why a rollout stopped before finishing its plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbortReason {
@@ -348,6 +397,8 @@ pub struct RolloutReport {
     /// Planned targets the rollout did not complete, the failed one included.
     /// All still serving their previous image.
     pub not_completed: Vec<String>,
+    /// Project members on the moved image the plan left alone, and why.
+    pub skipped: Vec<SkippedMember>,
 }
 
 impl RolloutReport {
@@ -361,8 +412,19 @@ impl RolloutReport {
             .collect()
     }
 
-    /// Every container the rollout touched, so a caller sweeping the same
-    /// project does not process them twice.
+    /// Every container this rollout is responsible for, whether it got to it or
+    /// not. A caller sweeping the same project must not process any of these
+    /// again: re-triggering after an abort would re-run the failed one-shot
+    /// once per member the rollout never reached.
+    pub fn claimed(&self) -> Vec<String> {
+        self.touched()
+            .into_iter()
+            .map(str::to_owned)
+            .chain(self.not_completed.iter().cloned())
+            .collect()
+    }
+
+    /// Every container the rollout touched.
     pub fn touched(&self) -> Vec<&str> {
         self.steps
             .iter()
@@ -380,12 +442,12 @@ impl RolloutReport {
 pub async fn plan_for(
     ops: &impl DockerOps,
     project: &str,
-    image_ref: &str,
+    trigger: &str,
     defaults: PolicyDefaults,
     own_id_prefix: Option<&str>,
 ) -> Result<RolloutPlan, DockerError> {
     let members = ops.list_project(project).await?;
-    Ok(plan(project, &members, image_ref, defaults, own_id_prefix))
+    Ok(plan(project, &members, trigger, defaults, own_id_prefix))
 }
 
 /// The rollout for `container`, or `None` when the plain single-container
@@ -400,7 +462,6 @@ pub async fn for_container<D>(
     ops: &D,
     container: &str,
     container_labels: &HashMap<String, String>,
-    image_ref: &str,
     cfg: &RolloutConfig,
     clock: &impl Clock,
     defaults: PolicyDefaults,
@@ -411,7 +472,7 @@ where
     D: DockerOps + HealthProbe,
 {
     let info = compose::parse(container_labels)?;
-    let plan = match plan_for(ops, &info.project, image_ref, defaults, own_id_prefix).await {
+    let plan = match plan_for(ops, &info.project, container, defaults, own_id_prefix).await {
         Ok(plan) => plan,
         Err(e) => {
             warn!(project = %info.project, %container, error = %e, "rollout: could not list the compose project; updating this container on its own");
@@ -419,6 +480,19 @@ where
         }
     };
     if !plan.covers(container) {
+        // Falling back would recreate a one-shot that is mid-run: it dies, and
+        // its zero exit then reads as a crash to the health gate. Nothing else
+        // the plan can exclude is worth overriding an explicit `recreate` for.
+        if plan.skip_reason_for(container) == Some(&SkipReason::OneShotInFlight) {
+            warn!(project = %info.project, %container, "rollout: this one-shot is still running; leaving it to finish");
+            return Some(RolloutReport {
+                project: info.project,
+                steps: Vec::new(),
+                aborted: None,
+                not_completed: vec![container.to_owned()],
+                skipped: plan.skipped,
+            });
+        }
         warn!(project = %info.project, %container, "rollout: the project plan does not cover this container; updating it on its own");
         return None;
     }
@@ -449,6 +523,7 @@ where
         steps: Vec::new(),
         aborted: None,
         not_completed: Vec::new(),
+        skipped: plan.skipped.clone(),
     };
     let mut updated_services: HashSet<String> = HashSet::new();
 
@@ -567,8 +642,16 @@ where
     for container in plan.restarts_for(&updated_services) {
         info!(project = %plan.project, %container, "rollout: restarting dependent (depends_on restart: true)");
         // A restart, not a recreate: no pull, no rollback surface. A failure
-        // here is logged and the rollout still stands.
-        if let Err(e) = ops.stop(&container, None, None).await {
+        // here is logged and the rollout still stands. The stop still honours
+        // the container's own StopSignal/StopTimeout, as a recreate would.
+        let (signal, timeout) = match ops.inspect(&container).await {
+            Ok(spec) => (spec.config.stop_signal.clone(), spec.config.stop_timeout),
+            Err(e) => {
+                warn!(project = %plan.project, %container, error = %e, "rollout: could not read the dependent's stop options; using the daemon defaults");
+                (None, None)
+            }
+        };
+        if let Err(e) = ops.stop(&container, signal.as_deref(), timeout).await {
             warn!(project = %plan.project, %container, error = %e, "rollout: failed to stop dependent for its restart; leaving it as it is");
             continue;
         }
@@ -596,6 +679,9 @@ mod tests {
 
     const PROJECT: &str = "stack";
 
+    /// One recorded `stop`: container, signal, timeout.
+    type StopCall = (String, Option<String>, Option<i64>);
+
     /// Builder for a project member. Defaults to a running, unlabelled service
     /// on the image the rollout is about, so each test states only the one
     /// thing it is testing.
@@ -604,6 +690,7 @@ mod tests {
             name: format!("{PROJECT}-{service}-1"),
             id: format!("id{service}0000000000000000"),
             image_ref: "app:latest".to_owned(),
+            image_id: Some("sha256:app".to_owned()),
             labels: HashMap::from([
                 (LABEL_PROJECT.to_owned(), PROJECT.to_owned()),
                 (LABEL_SERVICE.to_owned(), service.to_owned()),
@@ -632,8 +719,12 @@ mod tests {
         m
     }
 
+    /// Put a member on a different image. The id moves with the ref: a listing
+    /// row that disagrees with itself would let a fixture pass for the wrong
+    /// reason.
     fn on_image(mut m: ProjectMember, image: &str) -> ProjectMember {
         m.image_ref = image.to_owned();
+        m.image_id = Some(format!("sha256:{}", image.replace([':', '/'], "-")));
         m
     }
 
@@ -650,14 +741,14 @@ mod tests {
         ]
     }
 
+    /// Plan a rollout triggered by `stack-web-1`, the labelled service in most
+    /// fixtures below.
     fn plan_of(members: &[ProjectMember]) -> RolloutPlan {
-        plan(
-            PROJECT,
-            members,
-            "app:latest",
-            PolicyDefaults::default(),
-            None,
-        )
+        plan_from(members, "stack-web-1")
+    }
+
+    fn plan_from(members: &[ProjectMember], trigger: &str) -> RolloutPlan {
+        plan(PROJECT, members, trigger, PolicyDefaults::default(), None)
     }
 
     fn target_names(plan: &RolloutPlan) -> Vec<&str> {
@@ -709,7 +800,7 @@ mod tests {
         let plan = plan(
             PROJECT,
             &members,
-            "app:latest",
+            "stack-web-1",
             PolicyDefaults {
                 watch_all: true,
                 ..Default::default()
@@ -821,7 +912,7 @@ mod tests {
         let plan = plan(
             PROJECT,
             &[enabled(member("web", "")), me],
-            "app:latest",
+            "stack-web-1",
             PolicyDefaults::default(),
             Some("abcdef012345"),
         );
@@ -853,13 +944,7 @@ mod tests {
             member("web", "db:service_healthy:true"),
             member("worker", "db:service_healthy:false"),
         ];
-        let plan = plan(
-            PROJECT,
-            &members,
-            "app:latest",
-            PolicyDefaults::default(),
-            None,
-        );
+        let plan = plan_from(&members, "stack-db-1");
         assert_eq!(
             plan.restarts_for(&HashSet::from(["db".to_owned()])),
             vec!["stack-web-1"]
@@ -875,13 +960,7 @@ mod tests {
                 &[("freshdock.enable", "false")],
             ),
         ];
-        let plan = plan(
-            PROJECT,
-            &members,
-            "app:latest",
-            PolicyDefaults::default(),
-            None,
-        );
+        let plan = plan_from(&members, "stack-db-1");
         assert!(
             plan.restarts_for(&HashSet::from(["db".to_owned()]))
                 .is_empty()
@@ -894,13 +973,7 @@ mod tests {
             enabled(member("db", "")),
             exited(member("web", "db:service_healthy:true")),
         ];
-        let plan = plan(
-            PROJECT,
-            &members,
-            "app:latest",
-            PolicyDefaults::default(),
-            None,
-        );
+        let plan = plan_from(&members, "stack-db-1");
         assert!(
             plan.restarts_for(&HashSet::from(["db".to_owned()]))
                 .is_empty()
@@ -913,13 +986,7 @@ mod tests {
             enabled(member("db", "")),
             member("web", "db:service_healthy:true"),
         ];
-        let plan = plan(
-            PROJECT,
-            &members,
-            "app:latest",
-            PolicyDefaults::default(),
-            None,
-        );
+        let plan = plan_from(&members, "stack-db-1");
         assert!(plan.restarts_for(&HashSet::new()).is_empty());
     }
 
@@ -957,6 +1024,8 @@ mod tests {
         members: Vec<ProjectMember>,
         calls: Mutex<Vec<String>>,
         probe: Mutex<HashMap<String, VecDeque<ContainerRuntimeState>>>,
+        /// Every `stop`, with the options it was given.
+        stops: Mutex<Vec<StopCall>>,
         create_fails_for: Option<String>,
         stop_fails_for: Option<String>,
         list_project_fails: bool,
@@ -996,13 +1065,26 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
 
-        /// Just the container-visiting calls, so an assertion reads as the
-        /// rollout sequence rather than the whole recreate cycle.
+        /// The containers the rollout recreated, in order, so an assertion
+        /// reads as the rollout sequence rather than the whole cycle.
         fn visits(&self) -> Vec<String> {
             self.calls()
                 .into_iter()
-                .filter(|c| c.starts_with("create:") || c.starts_with("restart-stop:"))
+                .filter(|c| c.starts_with("create:"))
                 .collect()
+        }
+
+        fn did(&self, call: &str) -> bool {
+            self.calls().iter().any(|c| c == call)
+        }
+
+        fn stop_options(&self, name: &str) -> Option<(Option<String>, Option<i64>)> {
+            self.stops
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(c, _, _)| c == name)
+                .map(|(_, sig, t)| (sig.clone(), *t))
         }
 
         fn member(&self, name: &str) -> Option<&ProjectMember> {
@@ -1023,6 +1105,8 @@ mod tests {
                 image_id: Some("sha256:old".to_owned()),
                 config: bollard::models::ContainerConfig {
                     labels: Some(member.labels.clone()),
+                    stop_signal: Some("SIGQUIT".to_owned()),
+                    stop_timeout: Some(45),
                     ..Default::default()
                 },
                 host_config: None,
@@ -1038,17 +1122,15 @@ mod tests {
         async fn stop(
             &self,
             name: &str,
-            _signal: Option<&str>,
-            _timeout_s: Option<i64>,
+            signal: Option<&str>,
+            timeout_s: Option<i64>,
         ) -> Result<(), DockerError> {
-            // The restart pass stops a container that is not mid-recreate; tag
-            // it so the two are distinguishable in an assertion.
-            let mid_cycle = self.calls().iter().any(|c| c == &format!("inspect:{name}"));
-            self.record(if mid_cycle {
-                format!("stop:{name}")
-            } else {
-                format!("restart-stop:{name}")
-            });
+            self.record(format!("stop:{name}"));
+            self.stops.lock().unwrap().push((
+                name.to_owned(),
+                signal.map(str::to_owned),
+                timeout_s,
+            ));
             if self.stop_fails_for.as_deref() == Some(name) {
                 return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
                     "stop",
@@ -1281,14 +1363,22 @@ mod tests {
             on_image(member("web", "db:service_healthy:true"), "web:latest"),
         ];
         let ops = StackOps::new(members.clone());
-        let report = run(&ops, &plan_of(&members)).await;
+        let report = run(&ops, &plan_from(&members, "stack-db-1")).await;
 
-        assert_eq!(
-            ops.visits(),
-            vec!["create:stack-db-1", "restart-stop:stack-web-1"],
-            "the dependent is restarted, not recreated, and only after db landed"
+        assert_eq!(ops.visits(), vec!["create:stack-db-1"]);
+        assert!(
+            ops.did("stop:stack-web-1") && ops.did("start:stack-web-1"),
+            "the dependent is stopped and started again"
         );
-        assert!(ops.calls().iter().any(|c| c == "start:stack-web-1"));
+        assert!(
+            !ops.did("create:stack-web-1"),
+            "restarted, not recreated: its image must not move"
+        );
+        assert_eq!(
+            ops.stop_options("stack-web-1"),
+            Some((Some("SIGQUIT".to_owned()), Some(45))),
+            "a restart honours the container's own StopSignal/StopTimeout"
+        );
         assert_eq!(
             report.steps.last(),
             Some(&RolloutStep::Restarted {
@@ -1308,11 +1398,11 @@ mod tests {
             "stack-migrate-1",
             &[ContainerRuntimeState::Exited { exit_code: 1 }],
         );
-        let report = run(&ops, &plan_of(&members)).await;
+        let report = run(&ops, &plan_from(&members, "stack-db-1")).await;
 
         assert!(report.aborted.is_some());
         assert!(
-            !ops.calls().iter().any(|c| c.starts_with("restart-stop:")),
+            !ops.did("stop:stack-web-1") && !ops.did("start:stack-web-1"),
             "nothing changed, so there is nothing for a dependent to pick up"
         );
     }
@@ -1353,6 +1443,67 @@ mod tests {
         assert_eq!(report.touched(), vec!["stack-migrate-1", "stack-web-1"]);
     }
 
+    #[test]
+    fn an_archive_of_a_one_shot_is_never_re_run() {
+        // A failed migration deliberately leaves `<name>-old-<ts>` behind, and
+        // it keeps the original's compose labels and image. Planning it as a
+        // one-shot would re-run the migration from the archive.
+        let mut archive = exited(member("migrate", ""));
+        archive.name = "stack-migrate-1-old-1787916296".to_owned();
+        let mut members = stack();
+        members.push(archive);
+
+        let plan = plan_of(&members);
+        assert_eq!(target_names(&plan), vec!["stack-migrate-1", "stack-web-1"]);
+        assert!(
+            skip_reason(&plan, "stack-migrate-1-old-1787916296").is_none(),
+            "an archive is not a project member at all, not even a skipped one"
+        );
+    }
+
+    #[test]
+    fn a_member_is_matched_by_image_id_when_the_tag_has_moved() {
+        // Once the tag a container was created from points elsewhere, a listing
+        // reports a bare image id instead of the tag. Matching on the ref alone
+        // would find no siblings and silently skip the migration.
+        let moved = |m: ProjectMember| {
+            let mut m = m;
+            m.image_ref = "sha256:app".to_owned();
+            m
+        };
+        let members = vec![
+            moved(enabled(member(
+                "web",
+                "migrate:service_completed_successfully:false",
+            ))),
+            moved(exited(member("migrate", ""))),
+        ];
+        let plan = plan_of(&members);
+        assert_eq!(target_names(&plan), vec!["stack-migrate-1", "stack-web-1"]);
+    }
+
+    #[test]
+    fn a_rollout_claims_the_members_an_abort_never_reached() {
+        // The caller uses this to keep the same sweep from re-triggering the
+        // rollout on a member it never got to, which would re-run the failed
+        // one-shot once per remaining member.
+        let report = RolloutReport {
+            project: PROJECT.to_owned(),
+            steps: vec![RolloutStep::OneShotCompleted {
+                container: "stack-migrate-1".to_owned(),
+            }],
+            aborted: Some(AbortReason::RolledBack {
+                container: "stack-api-1".to_owned(),
+            }),
+            not_completed: vec!["stack-api-1".to_owned(), "stack-web-1".to_owned()],
+            skipped: Vec::new(),
+        };
+        assert_eq!(
+            report.claimed(),
+            vec!["stack-migrate-1", "stack-api-1", "stack-web-1"]
+        );
+    }
+
     // ── the entry point both callers share ─────────────────────────────────
 
     async fn rollout_for(ops: &StackOps, container: &str) -> Option<RolloutReport> {
@@ -1361,7 +1512,6 @@ mod tests {
             ops,
             container,
             &labels,
-            "app:latest",
             &fast_cfg(),
             &TokioClock,
             PolicyDefaults::default(),
@@ -1396,6 +1546,28 @@ mod tests {
         let mut ops = StackOps::new(stack());
         ops.list_project_fails = true;
         assert!(rollout_for(&ops, "stack-web-1").await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_one_shot_that_is_still_running_is_left_to_finish() {
+        // The plan skips it as mid-run; falling back to the plain path would
+        // recreate it anyway, killing the migration, and its zero exit would
+        // then read as a crash to the health gate.
+        let members = vec![
+            enabled(member(
+                "web",
+                "migrate:service_completed_successfully:false",
+            )),
+            enabled(member("migrate", "")),
+        ];
+        let ops = StackOps::new(members);
+        let report = rollout_for(&ops, "stack-migrate-1")
+            .await
+            .expect("the rollout must own this decision, not defer to the plain path");
+
+        assert!(report.steps.is_empty());
+        assert!(!ops.did("create:stack-migrate-1"));
+        assert!(!ops.did("stop:stack-migrate-1"));
     }
 
     #[tokio::test(start_paused = true)]
