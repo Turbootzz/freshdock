@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod compose;
 pub mod config;
 pub mod cron;
 pub mod docker;
@@ -11,6 +12,7 @@ pub mod notify;
 pub mod probe;
 pub mod registry;
 pub mod rollback;
+pub mod rollout;
 pub mod scheduler;
 pub mod selfid;
 pub mod updater;

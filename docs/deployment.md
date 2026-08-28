@@ -25,6 +25,7 @@ Or with compose — see the runnable stacks in
 - [`notifications-enabled.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/notifications-enabled.yml) — mounts a `freshdock.toml`.
 - [`registry-authenticated.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/registry-authenticated.yml) — private registry via env.
 - [`watch-all.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/watch-all.yml): opt-out mode, every container included unless it opts out.
+- [`compose-project.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/compose-project.yml) — a stack with a one-shot migration, rolled out as one unit. See [Compose projects](compose.md).
 
 ### Socket: read-only vs writable
 

@@ -32,6 +32,7 @@ leaving you with a dead service.
 | **Five registries** | Docker Hub, GHCR, Quay.io, lscr.io, and any OCI bearer-token registry — anonymous or authenticated. |
 | **Four notifiers** | Webhook, Discord, Telegram, and SMTP, each subscribable to the events it cares about. |
 | **Lifecycle hooks** | Run commands inside the container around an update: a pre-update hook can veto/defer (exit 75), a post-update hook handles maintenance like cache clears. |
+| **Compose-aware rollouts** | A Compose project updates as one unit: the one-shot `migrate` service your app waits on is re-run *before* the new code starts, and a failed migration aborts the rollout instead of leaving new code on an old schema. Read straight from Compose's own labels, no compose file needed. |
 | **VPN stacks survive updates** | Containers that route through another container's network (`network_mode: container:X` — the gluetun pattern) are re-attached automatically after that container updates, instead of being left offline. |
 | **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly — migrate a fleet without relabelling. `FRESHDOCK_WATCH_ALL=true` restores Watchtower's opt-out model if you want it. |
 | **Optional cleanup** | Remove superseded images after a healthy update; optionally prune dangling images. |
@@ -148,7 +149,8 @@ community has forks, but none combine what matters for a small homelab:
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
 | Podman 4+ | Supported via the Docker-compatible socket (see [socket discovery](#which-socket-freshdock-uses)). |
-| Compose-based UIs (Dockge, Komodo, …) | Containers updated individually; compose files untouched. |
+| Docker Compose | A project is updated as one unit: one-shot `service_completed_successfully` services are re-run first, the rest follow in `depends_on` order. Compose files are never read or written. |
+| Compose-based UIs (Dockge, Komodo, …) | Supported; the compose files themselves are untouched. |
 | Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
 
 One known daemon-version floor: re-creating a container attached to **more than one

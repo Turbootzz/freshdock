@@ -237,6 +237,26 @@ fn parse_timeout(key: &str, value: &str, unit_secs: u64) -> Result<Option<Durati
     }
 }
 
+/// An **explicit** freshdock opt-out: `freshdock.enable` (or its watchtower
+/// spelling) false, or `freshdock.mode=off`.
+///
+/// An absent label deliberately does not opt out. This gates the two places
+/// freshdock touches a container it was not pointed at, repairing a
+/// network-namespace dependent (#68) and re-running a compose one-shot (#78),
+/// where "unlabelled" has to mean "go ahead". Not a substitute for
+/// [`parse_policy`]: the normal update path still needs positive enablement.
+pub fn explicitly_opts_out(labels: &HashMap<String, String>) -> bool {
+    let value = |key: &str| {
+        labels
+            .get(key)
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    value("freshdock.enable") == "false"
+        || value(WT_ENABLE) == "false"
+        || value("freshdock.mode") == "off"
+}
+
 /// Notes about `com.centurylinklabs.watchtower.*` labels freshdock ignores
 /// (unsupported features) or overrides (a `freshdock.*` counterpart with a
 /// different effect). Best-effort and pure — invalid values are reported by

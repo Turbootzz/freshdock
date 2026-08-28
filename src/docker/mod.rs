@@ -4,12 +4,14 @@ pub mod recreate;
 pub mod rename;
 pub mod spec;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bollard::auth::DockerCredentials;
 use bollard::models::{
-    ContainerState, ContainerStateStatusEnum, ContainerSummary, HealthStatusEnum,
+    ContainerState, ContainerStateStatusEnum, ContainerSummary, ContainerSummaryStateEnum,
+    HealthStatusEnum,
 };
 use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptions, PruneImagesOptionsBuilder,
@@ -19,6 +21,7 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::compose::{self, ProjectMember};
 use crate::config::CredentialStore;
 use crate::docker::recreate::{DockerOps, HookStatus};
 use crate::docker::spec::ContainerSpec;
@@ -94,6 +97,25 @@ impl Docker {
             ..Default::default()
         };
         Ok(self.client.list_containers(Some(opts)).await?)
+    }
+
+    /// Every container labelled into `project`, running or not (issue #78).
+    /// Filtered daemon-side, and `all: true` so the project's exited one-shots
+    /// are visible at all.
+    pub async fn list_project_members(
+        &self,
+        project: &str,
+    ) -> Result<Vec<ProjectMember>, DockerError> {
+        let opts = ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([(
+                "label".to_owned(),
+                vec![format!("{}={project}", compose::LABEL_PROJECT)],
+            )])),
+            ..Default::default()
+        };
+        let summaries = self.client.list_containers(Some(opts)).await?;
+        Ok(summaries.iter().map(project_member).collect())
     }
 
     /// Pull the given image reference from its registry, draining the
@@ -370,6 +392,28 @@ fn multi_network_guard(api_version: &str, networks: usize) -> Result<(), DockerE
 
 /// Container name from a summary (leading `/` trimmed), falling back to id.
 /// Shared by the scheduler's per-tick sweep and the network-dependent scan.
+/// Project a listing row onto the daemon-agnostic [`ProjectMember`].
+///
+/// `running` counts `restarting` and `paused` as up: neither has *finished*,
+/// and reading a crash-looping migration as exited would let a rollout treat it
+/// as completed.
+fn project_member(c: &ContainerSummary) -> ProjectMember {
+    ProjectMember {
+        name: container_name(c),
+        id: c.id.clone().unwrap_or_default(),
+        image_ref: c.image.clone().unwrap_or_default(),
+        labels: c.labels.clone().unwrap_or_default(),
+        running: matches!(
+            c.state,
+            Some(
+                ContainerSummaryStateEnum::RUNNING
+                    | ContainerSummaryStateEnum::RESTARTING
+                    | ContainerSummaryStateEnum::PAUSED
+            )
+        ),
+    }
+}
+
 pub(crate) fn container_name(c: &ContainerSummary) -> String {
     c.names
         .as_ref()
@@ -436,27 +480,15 @@ fn network_dependent_names(
         .collect()
 }
 
-/// Does this container carry an **explicit** freshdock opt-out —
-/// `freshdock.enable` (or its watchtower spelling) set to a false value, or
-/// `freshdock.mode=off`? Matching is case-insensitive and
-/// whitespace-tolerant, as in [`crate::labels`].
-///
-/// Absent labels deliberately do *not* opt out: the whole point of the
-/// re-attach pass is repairing an unlabelled bystander whose namespace *we*
+/// [`labels::explicitly_opts_out`](crate::labels::explicitly_opts_out) for a
+/// listing row. Absent labels deliberately do *not* opt out: the whole point of
+/// the re-attach pass is repairing an unlabelled bystander whose namespace *we*
 /// broke.
 fn explicitly_opts_out(summary: &ContainerSummary) -> bool {
-    let Some(labels) = summary.labels.as_ref() else {
-        return false;
-    };
-    let value = |key: &str| {
-        labels
-            .get(key)
-            .map(|v| v.trim().to_ascii_lowercase())
-            .unwrap_or_default()
-    };
-    value("freshdock.enable") == "false"
-        || value("com.centurylinklabs.watchtower.enable") == "false"
-        || value("freshdock.mode") == "off"
+    summary
+        .labels
+        .as_ref()
+        .is_some_and(crate::labels::explicitly_opts_out)
 }
 
 /// The container a `HostConfig.NetworkMode` joins, if any: `container:<ref>`
@@ -607,6 +639,11 @@ impl DockerOps for Docker {
     async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError> {
         debug!(container = %name, "list_network_dependents");
         self.network_dependents_of(name).await
+    }
+
+    async fn list_project(&self, project: &str) -> Result<Vec<ProjectMember>, DockerError> {
+        debug!(%project, "list_project");
+        Docker::list_project_members(self, project).await
     }
 }
 

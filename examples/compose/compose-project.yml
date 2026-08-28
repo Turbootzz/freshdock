@@ -1,0 +1,57 @@
+# A stack whose migrations run as a one-shot service. Only `web` is labelled:
+# freshdock re-runs `migrate` first because the project itself declares that it
+# must complete before `web` starts, and aborts the whole rollout if it fails.
+# Validate: docker compose -f compose-project.yml config
+services:
+  # No freshdock labels, on purpose. `service_completed_successfully` below is
+  # what tells freshdock this is a one-shot the project waits on, so it is
+  # re-run on the new image before `web` is recreated.
+  migrate:
+    image: ghcr.io/example/app:latest
+    command: ["./bin/run-migrate.sh"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: ghcr.io/example/app:latest
+    labels:
+      - "freshdock.enable=true"
+      - "freshdock.mode=live"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: example
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  # `restart: true` means "restart me when web is recreated". freshdock honours
+  # it after the rollout's updates land: a restart, never a recreate, so this
+  # container's own image is not touched.
+  reverse-proxy:
+    image: caddy:2
+    depends_on:
+      web:
+        condition: service_started
+        restart: true
+
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run", "--interval", "300"]
+    volumes:
+      # Writable socket: live mode recreates containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+volumes:
+  db-data:

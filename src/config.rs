@@ -90,16 +90,36 @@ pub struct Settings {
     /// Watchtower model (issue #79). Off by default: freshdock is opt-in.
     #[serde(default)]
     pub watch_all: bool,
+    /// Treat a Docker Compose project as one update unit (issue #78). **On**
+    /// by default, so an `Option` whose `None` resolves to `true` rather than a
+    /// `bool` whose `Default` would be `false`.
+    #[serde(default)]
+    pub compose_aware: Option<bool>,
 }
 
 /// Validated [`Settings`], ready for the commands. `Copy` so it threads cheaply
 /// through the scheduler chain alongside the other borrowed config.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ResolvedSettings {
     pub default_mode: Option<Mode>,
     pub cleanup: bool,
     pub prune_dangling: bool,
     pub watch_all: bool,
+    pub compose_aware: bool,
+}
+
+/// Hand-written so `compose_aware` keeps its non-`false` default here too; a
+/// derived one would quietly disagree with [`resolve_settings`].
+impl Default for ResolvedSettings {
+    fn default() -> Self {
+        Self {
+            default_mode: None,
+            cleanup: false,
+            prune_dangling: false,
+            watch_all: false,
+            compose_aware: true,
+        }
+    }
 }
 
 impl ResolvedSettings {
@@ -134,7 +154,8 @@ fn parse_env_bool(var: &str, raw: &str) -> Option<bool> {
 }
 
 /// Overlay `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
-/// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` onto the `[settings]`
+/// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` /
+/// `FRESHDOCK_COMPOSE_AWARE` onto the `[settings]`
 /// table (env wins per field,
 /// like the registry overlay), then validate. An invalid value is a warning,
 /// not a hard error — the next layer (file value, then built-in default)
@@ -173,6 +194,11 @@ where
                     settings.watch_all = flag;
                 }
             }
+            "FRESHDOCK_COMPOSE_AWARE" => {
+                if let Some(flag) = parse_env_bool(&key, &value) {
+                    settings.compose_aware = Some(flag);
+                }
+            }
             _ => {}
         }
     }
@@ -195,6 +221,7 @@ where
         cleanup: settings.cleanup,
         prune_dangling: settings.prune_dangling,
         watch_all: settings.watch_all,
+        compose_aware: settings.compose_aware.unwrap_or(true),
     }
 }
 
@@ -422,7 +449,8 @@ impl Config {
     /// Load the config: read `path` (or the default `./freshdock.toml` when
     /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` /
     /// `FRESHDOCK_NOTIFY_*` / `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
-    /// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` env vars on top.
+    /// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` /
+    /// `FRESHDOCK_COMPOSE_AWARE` env vars on top.
     ///
     /// An *explicit* path that doesn't exist is an error; a missing *default*
     /// file is not (it just yields env-only / empty config).
@@ -490,7 +518,8 @@ FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names
 same variable (e.g. `ops-mail` and `ops_mail` collide).\n[settings] defaults may be supplied or overridden \
 the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthly|watch|off\n  \
 FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n  \
-FRESHDOCK_WATCH_ALL                  true/false/1/0 (watch every container unless it opts out)\n\
+FRESHDOCK_WATCH_ALL                  true/false/1/0 (watch every container unless it opts out)\n  \
+FRESHDOCK_COMPOSE_AWARE              true/false/1/0 (roll a compose project out as one unit; on by default)\n\
 Run flags have env forms too, the flag winning: FRESHDOCK_INTERVAL, FRESHDOCK_TICK, FRESHDOCK_STOP_TIMEOUT \
 (see `freshdock run --help`).\nNO_COLOR (any non-empty value) disables colored output.\nFRESHDOCK_CONFIG \
 sets the config file path.";
@@ -1749,6 +1778,38 @@ mod tests {
         let cfg = Config::from_toml("[settings]\nwatch_all = true\n").unwrap();
         let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_WATCH_ALL", "maybe")]));
         assert!(resolved.watch_all);
+    }
+
+    #[test]
+    fn compose_aware_is_on_unless_it_is_turned_off() {
+        // The unsafe case is an isolated update inside a compose stack, so an
+        // absent setting has to mean "on".
+        assert!(resolve_settings(Config::default().settings, env(&[])).compose_aware);
+        assert!(ResolvedSettings::default().compose_aware);
+
+        let cfg = Config::from_toml("[settings]\ncompose_aware = false\n").unwrap();
+        assert!(!resolve_settings(cfg.settings, env(&[])).compose_aware);
+
+        let cfg = Config::from_toml("[settings]\ncompose_aware = true\n").unwrap();
+        assert!(resolve_settings(cfg.settings, env(&[])).compose_aware);
+    }
+
+    #[test]
+    fn env_compose_aware_overrides_file() {
+        let cfg = Config::from_toml("[settings]\ncompose_aware = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_COMPOSE_AWARE", "0")]));
+        assert!(!resolved.compose_aware);
+
+        let cfg = Config::from_toml("[settings]\ncompose_aware = false\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_COMPOSE_AWARE", "true")]));
+        assert!(resolved.compose_aware, "env can also turn it back on");
+    }
+
+    #[test]
+    fn invalid_env_compose_aware_is_ignored_keeping_the_file_value() {
+        let cfg = Config::from_toml("[settings]\ncompose_aware = false\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_COMPOSE_AWARE", "yes")]));
+        assert!(!resolved.compose_aware);
     }
 
     #[test]

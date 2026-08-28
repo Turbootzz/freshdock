@@ -173,6 +173,48 @@ pub async fn wait_for_health(
     }
 }
 
+/// Terminal verdict of the one-shot gate ([`wait_for_exit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitOutcome {
+    /// The container reached a stopped state. `0` is what
+    /// `service_completed_successfully` is asking about.
+    Exited { exit_code: i64 },
+    /// Still running when the budget ran out.
+    TimedOut,
+}
+
+/// Poll until `id` stops running, returning its exit code (issue #78).
+///
+/// The compose counterpart of [`wait_for_health`], which reads any exit as a
+/// crash and so is the wrong question for a one-shot. Reuses [`HealthProbe`]
+/// rather than adding a daemon method. A persistent probe failure resolves as
+/// [`ExitOutcome::TimedOut`], the verdict that aborts the rollout, which is the
+/// safe direction when the daemon has stopped answering.
+pub async fn wait_for_exit(
+    ops: &impl HealthProbe,
+    id: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    clock: &impl Clock,
+) -> ExitOutcome {
+    let start = clock.now();
+    loop {
+        match ops.probe_state(id).await {
+            Ok(ContainerRuntimeState::Exited { exit_code }) => {
+                info!(container = %id, exit_code, "one-shot: finished");
+                return ExitOutcome::Exited { exit_code };
+            }
+            Ok(state) => debug!(container = %id, ?state, "one-shot: still running"),
+            Err(e) => warn!(container = %id, error = %e, "one-shot: probe failed, will retry"),
+        }
+        if clock.now().duration_since(start) >= timeout {
+            warn!(container = %id, "one-shot: did not finish within its timeout");
+            return ExitOutcome::TimedOut;
+        }
+        clock.sleep(poll_interval).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +344,80 @@ mod tests {
         };
         let outcome = wait_for_health(&ops, "c", &test_cfg(), &TokioClock).await;
         assert_eq!(outcome, HealthOutcome::Timeout);
+    }
+
+    // ── one-shot gate (#78) ────────────────────────────────────────────────
+
+    const ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(30);
+    const ONE_SHOT_POLL: Duration = Duration::from_secs(1);
+
+    async fn wait_one_shot(ops: &impl HealthProbe) -> ExitOutcome {
+        wait_for_exit(ops, "c", ONE_SHOT_TIMEOUT, ONE_SHOT_POLL, &TokioClock).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_one_shot_that_finishes_reports_its_exit_code() {
+        let ops = ScriptedProbe::new(&[RunningNoHealthcheck, Exited { exit_code: 0 }]);
+        assert_eq!(
+            wait_one_shot(&ops).await,
+            ExitOutcome::Exited { exit_code: 0 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_one_shot_reports_its_non_zero_code() {
+        // The whole point of the gate: a migration that fails has to be
+        // distinguishable from one that succeeded, not just "it stopped".
+        let ops = ScriptedProbe::new(&[RunningNoHealthcheck, Exited { exit_code: 1 }]);
+        assert_eq!(
+            wait_one_shot(&ops).await,
+            ExitOutcome::Exited { exit_code: 1 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_one_shot_that_never_finishes_times_out() {
+        let ops = ScriptedProbe::new(&[RunningNoHealthcheck]);
+        assert_eq!(wait_one_shot(&ops).await, ExitOutcome::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_container_is_not_mistaken_for_a_finished_one_shot() {
+        // A long-running service wired up as a one-shot by a bad label must
+        // time out, never report a success it did not have.
+        let ops = ScriptedProbe::new(&[HealthHealthy]);
+        assert_eq!(wait_one_shot(&ops).await, ExitOutcome::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_one_shot_already_exited_resolves_on_the_first_poll() {
+        let ops = ScriptedProbe::new(&[Exited { exit_code: 0 }]);
+        assert_eq!(
+            wait_one_shot(&ops).await,
+            ExitOutcome::Exited { exit_code: 0 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_probe_errors_do_not_fail_the_one_shot_gate() {
+        let ops = FlakyProbe {
+            remaining_failures: Mutex::new(2),
+            then: Exited { exit_code: 0 },
+        };
+        assert_eq!(
+            wait_one_shot(&ops).await,
+            ExitOutcome::Exited { exit_code: 0 }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_probe_errors_abort_the_one_shot_gate() {
+        // Unknown outcome must not be read as success: a rollout that cannot
+        // confirm the migration ran has to stop.
+        let ops = FlakyProbe {
+            remaining_failures: Mutex::new(u32::MAX),
+            then: Exited { exit_code: 0 },
+        };
+        assert_eq!(wait_one_shot(&ops).await, ExitOutcome::TimedOut);
     }
 }
