@@ -273,7 +273,7 @@ impl Docker {
             &self.list_running().await?,
             owner_name,
             &full_id,
-            own_hostname().as_deref(),
+            crate::selfid::own_container_id_prefix().as_deref(),
         ))
     }
 
@@ -379,29 +379,6 @@ pub(crate) fn container_name(c: &ContainerSummary) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// freshdock's own hostname, used to recognise (and never stop) the freshdock
-/// container itself. Inside a container the daemon sets the hostname to the
-/// container's short id unless overridden; `/etc/hostname` is the reading that
-/// survives a `docker exec` environment, with `$HOSTNAME` as the fallback.
-fn own_hostname() -> Option<String> {
-    let from_file = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        // An empty (whitespace-only) file must fall through to $HOSTNAME, not
-        // pin the chain to `Some("")` and disable self-recognition entirely.
-        .filter(|h| !h.is_empty());
-    from_file
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .filter(|h| !h.is_empty())
-}
-
-/// Could `hostname` be a container id (or short id)? Docker's short id is 12
-/// hex characters; anything shorter or non-hex is an operator-chosen hostname
-/// and must never be prefix-matched against container ids.
-fn looks_like_container_id(hostname: &str) -> bool {
-    hostname.len() >= 12 && hostname.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Names in `running` that share the network namespace of the container
 /// identified by `owner_name`/`full_id` (`""` when the id could not be
 /// resolved). `self_hostname` is freshdock's own hostname, so it can recognise
@@ -409,7 +386,7 @@ fn looks_like_container_id(hostname: &str) -> bool {
 /// testable without a daemon.
 ///
 /// Re-attachment repairs a bystander rather than updating it, so it
-/// deliberately ignores the `freshdock.enable` policy gate — only the two
+/// deliberately ignores the `freshdock.enable` policy gate — only the
 /// *explicit* opt-out signals are honoured (see [`explicitly_opts_out`]).
 fn network_dependent_names(
     running: &[ContainerSummary],
@@ -435,7 +412,7 @@ fn network_dependent_names(
             // freshdock joined to the namespace it is updating: stopping
             // ourselves kills the daemon mid-cycle, and an explicit stop
             // defeats `restart: always`.
-            if is_self(summary, self_hostname) {
+            if crate::selfid::is_own_container(self_hostname, summary.id.as_deref()) {
                 warn!(
                     container = %dependent,
                     owner = %owner_name,
@@ -459,24 +436,10 @@ fn network_dependent_names(
         .collect()
 }
 
-/// Is this summary freshdock's own container? True only when our hostname
-/// looks like a container id and the candidate's id starts with it.
-fn is_self(summary: &ContainerSummary, self_hostname: Option<&str>) -> bool {
-    let Some(hostname) = self_hostname else {
-        return false;
-    };
-    if !looks_like_container_id(hostname) {
-        return false;
-    }
-    summary
-        .id
-        .as_deref()
-        .is_some_and(|id| id.starts_with(hostname))
-}
-
 /// Does this container carry an **explicit** freshdock opt-out —
-/// `freshdock.enable` set to a false value, or `freshdock.mode=off`? Matching
-/// is case-insensitive and whitespace-tolerant, as in [`crate::labels`].
+/// `freshdock.enable` (or its watchtower spelling) set to a false value, or
+/// `freshdock.mode=off`? Matching is case-insensitive and
+/// whitespace-tolerant, as in [`crate::labels`].
 ///
 /// Absent labels deliberately do *not* opt out: the whole point of the
 /// re-attach pass is repairing an unlabelled bystander whose namespace *we*
@@ -491,7 +454,9 @@ fn explicitly_opts_out(summary: &ContainerSummary) -> bool {
             .map(|v| v.trim().to_ascii_lowercase())
             .unwrap_or_default()
     };
-    value("freshdock.enable") == "false" || value("freshdock.mode") == "off"
+    value("freshdock.enable") == "false"
+        || value("com.centurylinklabs.watchtower.enable") == "false"
+        || value("freshdock.mode") == "off"
 }
 
 /// The container a `HostConfig.NetworkMode` joins, if any: `container:<ref>`
@@ -1013,11 +978,17 @@ mod tests {
                 "2",
                 &[("freshdock.enable", "true"), ("freshdock.mode", "OFF")],
             ),
-            summary_with("fd-unlabelled", "container:fd-base", "3", &[]),
+            summary_with(
+                "fd-wt-out",
+                "container:fd-base",
+                "3",
+                &[("com.centurylinklabs.watchtower.enable", "false")],
+            ),
+            summary_with("fd-unlabelled", "container:fd-base", "4", &[]),
             summary_with(
                 "fd-enabled",
                 "container:fd-base",
-                "4",
+                "5",
                 &[("freshdock.enable", "true")],
             ),
         ];

@@ -191,6 +191,7 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
             poll_interval: Duration::from_secs(1),
             tick: Duration::from_secs(1),
             health: HealthConfig::default(),
+            own_id_prefix: None,
         };
         scheduler::run_with(
             &fd,

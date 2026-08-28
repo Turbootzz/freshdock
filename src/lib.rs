@@ -12,4 +12,5 @@ pub mod probe;
 pub mod registry;
 pub mod rollback;
 pub mod scheduler;
+pub mod selfid;
 pub mod updater;

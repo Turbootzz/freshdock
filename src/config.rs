@@ -86,6 +86,10 @@ pub struct Settings {
     /// update. Daemon-wide, so global-only (no per-container override).
     #[serde(default)]
     pub prune_dangling: bool,
+    /// Treat every running container as enabled unless it opts out, the
+    /// Watchtower model (issue #79). Off by default: freshdock is opt-in.
+    #[serde(default)]
+    pub watch_all: bool,
 }
 
 /// Validated [`Settings`], ready for the commands. `Copy` so it threads cheaply
@@ -95,15 +99,18 @@ pub struct ResolvedSettings {
     pub default_mode: Option<Mode>,
     pub cleanup: bool,
     pub prune_dangling: bool,
+    pub watch_all: bool,
 }
 
 impl ResolvedSettings {
-    /// The label-parsing defaults this implies (mode + cleanup). `prune_dangling`
-    /// is not a label concept, so it is not part of [`PolicyDefaults`].
+    /// The label-parsing defaults this implies (mode + cleanup + watch_all).
+    /// `prune_dangling` is not a label concept, so it is not part of
+    /// [`PolicyDefaults`].
     pub fn policy_defaults(&self) -> PolicyDefaults {
         PolicyDefaults {
             mode: self.default_mode,
             cleanup: self.cleanup,
+            watch_all: self.watch_all,
         }
     }
 }
@@ -127,7 +134,8 @@ fn parse_env_bool(var: &str, raw: &str) -> Option<bool> {
 }
 
 /// Overlay `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
-/// `FRESHDOCK_PRUNE_DANGLING` onto the `[settings]` table (env wins per field,
+/// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` onto the `[settings]`
+/// table (env wins per field,
 /// like the registry overlay), then validate. An invalid value is a warning,
 /// not a hard error — the next layer (file value, then built-in default)
 /// applies, so one typo can't stop the daemon from starting.
@@ -160,6 +168,11 @@ where
                     settings.prune_dangling = flag;
                 }
             }
+            "FRESHDOCK_WATCH_ALL" => {
+                if let Some(flag) = parse_env_bool(&key, &value) {
+                    settings.watch_all = flag;
+                }
+            }
             _ => {}
         }
     }
@@ -181,6 +194,7 @@ where
         default_mode,
         cleanup: settings.cleanup,
         prune_dangling: settings.prune_dangling,
+        watch_all: settings.watch_all,
     }
 }
 
@@ -408,7 +422,7 @@ impl Config {
     /// Load the config: read `path` (or the default `./freshdock.toml` when
     /// `path` is `None`), then overlay `FRESHDOCK_REGISTRY_*` /
     /// `FRESHDOCK_NOTIFY_*` / `FRESHDOCK_DEFAULT_MODE` / `FRESHDOCK_CLEANUP` /
-    /// `FRESHDOCK_PRUNE_DANGLING` env vars on top.
+    /// `FRESHDOCK_PRUNE_DANGLING` / `FRESHDOCK_WATCH_ALL` env vars on top.
     ///
     /// An *explicit* path that doesn't exist is an error; a missing *default*
     /// file is not (it just yields env-only / empty config).
@@ -475,7 +489,8 @@ FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN    (telegram)\n  \
 FRESHDOCK_NOTIFY_<NAME>_PASSWORD     (smtp)\nUse plain alphanumeric target names so two can't map to the \
 same variable (e.g. `ops-mail` and `ops_mail` collide).\n[settings] defaults may be supplied or overridden \
 the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthly|watch|off\n  \
-FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n\
+FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n  \
+FRESHDOCK_WATCH_ALL                  true/false/1/0 (watch every container unless it opts out)\n\
 Run flags have env forms too, the flag winning: FRESHDOCK_INTERVAL, FRESHDOCK_TICK, FRESHDOCK_STOP_TIMEOUT \
 (see `freshdock run --help`).\nNO_COLOR (any non-empty value) disables colored output.\nFRESHDOCK_CONFIG \
 sets the config file path.";
@@ -1706,6 +1721,42 @@ mod tests {
         let cfg = Config::from_toml("[settings]\ncleanup = true\n").unwrap();
         let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_CLEANUP", "maybe")]));
         assert!(resolved.cleanup);
+    }
+
+    #[test]
+    fn watch_all_parses_from_settings_table() {
+        let cfg = Config::from_toml("[settings]\nwatch_all = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[]));
+        assert!(resolved.watch_all);
+        // Absent key keeps the opt-in default.
+        let cfg = Config::from_toml("[settings]\ncleanup = true\n").unwrap();
+        assert!(!resolve_settings(cfg.settings, env(&[])).watch_all);
+    }
+
+    #[test]
+    fn env_watch_all_overrides_file() {
+        let cfg = Config::from_toml("[settings]\nwatch_all = false\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_WATCH_ALL", "1")]));
+        assert!(resolved.watch_all);
+
+        let cfg = Config::from_toml("[settings]\nwatch_all = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_WATCH_ALL", "false")]));
+        assert!(!resolved.watch_all, "env can also turn it back off");
+    }
+
+    #[test]
+    fn invalid_env_watch_all_is_ignored_keeping_file_value() {
+        let cfg = Config::from_toml("[settings]\nwatch_all = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_WATCH_ALL", "maybe")]));
+        assert!(resolved.watch_all);
+    }
+
+    #[test]
+    fn resolved_settings_forward_watch_all_to_policy_defaults() {
+        let cfg = Config::from_toml("[settings]\nwatch_all = true\n").unwrap();
+        let resolved = resolve_settings(cfg.settings, env(&[]));
+        assert!(resolved.policy_defaults().watch_all);
+        assert!(!ResolvedSettings::default().policy_defaults().watch_all);
     }
 
     #[test]

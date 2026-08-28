@@ -50,6 +50,10 @@ docker run -d \
 This is the [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml) example. A
 read-only socket is enough for `watch`.
 
+Don't want to label every container? `FRESHDOCK_WATCH_ALL=true` includes them all
+unless they opt out, see
+[watching every container](configuration.md#watching-every-container).
+
 ## 4. Let it actually update something
 
 Switch a container to an updating mode and give the daemon a writable socket:

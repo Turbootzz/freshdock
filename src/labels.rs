@@ -46,6 +46,8 @@ pub struct Policy {
     pub cleanup: bool,
     /// Lifecycle hook commands from `freshdock.lifecycle.*` labels (issue #61).
     pub hooks: LifecycleHooks,
+    /// Enablement came from `watch_all`, not from any label (issue #79).
+    pub auto_enabled: bool,
 }
 
 /// A single lifecycle hook: a command exec'd inside the container via
@@ -94,6 +96,9 @@ pub struct PolicyDefaults {
     pub mode: Option<Mode>,
     /// Default for `freshdock.cleanup`.
     pub cleanup: bool,
+    /// Treat a container with no enable label as enabled (issue #79). The
+    /// explicit opt-outs still apply.
+    pub watch_all: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,15 +119,17 @@ pub fn parse_policy(
     labels: &HashMap<String, String>,
     defaults: PolicyDefaults,
 ) -> Result<Policy, LabelError> {
-    let enabled = match labels.get("freshdock.enable") {
-        Some(v) => parse_bool("freshdock.enable", v)?,
-        // Watchtower fallback: `enable=true` is an explicit opt-in either way;
-        // `enable=false` (or absence) is simply not opted in.
+    // Either enable label states intent; only their absence falls back to the
+    // fleet-wide `watch_all`.
+    let explicit = match labels.get("freshdock.enable") {
+        Some(v) => Some(parse_bool("freshdock.enable", v)?),
         None => match labels.get(WT_ENABLE) {
-            Some(v) => parse_bool(WT_ENABLE, v)?,
-            None => false,
+            Some(v) => Some(parse_bool(WT_ENABLE, v)?),
+            None => None,
         },
     };
+    let enabled = explicit.unwrap_or(defaults.watch_all);
+    let auto_enabled = explicit.is_none() && enabled;
 
     if !enabled {
         return Ok(Policy {
@@ -132,6 +139,7 @@ pub fn parse_policy(
             schedule: None,
             cleanup: false,
             hooks: LifecycleHooks::default(),
+            auto_enabled: false,
         });
     }
 
@@ -183,6 +191,7 @@ pub fn parse_policy(
         schedule,
         cleanup,
         hooks,
+        auto_enabled,
     })
 }
 
@@ -947,6 +956,103 @@ mod tests {
             "agreeing labels are not a conflict"
         );
         assert!(watchtower_diagnostics(&labels(&[("freshdock.enable", "true")])).is_empty());
+    }
+
+    // --- watch_all opt-out mode (issue #79) ---
+
+    /// Defaults with the opt-out mode switched on.
+    fn watch_all() -> PolicyDefaults {
+        PolicyDefaults {
+            watch_all: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watch_all_enables_unlabelled_container() {
+        let p = parse_policy(&labels(&[]), watch_all()).unwrap();
+        assert!(
+            p.enabled,
+            "an absent enable label means enabled under watch_all"
+        );
+        assert_eq!(p.mode, Mode::Watch, "watch_all alone stays report-only");
+        assert!(
+            p.auto_enabled,
+            "enablement came from watch_all, not a label"
+        );
+    }
+
+    #[test]
+    fn watch_all_respects_default_mode() {
+        let p = parse_policy(
+            &labels(&[]),
+            PolicyDefaults {
+                watch_all: true,
+                mode: Some(Mode::Nightly),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(p.mode, Mode::Nightly);
+        assert!(p.auto_enabled);
+    }
+
+    #[test]
+    fn watch_all_enable_false_opts_out() {
+        let p = parse_policy(&labels(&[("freshdock.enable", "false")]), watch_all()).unwrap();
+        assert!(!p.enabled);
+        assert!(!p.auto_enabled);
+    }
+
+    #[test]
+    fn watch_all_mode_off_opts_out_via_mode() {
+        // No enable label, so watch_all enables it; `mode=off` is what the
+        // downstream gates refuse.
+        let p = parse_policy(&labels(&[("freshdock.mode", "off")]), watch_all()).unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.mode, Mode::Off);
+        assert!(p.auto_enabled);
+    }
+
+    #[test]
+    fn watch_all_watchtower_enable_false_opts_out() {
+        let p = parse_policy(
+            &labels(&[("com.centurylinklabs.watchtower.enable", "false")]),
+            watch_all(),
+        )
+        .unwrap();
+        assert!(!p.enabled, "a watchtower exclusion label still excludes");
+        assert!(!p.auto_enabled);
+    }
+
+    #[test]
+    fn explicit_enable_true_is_not_auto_enabled() {
+        for pairs in [
+            &[("freshdock.enable", "true")][..],
+            &[("com.centurylinklabs.watchtower.enable", "true")][..],
+        ] {
+            let p = parse_policy(&labels(pairs), watch_all()).unwrap();
+            assert!(p.enabled);
+            assert!(
+                !p.auto_enabled,
+                "an explicit label opted in, not watch_all: {pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_all_off_preserves_current_behavior() {
+        let p = parse_policy(&labels(&[]), PolicyDefaults::default()).unwrap();
+        assert!(!p.enabled);
+        assert!(!p.auto_enabled);
+
+        let p = parse_policy(
+            &labels(&[("freshdock.enable", "true")]),
+            PolicyDefaults::default(),
+        )
+        .unwrap();
+        assert!(p.enabled);
+        assert!(!p.auto_enabled);
     }
 
     #[test]
