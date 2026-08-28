@@ -45,7 +45,7 @@ these Docker labels (set them in compose under `labels:` or with
 
 | Label | Values | Default | Meaning |
 |---|---|---|---|
-| `freshdock.enable` | `true` / `false` | `false` (`true` under [`watch_all`](#watching-every-container)) | Master switch. Without `true`, the container is invisible to freshdock and every other label is ignored. |
+| `freshdock.enable` | `true` / `false` | `false` (`true` under [`watch_all`](#watching-every-container)) | Master switch. Without `true`, the container is invisible to freshdock and every other label is ignored. Under [`watch_all`](#watching-every-container) an absent label counts as enabled (the other labels then apply as usual) and `false` is the explicit opt-out. |
 | `freshdock.mode` | `live` / `nightly` / `weekly` / `monthly` / `watch` / `off` | `watch` (or `[settings] default_mode`) | How and when this container updates. See [scheduling](scheduling.md). |
 | `freshdock.schedule` | 5-field cron | the mode's default | Override the cron for a calendar mode. Ignored for `live` / `watch` / `off`. See [cron syntax](scheduling.md#cron-syntax). |
 | `freshdock.notify` | `true` / `false` | `false` | Emit notifications for this container's update events. Requires a configured `[notifications.*]` target. See [notifications](notifications.md). |
