@@ -5,7 +5,10 @@ use tracing::{debug, info, warn};
 
 use super::spec::ContainerSpec;
 use super::{DockerError, container_reference};
-use crate::health::{Clock, HealthConfig, HealthOutcome, HealthProbe, wait_for_health};
+use crate::compose::ProjectMember;
+use crate::health::{
+    Clock, ExitOutcome, HealthConfig, HealthOutcome, HealthProbe, wait_for_exit, wait_for_health,
+};
 use crate::labels::{Hook, LifecycleHooks};
 use crate::registry::ImageRef;
 use crate::rollback::{RollbackReason, rollback};
@@ -88,6 +91,14 @@ pub trait DockerOps: Sync {
     /// turns `network_mode: service:X` into `container:<id of X>` at create
     /// time, and that id dies with the replaced container.
     async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError>;
+    /// Every container of a compose project, **including stopped ones** (#78).
+    /// `all: true` is the point: an exited one-shot is invisible otherwise.
+    ///
+    /// Defaulted like [`preflight_recreate`](DockerOps::preflight_recreate), so
+    /// a fake that inherits it degrades to the single-container path.
+    async fn list_project(&self, _project: &str) -> Result<Vec<ProjectMember>, DockerError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Post-update image cleanup, off by default (PLAN §5.2 step 8). Both steps are
@@ -581,6 +592,100 @@ pub async fn recreate_with_health(
     )
     .await;
     Ok(RecreateOutcome::RolledBack(event))
+}
+
+/// Verdict of re-running a compose one-shot ([`recreate_one_shot`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneShotOutcome {
+    /// Exited zero: the condition its dependents wait on is satisfied.
+    Completed,
+    Failed {
+        exit_code: i64,
+    },
+    /// Still running when its budget ran out. As good as a failure: the
+    /// condition was not met.
+    TimedOut,
+    SkippedByHook(HookSkipReason),
+}
+
+/// Re-run a compose one-shot the project waits on (issue #78).
+///
+/// Same cycle as [`recreate_with_health`] up to the start, then a different
+/// question: a one-shot's correct terminal state is `exited 0`, which the
+/// health gate would read as a crash, so [`wait_for_exit`] asks for the code.
+///
+/// **A failure is deliberately not rolled back.** The command already ran and
+/// may have half-applied; restoring the previous container object changes
+/// nothing about that and destroys the only logs explaining it. The failed
+/// container and the archive are both kept and the caller aborts the rollout.
+/// **Lifecycle hooks are skipped entirely**, both of them, for the same reason:
+/// a one-shot has already exited when the cycle starts and has exited again
+/// when it ends, and `docker exec` refuses a container that is not running. A
+/// pre-update hook here could therefore only ever fail, and a failing
+/// pre-update hook aborts the rollout, so honouring it would let one label
+/// silently block every update in the project forever.
+#[allow(clippy::too_many_arguments)]
+pub async fn recreate_one_shot(
+    ops: &(impl DockerOps + HealthProbe),
+    name: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    clock: &impl Clock,
+    cleanup: Cleanup,
+    hooks: &LifecycleHooks,
+    ts_provider: impl Fn() -> i64,
+) -> Result<OneShotOutcome, DockerError> {
+    if hooks.pre_update.is_some() || hooks.post_update.is_some() {
+        warn!(
+            container = %name,
+            "ignoring lifecycle hooks on a one-shot: it is not running, so neither hook could be exec'd"
+        );
+    }
+    let cycle = match recreate_one(ops, name, &LifecycleHooks::default(), &ts_provider).await? {
+        CycleOutcome::Completed(cycle) => cycle,
+        CycleOutcome::Skipped(reason) => return Ok(OneShotOutcome::SkippedByHook(reason)),
+    };
+
+    match wait_for_exit(ops, &cycle.new_id, timeout, poll_interval, clock).await {
+        ExitOutcome::Exited { exit_code: 0 } => {
+            info!(container = %cycle.owner_name, "one-shot completed successfully");
+            reattach_dependents(
+                ops,
+                &cycle.owner_name,
+                Some(&cycle.new_id),
+                &cycle.dependents,
+                &ts_provider,
+            )
+            .await;
+            if let Err(e) = ops.remove(&cycle.old_name, false).await {
+                warn!(archive = %cycle.old_name, error = %e, "one-shot completed but failed to remove the archived old container; remove it manually");
+            }
+            run_cleanup(ops, cleanup, cycle.old_image_id.as_deref()).await;
+            Ok(OneShotOutcome::Completed)
+        }
+        ExitOutcome::Exited { exit_code } => {
+            warn!(
+                container = %cycle.owner_name,
+                exit_code,
+                archive = %cycle.old_name,
+                "one-shot failed; leaving the failed container and its archive in place so the logs survive"
+            );
+            // Past the stop their namespace is already gone, and an exited
+            // one-shot is nothing to re-attach to. Name them so they are not
+            // lost from the record.
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
+            Ok(OneShotOutcome::Failed { exit_code })
+        }
+        ExitOutcome::TimedOut => {
+            warn!(
+                container = %cycle.owner_name,
+                archive = %cycle.old_name,
+                "one-shot did not finish within its timeout; leaving it running so its logs survive"
+            );
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
+            Ok(OneShotOutcome::TimedOut)
+        }
+    }
 }
 
 /// Post-success image cleanup. Runs only after the new container is healthy and

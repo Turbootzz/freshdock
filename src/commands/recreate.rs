@@ -9,7 +9,8 @@ use crate::docker::Docker;
 use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe, TokioClock};
-use crate::labels::{self, Mode, PolicyDefaults};
+use crate::labels::{self, Mode};
+use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
 /// Recreate a single container by name, health-gated: inspect → pull → stop →
@@ -46,8 +47,7 @@ pub async fn run(
         &name,
         &HealthConfig::default(),
         &TokioClock,
-        settings.policy_defaults(),
-        settings.prune_dangling,
+        settings,
         current_unix_timestamp,
     )
     .await
@@ -55,22 +55,23 @@ pub async fn run(
 
 /// Testable core of `recreate`: parameterised over the daemon ops, health
 /// timing, clock, and timestamp source so unit tests can exercise the policy
-/// gate without a live socket. `defaults`/`prune_dangling` come from
-/// `[settings]`; the per-container `freshdock.cleanup` label still wins.
-#[allow(clippy::too_many_arguments)]
+/// gate without a live socket. `settings` carries the `[settings]` defaults;
+/// the per-container `freshdock.cleanup` label still wins.
 pub async fn run_with(
     docker: &(impl DockerOps + HealthProbe),
     name: &str,
     health: &HealthConfig,
     clock: &impl Clock,
-    defaults: PolicyDefaults,
-    prune_dangling: bool,
+    settings: ResolvedSettings,
     ts_provider: impl Fn() -> i64,
 ) -> Result<(), AppError> {
     let spec = docker.inspect(name).await?;
 
     let empty: HashMap<String, String> = HashMap::new();
-    let policy = labels::parse_policy(spec.config.labels.as_ref().unwrap_or(&empty), defaults)?;
+    let policy = labels::parse_policy(
+        spec.config.labels.as_ref().unwrap_or(&empty),
+        settings.policy_defaults(),
+    )?;
     if !policy.enabled || policy.mode == Mode::Off {
         warn!(
             container = %name,
@@ -87,9 +88,32 @@ pub async fn run_with(
         warn!(container = %name, %note, "watchtower label");
     }
 
+    // A compose member is rolled out with the rest of its project (#78); the
+    // operator named one container, but the stack is the unit of work.
+    if settings.compose_aware
+        && let Some(report) = rollout::for_container(
+            docker,
+            &spec.name,
+            spec.config.labels.as_ref().unwrap_or(&empty),
+            &RolloutConfig {
+                health: health.clone(),
+                prune_dangling: settings.prune_dangling,
+                one_shot_timeout: settings.one_shot_timeout,
+            },
+            clock,
+            settings.policy_defaults(),
+            crate::selfid::own_container_id_prefix().as_deref(),
+            &ts_provider,
+        )
+        .await
+    {
+        print_rollout(&report);
+        return Ok(());
+    }
+
     let cleanup = Cleanup {
         remove_replaced: policy.cleanup,
-        prune_dangling,
+        prune_dangling: settings.prune_dangling,
     };
     let outcome = recreate_with_health(
         docker,
@@ -144,6 +168,40 @@ fn current_unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Report a rollout on stdout, one line per step plus the verdict, in the
+/// order it happened.
+fn print_rollout(report: &RolloutReport) {
+    println!("rollout of compose project {}:", report.project);
+    for step in &report.steps {
+        match step {
+            RolloutStep::OneShotCompleted { container } => {
+                println!("  {container}: re-ran to a successful exit")
+            }
+            RolloutStep::Updated {
+                container, new_id, ..
+            } => {
+                println!("  {container}: updated and healthy (new id {new_id})")
+            }
+            RolloutStep::Restarted { container } => {
+                println!("  {container}: restarted (depends_on restart: true)")
+            }
+        }
+    }
+    match &report.aborted {
+        None if report.steps.is_empty() => {
+            println!("rollout did nothing:");
+            for skipped in &report.skipped {
+                println!("  {}: {}", skipped.container, skipped.reason);
+            }
+        }
+        None => println!("rollout complete: {} step(s)", report.steps.len()),
+        Some(reason) => println!(
+            "rollout ABORTED: {reason}. The services after this point were not touched \
+             and are still running their previous image."
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -257,14 +315,13 @@ mod tests {
         }
     }
 
-    async fn assert_refused_with(ops: GateOps, defaults: PolicyDefaults) {
+    async fn assert_refused_with(ops: GateOps, settings: ResolvedSettings) {
         run_with(
             &ops,
             "c",
             &HealthConfig::default(),
             &TokioClock,
-            defaults,
-            false,
+            settings,
             || 0,
         )
         .await
@@ -272,12 +329,12 @@ mod tests {
     }
 
     async fn assert_refused(ops: GateOps) {
-        assert_refused_with(ops, PolicyDefaults::default()).await;
+        assert_refused_with(ops, ResolvedSettings::default()).await;
     }
 
-    /// Defaults with the opt-out mode switched on.
-    fn watch_all() -> PolicyDefaults {
-        PolicyDefaults {
+    /// Settings with the opt-out mode switched on.
+    fn watch_all() -> ResolvedSettings {
+        ResolvedSettings {
             watch_all: true,
             ..Default::default()
         }
@@ -314,7 +371,6 @@ mod tests {
             &HealthConfig::default(),
             &TokioClock,
             watch_all(),
-            false,
             || 0,
         )
         .await;

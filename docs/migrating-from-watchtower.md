@@ -38,8 +38,11 @@ What's honoured directly:
 | `…lifecycle.pre-update-timeout` / `post-update-timeout` | Honoured in Watchtower's unit (**minutes**, converted; `0` = unlimited). The `freshdock.lifecycle.*-timeout` labels count seconds. |
 
 Not supported — logged once and ignored: `no-pull`, `depends-on`, `scope`,
-`lifecycle.pre-check` / `post-check`. Dependency ordering is out of v1 scope and
-freshdock always pulls before recreate; there are no per-cycle check hooks.
+`lifecycle.pre-check` / `post-check`. freshdock always pulls before recreate and
+has no per-cycle check hooks. Dependency ordering is not read from the
+Watchtower label: inside a Docker Compose project freshdock reads Compose's own
+`depends_on` graph instead, and rolls the project out as one unit. See
+[Compose projects](compose.md).
 
 ## Keeping Watchtower's opt-out model
 
@@ -90,7 +93,7 @@ Prefer clean labels (or need the finer-grained knobs)? The native spelling:
 | `com.centurylinklabs.watchtower.lifecycle.post-update` | `freshdock.lifecycle.post-update` | Best-effort exec in the new container after the health gate. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-check` / `post-check` | *(no equivalent)* | freshdock has no per-cycle check hooks. |
 | `com.centurylinklabs.watchtower.no-pull=true` | *(no equivalent)* | freshdock always pulls before recreate; there is no "recreate without pull". |
-| `com.centurylinklabs.watchtower.depends-on` | *(no equivalent in v1)* | Dependency ordering is out of v1 scope; containers are processed independently. |
+| `com.centurylinklabs.watchtower.depends-on` | *(no equivalent)* | The label itself is ignored. Inside a Compose project freshdock uses Compose's native `depends_on` graph, which needs no extra labels, see [Compose projects](compose.md). Outside one, containers are processed independently. |
 
 ## Flag / environment translation
 

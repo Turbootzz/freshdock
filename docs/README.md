@@ -14,6 +14,7 @@ dive into the reference pages.
 - [**Configuration**](configuration.md) — the single source of truth: labels, environment variables (the primary path), and the optional `freshdock.toml`.
 - [**CLI reference**](cli-reference.md) — `check`, `recreate`, `run`, and every flag.
 - [**Scheduling & modes**](scheduling.md) — update modes and cron syntax.
+- [**Compose projects**](compose.md) — a Compose stack updated as one unit: one-shot migrations, `depends_on` ordering.
 - [**Notifications**](notifications.md) — webhook, Discord, Telegram, SMTP.
 - [**Health gating & rollback**](health-and-rollback.md) — the recreate lifecycle and image cleanup.
 - [**Registry authentication**](registry-auth.md) — private registries and credentials.

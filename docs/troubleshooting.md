@@ -13,6 +13,8 @@ the reference page with the full story.
 - [A container is reported as `pinned (no check)`](#a-container-is-reported-as-pinned-no-check)
 - [Updates fail with a read-only socket](#updates-fail-with-a-read-only-socket)
 - [A sidecar on `network_mode: container:X` lost its network](#a-sidecar-on-network_mode-containerx-lost-its-network)
+- [My app updated but its database migration didn't run](#my-app-updated-but-its-database-migration-didnt-run)
+- [A compose rollout aborted](#a-compose-rollout-aborted)
 - [Where are the logs?](#where-are-the-logs)
 
 ---
@@ -155,6 +157,72 @@ Sidecars referencing X by an id prefix shorter than 12 characters are not
 recognised, and dependency chains are not followed transitively.
 
 → [Manual test: network-namespace dependents](manual-tests/network-dependents.md)
+
+## My app updated but its database migration didn't run
+
+The classic Compose failure: a one-shot `migrate` service sits in `exited (0)`
+after its last run, so a per-container updater never sees it. The app image
+moves, the app is recreated, and the migration stays on the old code: new
+application code against an old schema. Nothing crashes, so no health gate
+catches it.
+
+freshdock handles this natively as long as the migration is wired up the normal
+Compose way:
+
+```yaml
+  web:
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+```
+
+That condition is what marks `migrate` as a one-shot the project waits on.
+freshdock then re-runs it *before* recreating `web`, even though `migrate` has
+no freshdock labels of its own.
+
+If it still doesn't run, check in this order:
+
+- **Is the condition actually `service_completed_successfully`?** A bare
+  `depends_on: [migrate]` (or `condition: service_started`) does not mark it as a
+  one-shot, and freshdock will not touch an unlabelled container without it.
+- **Is `compose_aware` on?** It is by default; `FRESHDOCK_COMPOSE_AWARE=0` or
+  `[settings] compose_aware = false` disables it.
+- **Does the migration opt out?** `freshdock.enable=false`,
+  `com.centurylinklabs.watchtower.enable=false`, or `freshdock.mode=off` on the
+  one-shot are honoured, one-shot or not.
+- **Do the two share an image?** The rollout is triggered by a container
+  freshdock watches, and only members on that same image are updated. In the
+  usual pattern `migrate` and `web` both run `app:latest`, which is what makes
+  the link.
+- **Was it still running?** A one-shot that is mid-run is left alone rather than
+  stomped; it is picked up on the next cycle.
+
+Full rules: [Compose projects](compose.md#what-gets-updated).
+
+## A compose rollout aborted
+
+```text
+rollout ABORTED: shop-migrate-1 exited with code 1. The services after this
+point were not touched and are still running their previous image.
+```
+
+This is the safety behaviour, not a bug: a one-shot the project waits on did not
+exit `0`, so freshdock stopped rather than starting new code against a migration
+that did not complete. Your stack is still running its previous image.
+
+The failed container is kept on purpose, and so is the archive of its previous
+instance, since the logs are the only record of what went wrong:
+
+```bash
+docker logs shop-migrate-1
+```
+
+Fix the cause, then re-run it with `freshdock recreate <the labelled service>`,
+or wait for the next scheduled cycle. Nothing is rolled back automatically: the
+command already ran and may have applied part of its work, so restoring the
+previous container object would change nothing about your database while
+throwing the evidence away. See
+[when a one-shot fails](compose.md#when-a-one-shot-fails).
 
 ## Where are the logs?
 

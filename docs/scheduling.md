@@ -93,3 +93,9 @@ The digest is compared for **membership**: Docker can record one local image
 under several manifest digests, and the container counts as up to date when
 upstream's digest is any of them — otherwise a republished multi-arch index
 would recreate a healthy container on every run.
+
+> **Inside a multi-service Compose project, step 3 becomes a project rollout.**
+> The one-shot services the project waits on are re-run first, the rest follow in
+> `depends_on` order, and the whole project is checked once rather than container
+> by container. A project holding only the container that triggered it keeps the
+> ordinary path. See [Compose projects](compose.md).

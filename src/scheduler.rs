@@ -34,6 +34,7 @@ use crate::labels::{self, Mode, Policy};
 use crate::notify::{Dispatcher, NotifyEvent};
 use crate::probe::{self, ProbeOutcome};
 use crate::registry::Registry;
+use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
 /// Tunables for the scheduler loop.
@@ -217,6 +218,9 @@ async fn run_tick<D, R>(
     let now = now_provider();
     let empty = HashMap::new();
     let mut live: HashSet<String> = HashSet::new();
+    // Containers a compose rollout already updated this tick (issue #78).
+    // Their schedule state is left alone: a re-probe next tick is cheap.
+    let mut handled: HashSet<String> = HashSet::new();
 
     for c in &containers {
         // Decline new work once shutdown is signalled; the previous container
@@ -229,6 +233,11 @@ async fn run_tick<D, R>(
 
         let name = container_name(c);
         if is_archive_name(&name) {
+            continue;
+        }
+        if handled.contains(&name) {
+            debug!(container = %name, "scheduler: already updated by a compose rollout this tick");
+            live.insert(name);
             continue;
         }
         let policy = match labels::parse_policy(
@@ -288,20 +297,23 @@ async fn run_tick<D, R>(
         }
 
         let image = c.image.as_deref().unwrap_or_default();
-        process_container(
-            docker,
-            registry,
-            cfg,
-            clock,
-            now,
-            &name,
-            &policy,
-            image,
-            dispatcher,
-            &mut state.last_notified_digest,
-            settings.prune_dangling,
-        )
-        .await;
+        handled.extend(
+            process_container(
+                docker,
+                registry,
+                cfg,
+                clock,
+                now,
+                &name,
+                &policy,
+                c.labels.as_ref().unwrap_or(&empty),
+                image,
+                dispatcher,
+                &mut state.last_notified_digest,
+                settings,
+            )
+            .await,
+        );
     }
 
     states.retain(|k, _| live.contains(k));
@@ -310,6 +322,9 @@ async fn run_tick<D, R>(
 
 /// Probe one container and act on the verdict: recreate for active modes,
 /// report-only for `watch`, skip otherwise. Logs and returns on any failure.
+///
+/// Returns every container an applied update touched: more than one when it
+/// turned out to be part of a compose rollout (issue #78).
 #[allow(clippy::too_many_arguments)]
 async fn process_container<D, R>(
     docker: &D,
@@ -319,11 +334,13 @@ async fn process_container<D, R>(
     now: DateTime<Local>,
     name: &str,
     policy: &Policy,
+    container_labels: &HashMap<String, String>,
     image: &str,
     dispatcher: &Dispatcher,
     last_notified: &mut Option<String>,
-    prune_dangling: bool,
-) where
+    settings: ResolvedSettings,
+) -> Vec<String>
+where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
 {
@@ -332,11 +349,11 @@ async fn process_container<D, R>(
             match local.update_available(&latest) {
                 None => {
                     debug!(container = %name, %latest, "scheduler: local digest unknown; not updating");
-                    return;
+                    return Vec::new();
                 }
                 Some(false) => {
                     debug!(container = %name, "scheduler: up to date");
-                    return;
+                    return Vec::new();
                 }
                 Some(true) => {}
             }
@@ -357,16 +374,17 @@ async fn process_container<D, R>(
                     }
                 }
                 Mode::Live | Mode::Nightly | Mode::Weekly | Mode::Monthly => {
-                    apply_update(
+                    return apply_update(
                         docker,
                         cfg,
                         clock,
                         now,
                         name,
                         policy,
+                        container_labels,
                         image,
                         dispatcher,
-                        prune_dangling,
+                        settings,
                     )
                     .await;
                 }
@@ -389,10 +407,14 @@ async fn process_container<D, R>(
             warn!(container = %name, %msg, "scheduler: digest probe failed; continuing");
         }
     }
+    Vec::new()
 }
 
 /// Run the health-gated recreate, log its outcome, and (when the container opts
 /// in via `policy.notify`) dispatch the matching notification.
+///
+/// Returns every container the update touched, so the same tick does not
+/// re-process one a compose rollout already handled.
 #[allow(clippy::too_many_arguments)]
 async fn apply_update<D>(
     docker: &D,
@@ -401,17 +423,42 @@ async fn apply_update<D>(
     now: DateTime<Local>,
     name: &str,
     policy: &Policy,
+    container_labels: &HashMap<String, String>,
     image: &str,
     dispatcher: &Dispatcher,
-    prune_dangling: bool,
-) where
+    settings: ResolvedSettings,
+) -> Vec<String>
+where
     D: DockerOps + HealthProbe + Sync,
 {
     let ts = now.timestamp();
     let cleanup = Cleanup {
         remove_replaced: policy.cleanup,
-        prune_dangling,
+        prune_dangling: settings.prune_dangling,
     };
+
+    // Inside a compose project the unit of work is the project (issue #78).
+    // `for_container` returns `None` for anything else.
+    if settings.compose_aware
+        && let Some(report) = rollout::for_container(
+            docker,
+            name,
+            container_labels,
+            &RolloutConfig {
+                health: cfg.health.clone(),
+                prune_dangling: settings.prune_dangling,
+                one_shot_timeout: settings.one_shot_timeout,
+            },
+            clock,
+            settings.policy_defaults(),
+            cfg.own_id_prefix.as_deref(),
+            &|| ts,
+        )
+        .await
+    {
+        return report_rollout(&report, policy, image, dispatcher).await;
+    }
+
     match recreate_with_health(
         docker,
         name,
@@ -458,6 +505,65 @@ async fn apply_update<D>(
             warn!(container = %name, error = %e, "scheduler: recreate failed; daemon continues");
         }
     }
+    vec![name.to_string()]
+}
+
+/// Log a finished rollout and notify on it. Success stays per-container, the
+/// notification operators already have rules for, and each one honours its own
+/// `freshdock.notify`. An abort is per project, so it follows the policy of the
+/// container that triggered the rollout.
+async fn report_rollout(
+    report: &RolloutReport,
+    policy: &Policy,
+    image: &str,
+    dispatcher: &Dispatcher,
+) -> Vec<String> {
+    let claimed = report.claimed();
+    for step in &report.steps {
+        match step {
+            RolloutStep::OneShotCompleted { container } => {
+                info!(project = %report.project, %container, "scheduler: rollout re-ran one-shot")
+            }
+            RolloutStep::Updated {
+                container,
+                new_id,
+                notify,
+            } => {
+                info!(project = %report.project, %container, %new_id, "scheduler: rollout updated service");
+                // This container's own `freshdock.notify`, not the trigger's: a
+                // sibling that opted out of notifications must not be announced
+                // just because the container that started the rollout opted in.
+                if *notify {
+                    dispatcher
+                        .dispatch(&NotifyEvent::UpdateSucceeded {
+                            container: container.clone(),
+                            image: image.to_string(),
+                            new_id: new_id.clone(),
+                        })
+                        .await;
+                }
+            }
+            RolloutStep::Restarted { container } => {
+                info!(project = %report.project, %container, "scheduler: rollout restarted dependent")
+            }
+        }
+    }
+    if let Some(reason) = &report.aborted {
+        warn!(project = %report.project, %reason, "scheduler: rollout aborted");
+        if policy.notify {
+            dispatcher
+                .dispatch(&NotifyEvent::RolloutAborted {
+                    project: report.project.clone(),
+                    reason: reason.to_string(),
+                    // `touched`, not `updated_containers`: a migration that
+                    // completed before the abort has already moved the schema.
+                    completed: report.touched().into_iter().map(str::to_string).collect(),
+                    remaining: report.not_completed.clone(),
+                })
+                .await;
+        }
+    }
+    claimed
 }
 
 #[cfg(test)]
@@ -606,6 +712,9 @@ mod tests {
         health_state: ContainerRuntimeState,
         /// Verdict `exec_hook` returns; default exit 0.
         hook_status: crate::docker::recreate::HookStatus,
+        /// What `list_project` reports (#78). Empty means "not a compose
+        /// project", which is what every pre-#78 test wants.
+        project_members: Vec<crate::compose::ProjectMember>,
     }
 
     impl FakeNode {
@@ -622,7 +731,13 @@ mod tests {
                 creates: AtomicUsize::new(0),
                 health_state: ContainerRuntimeState::HealthHealthy,
                 hook_status: crate::docker::recreate::HookStatus::Completed { exit_code: 0 },
+                project_members: Vec::new(),
             }
+        }
+        /// Serve a compose project from `list_project`.
+        fn in_project(mut self, members: Vec<crate::compose::ProjectMember>) -> Self {
+            self.project_members = members;
+            self
         }
         fn failing() -> Self {
             Self {
@@ -733,6 +848,12 @@ mod tests {
         }
         async fn list_network_dependents(&self, _name: &str) -> Result<Vec<String>, DockerError> {
             Ok(vec![])
+        }
+        async fn list_project(
+            &self,
+            _project: &str,
+        ) -> Result<Vec<crate::compose::ProjectMember>, DockerError> {
+            Ok(self.project_members.clone())
         }
     }
 
@@ -1279,6 +1400,189 @@ mod tests {
             default_mode: Some(Mode::Live),
             ..Default::default()
         }
+    }
+
+    // --- compose project rollouts (issue #78) ---
+
+    const COMPOSE_IMAGE: &str = "app:latest";
+
+    /// A running, live-mode compose member of project `stack`.
+    fn compose_summary(service: &str, deps: &str) -> ContainerSummary {
+        compose_summary_with(service, deps, &[])
+    }
+
+    /// As [`compose_summary`], plus any extra freshdock labels.
+    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerSummary {
+        let mut labels = vec![
+            ("freshdock.enable", "true"),
+            ("freshdock.mode", "live"),
+            (crate::compose::LABEL_PROJECT, "stack"),
+            (crate::compose::LABEL_SERVICE, service),
+            (crate::compose::LABEL_DEPENDS_ON, deps),
+        ];
+        labels.extend_from_slice(extra);
+        summary(&format!("stack-{service}-1"), COMPOSE_IMAGE, &labels)
+    }
+
+    /// The same container as `list_project` reports it.
+    fn compose_member(summary: &ContainerSummary) -> crate::compose::ProjectMember {
+        crate::compose::ProjectMember {
+            name: container_name(summary),
+            id: summary.id.clone().unwrap_or_default(),
+            image_ref: COMPOSE_IMAGE.to_owned(),
+            image_id: Some("sha256:app".to_owned()),
+            labels: summary.labels.clone().unwrap_or_default(),
+            running: true,
+        }
+    }
+
+    fn compose_node() -> (FakeNode, Vec<ContainerSummary>) {
+        let running = vec![compose_summary("web", ""), compose_summary("worker", "")];
+        let members = running.iter().map(compose_member).collect();
+        (
+            FakeNode::new(running.clone(), DIG_A).in_project(members),
+            running,
+        )
+    }
+
+    async fn tick_with_settings(node: &FakeNode, reg: &FakeRegistry, settings: ResolvedSettings) {
+        let (_tx, rx) = watch::channel(false);
+        run_tick(
+            node,
+            reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &rx,
+            &Dispatcher::noop(),
+            settings,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_rollout_updates_the_whole_project_from_one_probe() {
+        let (node, _) = compose_node();
+        let reg = FakeRegistry::new(DIG_B);
+        tick_with_settings(&node, &reg, ResolvedSettings::default()).await;
+
+        assert_eq!(node.creates(), 2, "both project members are updated");
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            1,
+            "the second member was updated by the rollout, so the tick must not \
+             probe or update it a second time"
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_aware_off_keeps_the_old_per_container_behaviour() {
+        let (node, _) = compose_node();
+        let reg = FakeRegistry::new(DIG_B);
+        tick_with_settings(
+            &node,
+            &reg,
+            ResolvedSettings {
+                compose_aware: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert_eq!(node.creates(), 2);
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            2,
+            "with rollouts off, each container is probed and updated on its own"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aborted_rollout_is_not_re_triggered_by_the_members_it_never_reached() {
+        // Without this, every remaining member re-enters the rollout later in
+        // the same tick and re-runs the step that already failed, once each.
+        let (node, _) = compose_node();
+        let node = FakeNode {
+            health_state: ContainerRuntimeState::Exited { exit_code: 1 },
+            ..node
+        };
+        let reg = FakeRegistry::new(DIG_B);
+        tick_with_settings(&node, &reg, ResolvedSettings::default()).await;
+
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            1,
+            "the aborted rollout owns every member it planned, reached or not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sibling_that_opted_out_of_notifications_is_not_announced() {
+        // Both are updated by one rollout, but only `web` asked to be told
+        // about it. The trigger's policy must not speak for the other.
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "succeeded", "container": "stack-web-1"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(
+                json!({"event": "succeeded", "container": "stack-worker-1"}),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let running = vec![
+            compose_summary_with("web", "", &[("freshdock.notify", "true")]),
+            compose_summary_with("worker", "", &[("freshdock.notify", "false")]),
+        ];
+        let members = running.iter().map(compose_member).collect();
+        let node = FakeNode::new(running, DIG_A).in_project(members);
+        let reg = FakeRegistry::new(DIG_B);
+
+        let (_tx, rx) = watch::channel(false);
+        run_tick(
+            &node,
+            &reg,
+            &cfg(),
+            &TokioClock,
+            &now,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &rx,
+            &webhook_dispatcher(server.uri()),
+            ResolvedSettings::default(),
+        )
+        .await;
+
+        assert_eq!(node.creates(), 2, "both are still updated");
+    }
+
+    #[tokio::test]
+    async fn a_container_that_is_not_a_compose_member_is_untouched_by_the_feature() {
+        // The regression guard for every non-compose fleet: one probe, one
+        // update, exactly as before #78.
+        let node = FakeNode::new(
+            vec![summary(
+                "solo",
+                "alpine:3.19",
+                &[("freshdock.enable", "true"), ("freshdock.mode", "live")],
+            )],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        tick_with_settings(&node, &reg, ResolvedSettings::default()).await;
+
+        assert_eq!(node.creates(), 1);
+        assert_eq!(reg.calls.load(Ordering::SeqCst), 1);
     }
 
     /// Give a summary a fixed container id, for the self-guard tests.

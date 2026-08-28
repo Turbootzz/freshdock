@@ -92,6 +92,17 @@ pub enum NotifyEvent {
         new_image_ref: String,
         restored_from: String,
     },
+    /// A compose project rollout stopped part-way (issue #78). Reported per
+    /// *project*, since that is the unit that failed.
+    RolloutAborted {
+        project: String,
+        /// The step that stopped it, already rendered.
+        reason: String,
+        /// Containers the rollout did update before stopping.
+        completed: Vec<String>,
+        /// Containers it had planned to update and did not complete.
+        remaining: Vec<String>,
+    },
 }
 
 impl NotifyEvent {
@@ -99,15 +110,19 @@ impl NotifyEvent {
         match self {
             NotifyEvent::UpdateAvailable { .. } => Trigger::Available,
             NotifyEvent::UpdateSucceeded { .. } => Trigger::Succeeded,
-            NotifyEvent::UpdateFailed { .. } => Trigger::Failed,
+            NotifyEvent::UpdateFailed { .. } | NotifyEvent::RolloutAborted { .. } => {
+                Trigger::Failed
+            }
         }
     }
 
+    /// The subject of the event; for a rollout that is the project name.
     pub fn container(&self) -> &str {
         match self {
             NotifyEvent::UpdateAvailable { container, .. }
             | NotifyEvent::UpdateSucceeded { container, .. }
             | NotifyEvent::UpdateFailed { container, .. } => container,
+            NotifyEvent::RolloutAborted { project, .. } => project,
         }
     }
 
@@ -153,6 +168,21 @@ impl NotifyEvent {
                     reason_text(*reason)
                 ),
             ),
+            NotifyEvent::RolloutAborted {
+                project,
+                reason,
+                completed,
+                remaining,
+            } => (
+                format!("Rollout aborted: {project}"),
+                format!(
+                    "The compose project {project} was rolled out as one unit and stopped \
+                     part-way: {reason}. Updated before stopping: {}. Not updated, still \
+                     serving the previous image: {}.",
+                    name_list(completed),
+                    name_list(remaining)
+                ),
+            ),
         };
         RenderedMessage {
             title,
@@ -160,6 +190,15 @@ impl NotifyEvent {
             trigger: self.trigger(),
             container: self.container().to_string(),
         }
+    }
+}
+
+/// Render a container list for a message body, or `none` when it is empty.
+fn name_list(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(", ")
     }
 }
 
@@ -601,6 +640,42 @@ mod tests {
         assert!(f.title.contains("Update failed"));
         assert!(f.body.contains("health check timed out"));
         assert!(f.body.contains("web-old-1700000000"));
+    }
+
+    #[test]
+    fn an_aborted_rollout_renders_per_project_and_names_both_sides() {
+        // The operator's first question is what already moved and what did not,
+        // so a migration that completed before the abort has to be listed as
+        // completed even though it is not an "updated container".
+        let event = NotifyEvent::RolloutAborted {
+            project: "shop".into(),
+            reason: "shop-api-1 failed its health gate and was rolled back".into(),
+            completed: vec!["shop-migrate-1".into()],
+            remaining: vec!["shop-api-1".into(), "shop-web-1".into()],
+        };
+        assert_eq!(event.trigger(), Trigger::Failed);
+        assert_eq!(
+            event.container(),
+            "shop",
+            "a rollout's subject is the project"
+        );
+
+        let r = event.render();
+        assert!(r.title.contains("Rollout aborted: shop"));
+        assert!(r.body.contains("shop-migrate-1"));
+        assert!(r.body.contains("shop-api-1, shop-web-1"));
+    }
+
+    #[test]
+    fn an_aborted_rollout_with_nothing_completed_says_so() {
+        let r = NotifyEvent::RolloutAborted {
+            project: "shop".into(),
+            reason: "shop-migrate-1 exited with code 1".into(),
+            completed: Vec::new(),
+            remaining: vec!["shop-web-1".into()],
+        }
+        .render();
+        assert!(r.body.contains("Updated before stopping: none"));
     }
 
     #[tokio::test]
