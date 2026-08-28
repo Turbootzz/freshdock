@@ -40,7 +40,11 @@ leaving you with a dead service.
 
 > **Opt-in by design.** freshdock ignores every container until you set
 > `freshdock.enable=true`, and an enabled container with no explicit mode defaults to
-> `watch` (detect-and-notify, never restart). Nothing is touched until you ask.
+> `watch` (detect-and-notify, never restart). Nothing is touched until you ask, with
+> one narrow exception: inside a Compose project, an unlabelled service another
+> service waits on with `service_completed_successfully` is re-run as part of that
+> project's rollout, because the compose file itself says it has to finish first.
+> An explicit opt-out is still honoured.
 > Prefer Watchtower's model? `FRESHDOCK_WATCH_ALL=true` includes every container
 > unless it opts out, still on the safe default mode until you pick another with
 > `FRESHDOCK_DEFAULT_MODE`. See

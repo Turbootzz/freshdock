@@ -148,7 +148,8 @@ deliberately.
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
 | Podman 4+ | Supported via the Docker-compatible socket (discovery below). |
-| Compose-based UIs (Dockge, Komodo, …) | Containers are updated individually; compose files are not edited. |
+| Docker Compose | A multi-service project is updated as one unit, in `depends_on` order. See [Compose projects](compose.md). |
+| Compose-based UIs (Dockge, Komodo, …) | Supported; compose files are never read or edited. |
 | Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
 
 One daemon-version floor applies: re-creating a container attached to **more than

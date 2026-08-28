@@ -154,8 +154,8 @@ The rollout stops immediately. Concretely:
 
 Fix the cause, then let the next cycle run, or re-run it by hand:
 
-```console
-$ freshdock recreate web
+```bash
+freshdock recreate web
 ```
 
 ## Reading the logs

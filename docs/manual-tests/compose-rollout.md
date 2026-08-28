@@ -168,6 +168,15 @@ local image genuinely stale so the digest probe reports an update:
 
 ```bash
 docker pull busybox:1.36
+docker pull busybox:latest
+
+# The whole step only tests anything if the two really are different images.
+# busybox:1.36 may already be what :latest points at, and then the scheduler
+# finds the project up to date and never rolls anything out.
+old=$(docker image inspect busybox:1.36 --format '{{.Id}}')
+new=$(docker image inspect busybox:latest --format '{{.Id}}')
+[ "$old" != "$new" ] || { echo "busybox:1.36 IS :latest; pick an older tag"; exit 1; }
+
 docker tag busybox:1.36 busybox:latest   # local digest now differs from upstream
 docker compose -p fdsmoke down -v && rm -f data/*.log && docker compose -p fdsmoke up -d
 docker stop fdsmoke-paused-1

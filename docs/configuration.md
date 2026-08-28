@@ -89,12 +89,16 @@ fleet-wide fallback with [`[settings] default_mode`](#settings) (or
 
 ## Compose projects
 
-A container in a Docker Compose project is not updated on its own. freshdock
-reads the project's `com.docker.compose.*` labels, re-runs the one-shot services
-the project waits on (`depends_on: {condition: service_completed_successfully}`)
-before the code that depends on them, and updates the rest in dependency order.
-A one-shot that fails aborts the rollout, leaving everything downstream on its
-previous image.
+A container that shares a Docker Compose project with others is not updated on
+its own. freshdock reads the project's `com.docker.compose.*` labels, re-runs the
+one-shot services the project waits on
+(`depends_on: {condition: service_completed_successfully}`) before the code that
+depends on them, and updates the rest in dependency order. A one-shot that fails
+aborts the rollout, leaving everything downstream on its previous image.
+
+A project that holds nothing but the container that triggered it has nothing to
+order and nothing to restart, so the ordinary single-container path is used and
+behaviour is exactly as it was.
 
 This is on by default. `[settings] compose_aware = false` (or
 `FRESHDOCK_COMPOSE_AWARE=false`) turns it off and updates every container

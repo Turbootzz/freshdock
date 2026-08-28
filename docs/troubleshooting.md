@@ -213,8 +213,8 @@ that did not complete. Your stack is still running its previous image.
 The failed container is kept on purpose, and so is the archive of its previous
 instance, since the logs are the only record of what went wrong:
 
-```console
-$ docker logs shop-migrate-1
+```bash
+docker logs shop-migrate-1
 ```
 
 Fix the cause, then re-run it with `freshdock recreate <the labelled service>`,
