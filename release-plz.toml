@@ -10,3 +10,25 @@ publish = false
 # Binary crate: the lib API is public only for tests, not a real contract. Off so
 # version bumps follow commit types instead of cargo-semver-checks.
 semver_check = false
+
+# The changelog is user-facing patch notes: keep plumbing commit types out of it
+# (the default lumps them under "Other"). Breaking changes always surface.
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "added" },
+    { message = "^changed", group = "changed" },
+    { message = "^deprecated", group = "deprecated" },
+    { message = "^fix", group = "fixed" },
+    { message = "^security", group = "security" },
+    { message = "^perf", group = "performance" },
+    { message = "^revert", group = "reverted" },
+    { message = "^docs", skip = true },
+    { message = "^ci", skip = true },
+    { message = "^chore", skip = true },
+    { message = "^test", skip = true },
+    { message = "^style", skip = true },
+    { message = "^build", skip = true },
+    { message = "^refactor", skip = true },
+    { message = ".*", group = "other" },
+]
