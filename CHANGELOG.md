@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/Turbootzz/freshdock/compare/v1.4.2...v1.5.0) - 2026-08-28
+
+### Added
+
+- *(compose)* treat a Compose project as one update unit ([#83](https://github.com/Turbootzz/freshdock/pull/83))
+- optional watch-all opt-out mode ([#81](https://github.com/Turbootzz/freshdock/pull/81))
+
+### Other
+
+- *(release)* auto-generate release notes from merged PRs ([#76](https://github.com/Turbootzz/freshdock/pull/76))
+
 ## [1.4.2](https://github.com/Turbootzz/freshdock/compare/v1.4.1...v1.4.2) - 2026-08-19
 
 ### Fixed
