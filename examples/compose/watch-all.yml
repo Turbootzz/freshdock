@@ -1,0 +1,23 @@
+# Watchtower-style opt-out stack: freshdock treats every running container as
+# enabled unless it opts out, and nightly is the mode for anything unlabelled.
+# freshdock never auto-updates its own container.
+# Validate: docker compose -f watch-all.yml config
+services:
+  web:
+    image: nginx:1.27 # no labels needed: watched automatically
+
+  db:
+    image: postgres:16
+    labels:
+      - "freshdock.mode=off" # opted out of the sweep
+
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    environment:
+      FRESHDOCK_WATCH_ALL: "true"
+      FRESHDOCK_DEFAULT_MODE: "nightly"
+    volumes:
+      # Writable socket: nightly recreates containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

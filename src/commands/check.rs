@@ -35,7 +35,14 @@ pub async fn run(
 ) -> Result<(), AppError> {
     let docker = Docker::connect(store.clone()).await?;
     let registry = OciRegistry::new(store);
-    let cells = collect_cells(&docker, &registry, settings.policy_defaults()).await?;
+    let own_id_prefix = crate::selfid::own_container_id_prefix();
+    let cells = collect_cells(
+        &docker,
+        &registry,
+        settings.policy_defaults(),
+        own_id_prefix.as_deref(),
+    )
+    .await?;
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));
@@ -53,6 +60,7 @@ async fn collect_cells(
     docker: &impl DockerCheck,
     registry: &impl Registry,
     defaults: PolicyDefaults,
+    own_id_prefix: Option<&str>,
 ) -> Result<Vec<[String; 6]>, AppError> {
     let containers = docker.list_running().await?;
 
@@ -61,8 +69,28 @@ async fn collect_cells(
     let mut rows: Vec<RowPrep> = Vec::new();
     for c in containers {
         let lbls = c.labels.as_ref().unwrap_or(&empty);
-        let policy = labels::parse_policy(lbls, defaults)?;
+        // Warn-and-skip like the scheduler: one bad label (on any container,
+        // now that watch_all parses unlabelled bystanders too) must not take
+        // down the whole table — `check` always prints and exits 0 (#7).
+        let policy = match labels::parse_policy(lbls, defaults) {
+            Ok(p) => p,
+            Err(e) => {
+                let name = c
+                    .names
+                    .as_ref()
+                    .and_then(|n| n.first())
+                    .map(|s| s.trim_start_matches('/'))
+                    .unwrap_or("?");
+                warn!(container = %name, error = %e, "invalid freshdock labels; skipping");
+                continue;
+            }
+        };
         if !policy.enabled {
+            continue;
+        }
+        // The scheduler never auto-targets freshdock's own container, so the
+        // table must not promise it either.
+        if policy.auto_enabled && crate::selfid::is_own_container(own_id_prefix, c.id.as_deref()) {
             continue;
         }
         let name = c
@@ -342,7 +370,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 1);
@@ -366,7 +394,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_B);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -393,7 +421,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_B);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][5], "no", "the upstream digest is already local");
@@ -420,7 +448,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_C);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][5], "yes");
@@ -441,7 +469,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][3], "-", "no current digest is known");
@@ -465,7 +493,7 @@ mod tests {
         );
         let registry = FakeRegistry::auth_required();
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][4], AUTH_REQUIRED);
@@ -500,7 +528,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 1, "only the opted-in container gets a row");
@@ -528,6 +556,7 @@ mod tests {
                 mode: Some(Mode::Live),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -535,6 +564,121 @@ mod tests {
             cells[0][2], "live",
             "the global default_mode applies when no freshdock.mode label is set"
         );
+    }
+
+    // --- watch_all opt-out mode + self guard (issue #79) ---
+
+    const SELF_ID: &str = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890";
+    const SELF_PREFIX: &str = "abc123def456";
+
+    fn watch_all() -> PolicyDefaults {
+        PolicyDefaults {
+            watch_all: true,
+            ..Default::default()
+        }
+    }
+
+    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            ..summary
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_all_lists_unlabelled_container() {
+        let docker = FakeDocker::new(
+            vec![summary("web", "alpine:3.19", &[])],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(
+            &docker,
+            &registry,
+            PolicyDefaults {
+                mode: Some(Mode::Nightly),
+                ..watch_all()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cells.len(), 1, "an unlabelled container is listed");
+        assert_eq!(cells[0][0], "web");
+        assert_eq!(cells[0][2], "nightly", "the default mode fills the cell");
+        assert_eq!(cells[0][5], "yes");
+    }
+
+    #[tokio::test]
+    async fn watch_all_skips_own_container() {
+        let docker = FakeDocker::new(
+            vec![
+                with_id(summary("freshdock", "alpine:3.19", &[]), SELF_ID),
+                summary("web", "redis:7", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), Some(SELF_PREFIX))
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "our own container gets no row");
+        assert_eq!(cells[0][0], "web");
+    }
+
+    #[tokio::test]
+    async fn watch_all_still_omits_enable_false() {
+        let docker = FakeDocker::new(
+            vec![
+                summary("out", "alpine:3.19", &[("freshdock.enable", "false")]),
+                summary(
+                    "wt-out",
+                    "redis:7",
+                    &[("com.centurylinklabs.watchtower.enable", "false")],
+                ),
+                summary("in", "nginx:1.27", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+                ("nginx:1.27", &format!("nginx@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "both opt-out labels still exclude");
+        assert_eq!(cells[0][0], "in");
+    }
+
+    #[tokio::test]
+    async fn invalid_labels_on_one_container_do_not_break_the_table() {
+        // A stray bad label on a bystander (visible at all only under
+        // watch_all) must cost that container its row, not the whole table.
+        let docker = FakeDocker::new(
+            vec![
+                summary("bad", "alpine:3.19", &[("freshdock.notify", "1")]),
+                summary("web", "redis:7", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "the parse failure skips only that row");
+        assert_eq!(cells[0][0], "web");
     }
 
     #[tokio::test]
@@ -548,7 +692,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 2, "both containers still get their own row");

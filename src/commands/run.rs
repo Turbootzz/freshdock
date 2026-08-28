@@ -45,7 +45,17 @@ pub async fn run(
         poll_interval: Duration::from_secs(interval_secs),
         tick: Duration::from_secs(tick_secs),
         health: HealthConfig::default(),
+        own_id_prefix: crate::selfid::own_container_id_prefix(),
     };
+    if settings.watch_all {
+        match cfg.own_id_prefix.as_deref() {
+            Some(prefix) => info!(%prefix, "watch_all: self-guard active"),
+            None => info!(
+                "watch_all: could not identify our own container (custom hostname, or not \
+                 running in one); if freshdock runs in a container, label it freshdock.mode=off"
+            ),
+        }
+    }
 
     let (tx, rx) = watch::channel(false);
     let mut deadline_rx = rx.clone();

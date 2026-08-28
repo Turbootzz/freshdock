@@ -45,6 +45,9 @@ pub struct SchedulerConfig {
     pub tick: Duration,
     /// Health-gate timing, forwarded to [`recreate_with_health`].
     pub health: HealthConfig,
+    /// Our own container's id prefix, when freshdock runs in a container, so
+    /// `watch_all` never auto-targets the daemon itself (issue #79).
+    pub own_id_prefix: Option<String>,
 }
 
 /// Default cron for a calendar mode when no `freshdock.schedule` override is
@@ -152,6 +155,7 @@ where
     R: Registry + Sync,
 {
     let mut states: HashMap<String, ContainerState> = HashMap::new();
+    let mut warned: HashSet<String> = HashSet::new();
     let mut ticker = tokio::time::interval(cfg.tick);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let tick_shutdown = shutdown.clone();
@@ -168,7 +172,7 @@ where
                 if *tick_shutdown.borrow() {
                     break;
                 }
-                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &tick_shutdown, dispatcher, settings).await;
+                run_tick(docker, registry, cfg, clock, &now_provider, &mut states, &mut warned, &tick_shutdown, dispatcher, settings).await;
             }
             res = shutdown.changed() => {
                 if res.is_err() || *shutdown.borrow() {
@@ -192,6 +196,9 @@ async fn run_tick<D, R>(
     clock: &impl Clock,
     now_provider: &impl Fn() -> DateTime<Local>,
     states: &mut HashMap<String, ContainerState>,
+    // Names already warned about (bad labels, the self skip), so those log
+    // once per sighting instead of every tick.
+    warned: &mut HashSet<String>,
     shutdown: &watch::Receiver<bool>,
     dispatcher: &Dispatcher,
     settings: ResolvedSettings,
@@ -230,11 +237,28 @@ async fn run_tick<D, R>(
         ) {
             Ok(p) => p,
             Err(e) => {
-                warn!(container = %name, error = %e, "scheduler: invalid freshdock labels; skipping");
+                // First sight only; under watch_all this can be a bystander
+                // that will never be fixed, and a per-tick warning would
+                // repeat forever.
+                if warned.insert(name.clone()) {
+                    warn!(container = %name, error = %e, "scheduler: invalid freshdock labels; skipping");
+                }
+                live.insert(name);
                 continue;
             }
         };
         if !policy.enabled || policy.mode == Mode::Off {
+            continue;
+        }
+        // Updating ourselves would kill the update mid-flight. An explicit
+        // label is still honoured; only the watch_all sweep is held back.
+        if policy.auto_enabled
+            && crate::selfid::is_own_container(cfg.own_id_prefix.as_deref(), c.id.as_deref())
+        {
+            if warned.insert(name.clone()) {
+                info!(container = %name, "scheduler: watch_all is skipping freshdock's own container; label it explicitly to include it");
+            }
+            live.insert(name);
             continue;
         }
         live.insert(name.clone());
@@ -281,6 +305,7 @@ async fn run_tick<D, R>(
     }
 
     states.retain(|k, _| live.contains(k));
+    warned.retain(|k| live.contains(k));
 }
 
 /// Probe one container and act on the verdict: recreate for active modes,
@@ -456,6 +481,7 @@ mod tests {
             poll_interval: Duration::from_secs(300),
             tick: Duration::from_secs(60),
             health: HealthConfig::default(),
+            own_id_prefix: None,
         }
     }
 
@@ -471,6 +497,7 @@ mod tests {
             schedule: schedule.map(str::to_owned),
             cleanup: false,
             hooks: crate::labels::LifecycleHooks::default(),
+            auto_enabled: false,
         }
     }
 
@@ -775,6 +802,7 @@ mod tests {
             &TokioClock,
             &now,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -795,9 +823,35 @@ mod tests {
             &TokioClock,
             &now,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             dispatcher,
             ResolvedSettings::default(),
+        )
+        .await;
+    }
+
+    /// Drive one tick with a caller-supplied config, settings, and state map.
+    async fn one_tick_cfg(
+        node: &FakeNode,
+        reg: &FakeRegistry,
+        cfg: &SchedulerConfig,
+        settings: ResolvedSettings,
+        states: &mut HashMap<String, ContainerState>,
+        warned: &mut HashSet<String>,
+    ) {
+        let (_tx, rx) = watch::channel(false);
+        run_tick(
+            node,
+            reg,
+            cfg,
+            &TokioClock,
+            &now,
+            states,
+            warned,
+            &rx,
+            &Dispatcher::noop(),
+            settings,
         )
         .await;
     }
@@ -1014,6 +1068,7 @@ mod tests {
             &TokioClock,
             &now,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1030,6 +1085,7 @@ mod tests {
             &TokioClock,
             &now,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1061,6 +1117,7 @@ mod tests {
             &TokioClock,
             &now,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1126,6 +1183,7 @@ mod tests {
             &TokioClock,
             &now_fn,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1142,6 +1200,7 @@ mod tests {
             &TokioClock,
             &now_fn,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1158,6 +1217,7 @@ mod tests {
             &TokioClock,
             &now_fn,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &Dispatcher::noop(),
             ResolvedSettings::default(),
@@ -1177,6 +1237,7 @@ mod tests {
             poll_interval: Duration::from_secs(3600),
             tick: Duration::from_secs(3600),
             health: HealthConfig::default(),
+            own_id_prefix: None,
         };
 
         let handle = tokio::spawn(async move {
@@ -1203,6 +1264,196 @@ mod tests {
             .expect("run_with returns promptly after the signal")
             .expect("scheduler task joins")
             .expect("run_with ok");
+    }
+
+    // --- watch_all opt-out mode + self guard (issue #79) ---
+
+    const SELF_ID: &str = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890";
+    const SELF_PREFIX: &str = "abc123def456";
+
+    /// Opt-out mode with an active default mode, so "was it processed?" shows
+    /// up as a recreate.
+    fn watch_all_settings() -> ResolvedSettings {
+        ResolvedSettings {
+            watch_all: true,
+            default_mode: Some(Mode::Live),
+            ..Default::default()
+        }
+    }
+
+    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            ..summary
+        }
+    }
+
+    fn self_cfg() -> SchedulerConfig {
+        SchedulerConfig {
+            own_id_prefix: Some(SELF_PREFIX.to_owned()),
+            ..cfg()
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_all_processes_an_unlabelled_container() {
+        let node = FakeNode::new(vec![summary("web", "alpine:3.19", &[])], DIG_A);
+        let reg = FakeRegistry::new(DIG_B);
+        let mut states = HashMap::new();
+        one_tick_cfg(
+            &node,
+            &reg,
+            &cfg(),
+            watch_all_settings(),
+            &mut states,
+            &mut HashSet::new(),
+        )
+        .await;
+        assert_eq!(
+            node.creates(),
+            1,
+            "an unlabelled container is a target under watch_all"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_all_skips_freshdocks_own_container() {
+        let node = FakeNode::new(
+            vec![with_id(summary("freshdock", "alpine:3.19", &[]), SELF_ID)],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let mut states = HashMap::new();
+        one_tick_cfg(
+            &node,
+            &reg,
+            &self_cfg(),
+            watch_all_settings(),
+            &mut states,
+            &mut HashSet::new(),
+        )
+        .await;
+        assert_eq!(node.creates(), 0, "the daemon must not auto-update itself");
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            0,
+            "and must not even probe itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicitly_enabled_own_container_is_still_updated() {
+        let node = FakeNode::new(
+            vec![with_id(
+                summary(
+                    "freshdock",
+                    "alpine:3.19",
+                    &[("freshdock.enable", "true"), ("freshdock.mode", "live")],
+                ),
+                SELF_ID,
+            )],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let mut states = HashMap::new();
+        one_tick_cfg(
+            &node,
+            &reg,
+            &self_cfg(),
+            watch_all_settings(),
+            &mut states,
+            &mut HashSet::new(),
+        )
+        .await;
+        assert_eq!(
+            node.creates(),
+            1,
+            "an explicit opt-in label overrides the self guard"
+        );
+    }
+
+    /// A second dispatcher, registered once and never dropped, that discards
+    /// everything. It keeps tracing-core off its single-dispatcher fast path,
+    /// where a parallel test holding no subscriber can blank the capture below.
+    /// Fuller note on the twin in [`crate::notify`]'s tests.
+    static KEEPALIVE: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
+        tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .finish(),
+        )
+    });
+
+    #[tokio::test]
+    async fn own_container_skip_logs_once_across_ticks() {
+        use std::io::Write;
+        use std::sync::Arc;
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        std::sync::LazyLock::force(&KEEPALIVE);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .finish();
+
+        let node = FakeNode::new(
+            vec![with_id(summary("freshdock", "alpine:3.19", &[]), SELF_ID)],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let cfg = self_cfg();
+        let mut states = HashMap::new();
+        let mut warned = HashSet::new();
+        async {
+            one_tick_cfg(
+                &node,
+                &reg,
+                &cfg,
+                watch_all_settings(),
+                &mut states,
+                &mut warned,
+            )
+            .await;
+            one_tick_cfg(
+                &node,
+                &reg,
+                &cfg,
+                watch_all_settings(),
+                &mut states,
+                &mut warned,
+            )
+            .await;
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            out.matches("skipping freshdock's own container").count(),
+            1,
+            "the skip must log on first sight only, not every tick: {out}"
+        );
     }
 
     // --- end-to-end: scheduler outcome → real dispatcher → mock HTTP target ---
@@ -1305,6 +1556,7 @@ mod tests {
             &TokioClock,
             &now_fn,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &dispatcher,
             ResolvedSettings::default(),
@@ -1320,6 +1572,7 @@ mod tests {
             &TokioClock,
             &now_fn,
             &mut states,
+            &mut HashSet::new(),
             &rx,
             &dispatcher,
             ResolvedSettings::default(),

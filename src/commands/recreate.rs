@@ -30,6 +30,9 @@ use crate::updater::RecreateOutcome;
 /// is not a freshdock target at all" and we respect that even on a
 /// manual invocation.
 ///
+/// Under `watch_all` (issue #79) an unlabelled container counts as opted in,
+/// so the gate passes; the explicit opt-outs above are still refused.
+///
 /// Thin entry: wires the live daemon + default health timing, delegates to the
 /// testable [`run_with`].
 pub async fn run(
@@ -154,9 +157,9 @@ mod tests {
     use bollard::models::ContainerConfig;
 
     /// Fake whose only real method is `inspect` (returns a configurable label
-    /// set). Every other op panics — so any test where the policy gate *fails*
-    /// to short-circuit will blow up loudly, proving "zero DockerOps calls past
-    /// the initial inspect".
+    /// set). `pull` returns an error (so a gate-pass surfaces as `Err`); every
+    /// op past it panics, so any test where the policy gate *fails* to
+    /// short-circuit blows up loudly.
     struct GateOps {
         labels: Option<HashMap<String, String>>,
     }
@@ -193,7 +196,12 @@ mod tests {
             })
         }
         async fn pull(&self, _image_ref: &ImageRef) -> Result<(), DockerError> {
-            panic!("policy gate must refuse before pull");
+            // Always an error, never a panic: a refusal returns Ok before
+            // reaching pull, so run_with's Ok/Err splits gate-refused from
+            // gate-passed on its own.
+            Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                "pull refused by the test fake",
+            )))
         }
         async fn stop(
             &self,
@@ -249,18 +257,29 @@ mod tests {
         }
     }
 
-    async fn assert_refused(ops: GateOps) {
+    async fn assert_refused_with(ops: GateOps, defaults: PolicyDefaults) {
         run_with(
             &ops,
             "c",
             &HealthConfig::default(),
             &TokioClock,
-            PolicyDefaults::default(),
+            defaults,
             false,
             || 0,
         )
         .await
         .expect("a refused recreate is a graceful no-op, not an error");
+    }
+
+    async fn assert_refused(ops: GateOps) {
+        assert_refused_with(ops, PolicyDefaults::default()).await;
+    }
+
+    fn watch_all() -> PolicyDefaults {
+        PolicyDefaults {
+            watch_all: true,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -279,6 +298,46 @@ mod tests {
             ("freshdock.enable", "true"),
             ("freshdock.mode", "off"),
         ]))
+        .await;
+    }
+
+    // --- watch_all opt-out mode (issue #79) ---
+
+    #[tokio::test]
+    async fn unlabelled_with_watch_all_passes_the_gate() {
+        // The pull error can only come from past the gate: reaching it is the
+        // assertion.
+        let result = run_with(
+            &GateOps::without_labels(),
+            "c",
+            &HealthConfig::default(),
+            &TokioClock,
+            watch_all(),
+            false,
+            || 0,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "watch_all must let an unlabelled container through the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_false_with_watch_all_is_refused() {
+        assert_refused_with(
+            GateOps::with_labels(&[("freshdock.enable", "false")]),
+            watch_all(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mode_off_with_watch_all_is_refused() {
+        assert_refused_with(
+            GateOps::with_labels(&[("freshdock.mode", "off")]),
+            watch_all(),
+        )
         .await;
     }
 }
