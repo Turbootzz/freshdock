@@ -1281,6 +1281,7 @@ mod tests {
         }
     }
 
+    /// Give a summary a fixed container id, for the self-guard tests.
     fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
         ContainerSummary {
             id: Some(id.to_owned()),
@@ -1288,6 +1289,7 @@ mod tests {
         }
     }
 
+    /// Config whose own-id prefix matches [`SELF_ID`].
     fn self_cfg() -> SchedulerConfig {
         SchedulerConfig {
             own_id_prefix: Some(SELF_PREFIX.to_owned()),

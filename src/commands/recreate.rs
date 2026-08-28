@@ -275,6 +275,7 @@ mod tests {
         assert_refused_with(ops, PolicyDefaults::default()).await;
     }
 
+    /// Defaults with the opt-out mode switched on.
     fn watch_all() -> PolicyDefaults {
         PolicyDefaults {
             watch_all: true,

@@ -960,6 +960,7 @@ mod tests {
 
     // --- watch_all opt-out mode (issue #79) ---
 
+    /// Defaults with the opt-out mode switched on.
     fn watch_all() -> PolicyDefaults {
         PolicyDefaults {
             watch_all: true,

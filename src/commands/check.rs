@@ -571,6 +571,7 @@ mod tests {
     const SELF_ID: &str = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890";
     const SELF_PREFIX: &str = "abc123def456";
 
+    /// Defaults with the opt-out mode switched on.
     fn watch_all() -> PolicyDefaults {
         PolicyDefaults {
             watch_all: true,
@@ -578,6 +579,7 @@ mod tests {
         }
     }
 
+    /// Give a summary a fixed container id, for the self-guard tests.
     fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
         ContainerSummary {
             id: Some(id.to_owned()),
