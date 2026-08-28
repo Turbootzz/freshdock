@@ -33,13 +33,17 @@ leaving you with a dead service.
 | **Four notifiers** | Webhook, Discord, Telegram, and SMTP, each subscribable to the events it cares about. |
 | **Lifecycle hooks** | Run commands inside the container around an update: a pre-update hook can veto/defer (exit 75), a post-update hook handles maintenance like cache clears. |
 | **VPN stacks survive updates** | Containers that route through another container's network (`network_mode: container:X` — the gluetun pattern) are re-attached automatically after that container updates, instead of being left offline. |
-| **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly — migrate a fleet without relabelling. |
+| **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly — migrate a fleet without relabelling. `FRESHDOCK_WATCH_ALL=true` restores Watchtower's opt-out model if you want it. |
 | **Optional cleanup** | Remove superseded images after a healthy update; optionally prune dangling images. |
 | **Single static binary** | ≤ 10 MB, no runtime dependencies. No JVM, no Go runtime, no 100 MB image to manage your homelab. |
 
 > **Opt-in by design.** freshdock ignores every container until you set
 > `freshdock.enable=true`, and an enabled container with no explicit mode defaults to
 > `watch` (detect-and-notify, never restart). Nothing is touched until you ask.
+> Prefer Watchtower's model? `FRESHDOCK_WATCH_ALL=true` includes every container
+> unless it opts out, still on the safe default mode until you pick another with
+> `FRESHDOCK_DEFAULT_MODE`. See
+> [watching every container](https://turbootzz.github.io/freshdock/configuration.html#watching-every-container).
 
 ## Quickstart
 

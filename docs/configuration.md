@@ -25,6 +25,7 @@ comes from three places:
 ## Contents
 
 - [Labels](#labels) — per-container behaviour
+- [Watching every container](#watching-every-container) (the optional opt-out mode)
 - [Environment variables](#environment-variables) — the primary fleet-wide config
 - [The optional `freshdock.toml` file](#the-optional-freshdocktoml-file) — when you need one
 - [`[settings]`](#settings) — fleet-wide defaults
@@ -37,12 +38,14 @@ comes from three places:
 ## Labels
 
 freshdock is **opt-in**: a container with no `freshdock.enable=true` is ignored
-entirely. All behaviour is driven by these Docker labels (set them in compose under
-`labels:` or with `docker run --label`).
+entirely. (That default can be inverted fleet-wide, see
+[watching every container](#watching-every-container).) All behaviour is driven by
+these Docker labels (set them in compose under `labels:` or with
+`docker run --label`).
 
 | Label | Values | Default | Meaning |
 |---|---|---|---|
-| `freshdock.enable` | `true` / `false` | `false` | Master switch. Without `true`, the container is invisible to freshdock and every other label is ignored. |
+| `freshdock.enable` | `true` / `false` | `false` (`true` under [`watch_all`](#watching-every-container)) | Master switch. Without `true`, the container is invisible to freshdock and every other label is ignored. |
 | `freshdock.mode` | `live` / `nightly` / `weekly` / `monthly` / `watch` / `off` | `watch` (or `[settings] default_mode`) | How and when this container updates. See [scheduling](scheduling.md). |
 | `freshdock.schedule` | 5-field cron | the mode's default | Override the cron for a calendar mode. Ignored for `live` / `watch` / `off`. See [cron syntax](scheduling.md#cron-syntax). |
 | `freshdock.notify` | `true` / `false` | `false` | Emit notifications for this container's update events. Requires a configured `[notifications.*]` target. See [notifications](notifications.md). |
@@ -83,6 +86,47 @@ fleet-wide fallback with [`[settings] default_mode`](#settings) (or
 
 ---
 
+## Watching every container
+
+[`[settings] watch_all`](#settings) (or `FRESHDOCK_WATCH_ALL=true`) inverts the
+opt-in gate, the way Watchtower worked: every running container counts as enabled
+unless it opts out. An absent `freshdock.enable` label then means enabled, not
+ignored. The default is `false`.
+
+Three labels opt a container back out:
+
+| Label | Value | Effect |
+|---|---|---|
+| `freshdock.enable` | `false` | Invisible again, exactly as without `watch_all`. |
+| `com.centurylinklabs.watchtower.enable` | `false` | Same, so exclusions from a Watchtower fleet keep working. |
+| `freshdock.mode` | `off` | Never updated. It still appears in `freshdock check` with mode `off`. |
+
+A container enabled this way takes its mode from [`default_mode`](#settings)
+(`FRESHDOCK_DEFAULT_MODE`), or `watch` when that is unset. Turning `watch_all` on
+therefore never restarts anything by itself; it starts updating once
+`default_mode` names an updating mode. Explicit labels always win: a container
+with `freshdock.mode=live` keeps `live`, and `freshdock.enable=true` behaves as it
+always did.
+
+> **freshdock skips its own container** when it enables containers this way, so
+> the daemon never tries to update itself. It recognises itself by the Docker
+> default hostname (the short container id). If you give the freshdock
+> container a custom `hostname`, add `freshdock.mode=off` to it (or label it
+> deliberately if you do want it updated). The same applies when freshdock runs
+> with `network_mode: container:<name>`: it then carries the namespace owner's
+> hostname, so label both containers explicitly in that setup. The skip is
+> evaluated per invocation, so a `freshdock check` run outside the daemon's
+> container still shows a row for it.
+
+`freshdock recreate <name>` follows the same rules: with `watch_all` on an
+unlabelled container passes the gate, while `freshdock.enable=false` and
+`freshdock.mode=off` are still refused.
+
+A runnable stack is in
+[`watch-all.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/watch-all.yml).
+
+---
+
 ## Environment variables
 
 Environment variables are the primary way to configure freshdock — a container
@@ -101,6 +145,7 @@ upper-cased, with `-` → `_`.
 | `FRESHDOCK_NOTIFY_<NAME>_BOT_TOKEN` | a Telegram target's `bot_token` | Overrides the secret on an already-declared target (file or `…_URL`). |
 | `FRESHDOCK_NOTIFY_<NAME>_PASSWORD` | an SMTP target's `password` | Same: overrides the secret on an already-declared target. |
 | `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
+| `FRESHDOCK_WATCH_ALL` | `[settings] watch_all` | `true`/`false`/`1`/`0`, case-insensitive. Treats every running container as enabled unless it opts out. See [watching every container](#watching-every-container). |
 | `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
 | `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
 | `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
@@ -150,6 +195,8 @@ Fleet-wide defaults. Every key is optional — and each has an environment varia
 [settings]
 default_mode   = "watch"   # fallback mode for an enabled container with no
                            # freshdock.mode label. Invalid → warn + fall back to watch.
+watch_all      = false     # treat every running container as enabled unless it
+                           # opts out (freshdock.enable=false / mode=off).
 cleanup        = false     # remove the replaced image after a healthy update;
                            # overridable per container with freshdock.cleanup.
 prune_dangling = false     # additionally run a daemon-wide dangling-image prune
@@ -159,6 +206,7 @@ prune_dangling = false     # additionally run a daemon-wide dangling-image prune
 | Key | Env var | Type | Default | Notes |
 |---|---|---|---|---|
 | `default_mode` | `FRESHDOCK_DEFAULT_MODE` | string (a mode name) | unset → `watch` | Applied to enabled containers without a `freshdock.mode` label. A `freshdock.mode` label always overrides it. |
+| `watch_all` | `FRESHDOCK_WATCH_ALL` | bool | `false` | Enables every running container unless it opts out, and gives those containers `default_mode` (else `watch`). See [watching every container](#watching-every-container). |
 | `cleanup` | `FRESHDOCK_CLEANUP` | bool | `false` | Default for `freshdock.cleanup`. Best-effort; a shared image in use elsewhere is kept, and a cleanup failure never fails the update. |
 | `prune_dangling` | `FRESHDOCK_PRUNE_DANGLING` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. |
 

@@ -8,7 +8,9 @@ The single biggest difference: **freshdock is opt-in.** Watchtower updates every
 container unless you exclude it; freshdock ignores every container unless you set
 `freshdock.enable=true`. And an enabled container with no explicit mode defaults
 to `watch` (detect-and-notify, never restart) — nothing is recreated until you
-ask for it with a mode like `live` or `nightly`.
+ask for it with a mode like `live` or `nightly`. If you would rather keep
+Watchtower's model, one env var flips it, see
+[keeping Watchtower's opt-out model](#keeping-watchtowers-opt-out-model).
 
 > **Config is environment-first, like Watchtower.** freshdock's fleet-wide
 > settings, registry credentials, `run` flags, and notification targets are all
@@ -30,7 +32,7 @@ What's honoured directly:
 | Watchtower label | Effect in freshdock |
 |---|---|
 | `com.centurylinklabs.watchtower.enable=true` | Same as `freshdock.enable=true`. **Note:** the container lands on freshdock's safe default mode (`watch`, or `[settings] default_mode`) — it will not auto-update like Watchtower did until you give it an active mode. |
-| `com.centurylinklabs.watchtower.enable=false` | Not opted in (same as having no labels — freshdock is opt-in anyway). |
+| `com.centurylinklabs.watchtower.enable=false` | Not opted in (same as having no labels — freshdock is opt-in anyway). Under [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) it is a real exclusion. |
 | `com.centurylinklabs.watchtower.monitor-only=true` | Same as `freshdock.mode=watch`; beats `[settings] default_mode`. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-update` / `post-update` | Same as the [`freshdock.lifecycle.*` hooks](lifecycle-hooks.md). |
 | `…lifecycle.pre-update-timeout` / `post-update-timeout` | Honoured in Watchtower's unit (**minutes**, converted; `0` = unlimited). The `freshdock.lifecycle.*-timeout` labels count seconds. |
@@ -39,6 +41,41 @@ Not supported — logged once and ignored: `no-pull`, `depends-on`, `scope`,
 `lifecycle.pre-check` / `post-check`. Dependency ordering is out of v1 scope and
 freshdock always pulls before recreate; there are no per-cycle check hooks.
 
+## Keeping Watchtower's opt-out model
+
+Set `FRESHDOCK_WATCH_ALL=true` (or `[settings] watch_all = true`) and freshdock
+treats every running container as enabled unless it opts out, the way Watchtower
+did. Pair it with `FRESHDOCK_DEFAULT_MODE` to say *how* those containers update;
+without it they land on `watch` and nothing is recreated.
+
+```yaml
+services:
+  freshdock:
+    image: ghcr.io/turbootzz/freshdock:latest
+    command: ["run"]
+    environment:
+      FRESHDOCK_WATCH_ALL: "true"         # every container, unless it opts out
+      FRESHDOCK_DEFAULT_MODE: "nightly"   # 04:00 daily, in place of a global WATCHTOWER_SCHEDULE
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"   # still an exclusion
+```
+
+The exclusion labels you already have keep working:
+`com.centurylinklabs.watchtower.enable=false`, `freshdock.enable=false`, and
+`freshdock.mode=off` all opt a container back out. Explicit `freshdock.*` labels
+are unaffected: a `freshdock.mode=weekly` label still wins over
+`FRESHDOCK_DEFAULT_MODE`.
+
+freshdock excludes its own container from this, so it never tries to update
+itself. Detection and the custom-`hostname` caveat are covered in
+[watching every container](configuration.md#watching-every-container).
+
 ## Label translation
 
 Prefer clean labels (or need the finer-grained knobs)? The native spelling:
@@ -46,7 +83,7 @@ Prefer clean labels (or need the finer-grained knobs)? The native spelling:
 | Watchtower label | freshdock label | Notes |
 |---|---|---|
 | `com.centurylinklabs.watchtower.enable=true` | `freshdock.enable=true` | Opt **in**. |
-| `com.centurylinklabs.watchtower.enable=false` (with global watch) | *omit the labels*, or `freshdock.mode=off` | freshdock ignores unlabelled containers, so there's usually nothing to disable. |
+| `com.centurylinklabs.watchtower.enable=false` (with global watch) | *omit the labels*, or `freshdock.mode=off` | freshdock ignores unlabelled containers, so there's usually nothing to disable. With [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) on, keep the exclusion label (either spelling works). |
 | `com.centurylinklabs.watchtower.monitor-only=true` | `freshdock.mode=watch` | Detect + notify, never pull/recreate. |
 | *(no per-container schedule)* | `freshdock.mode=nightly`/`weekly`/`monthly` + `freshdock.schedule=<cron>` | Scheduling is **per container** in freshdock, not a single global cron. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-update` | `freshdock.lifecycle.pre-update` | Exec in the old container, but **stricter**: any non-zero exit (not just `75`), a timeout, or a failed exec skips the update. Timeout labels count **seconds** in freshdock, minutes in Watchtower. See [lifecycle hooks](lifecycle-hooks.md). |
@@ -62,7 +99,7 @@ Prefer clean labels (or need the finer-grained knobs)? The native spelling:
 | `--interval` / `WATCHTOWER_POLL_INTERVAL` | `freshdock run --interval <seconds>` or `FRESHDOCK_INTERVAL` | Cadence for `live`/`watch` containers. |
 | `--schedule` / `WATCHTOWER_SCHEDULE` (global cron) | per-container `freshdock.mode` + `freshdock.schedule` | freshdock schedules each container on its own mode. |
 | `--monitor-only` / `WATCHTOWER_MONITOR_ONLY` | `freshdock.mode=watch` | Per container, not global. |
-| `--label-enable` / `WATCHTOWER_LABEL_ENABLE` | *(always on)* | freshdock is always label-gated; `freshdock.enable=true` is required. |
+| `--label-enable` / `WATCHTOWER_LABEL_ENABLE` | *(the default)* | freshdock is label-gated out of the box; `freshdock.enable=true` is required. Set `FRESHDOCK_WATCH_ALL=true` for the opt-out behaviour you get without this flag in Watchtower. |
 | `--enable-lifecycle-hooks` / `WATCHTOWER_LIFECYCLE_HOOKS` | *(not needed)* | Setting a `freshdock.lifecycle.*` label is the opt-in; there is no global switch. |
 | *(no global default mode)* | `[settings] default_mode` or `FRESHDOCK_DEFAULT_MODE` | Sets the fallback mode for enabled containers with no `freshdock.mode` label. A `freshdock.mode` label still wins per container. |
 | `--cleanup` / `WATCHTOWER_CLEANUP` | `[settings] cleanup = true`, `FRESHDOCK_CLEANUP=true`, or `freshdock.cleanup=true` per container | Off by default. Removes the *replaced image* after a healthy update; add `[settings] prune_dangling = true` (or `FRESHDOCK_PRUNE_DANGLING=true`) for a daemon-wide dangling prune. The replaced container archive is always removed regardless. |

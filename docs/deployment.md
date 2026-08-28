@@ -24,6 +24,7 @@ Or with compose — see the runnable stacks in
 - [`mixed-modes.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/mixed-modes.yml) — live + nightly + watch on one daemon.
 - [`notifications-enabled.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/notifications-enabled.yml) — mounts a `freshdock.toml`.
 - [`registry-authenticated.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/registry-authenticated.yml) — private registry via env.
+- [`watch-all.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/watch-all.yml): opt-out mode, every container included unless it opts out.
 
 ### Socket: read-only vs writable
 
@@ -51,6 +52,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 ```
+
+Add `FRESHDOCK_WATCH_ALL: "true"` to that block if you would rather not label each
+container: every running container is then included unless it opts out, on the
+mode set by `FRESHDOCK_DEFAULT_MODE`. See
+[watching every container](configuration.md#watching-every-container).
 
 The full list is the [env-var table](configuration.md#environment-variables).
 
