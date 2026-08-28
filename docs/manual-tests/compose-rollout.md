@@ -77,6 +77,26 @@ services:
     labels:
       freshdock.enable: "true"
       freshdock.mode: "live"
+
+  # Watch mode on the SAME image as web. MUST NOT be recreated.
+  watcher:
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    labels:
+      freshdock.enable: "true"
+      freshdock.mode: "watch"
+
+  # Watch mode AND restart: true on web. MUST NOT be restarted either.
+  watchdep:
+    image: alpine:latest
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    labels:
+      freshdock.enable: "true"
+      freshdock.mode: "watch"
+    depends_on:
+      web:
+        condition: service_started
+        restart: true
 ```
 
 ```bash
@@ -87,6 +107,8 @@ docker stop fdsmoke-paused-1
 # Record the baseline: container ids are what the assertions turn on.
 docker ps -a --filter label=com.docker.compose.project=fdsmoke \
   --format '{{.Names}}\t{{.Status}}\t{{.ID}}' | sort
+# A restart keeps the container id, so those assertions turn on StartedAt.
+docker inspect fdsmoke-sidecar-1 fdsmoke-watchdep-1 --format '{{.Name}} {{.State.StartedAt}}'
 wc -l data/migrations.log data/seed.log
 ```
 
@@ -118,6 +140,8 @@ Then check the daemon, not just the log:
 | `fdsmoke-migrate-1` id | **changed**, recreated on the new image. |
 | `fdsmoke-web-1` id | **changed**. |
 | `fdsmoke-sidecar-1` id | **unchanged**, uptime reset: restarted, not recreated. |
+| `fdsmoke-watcher-1` id | **unchanged**: watch mode is never recreated, same image or not. |
+| `fdsmoke-watchdep-1` `State.StartedAt` | **unchanged**: watch mode outranks a `restart: true` edge. |
 | `fdsmoke-bystander-1` id | **unchanged**: an unlabelled sibling on the same image is not swept in. |
 | `fdsmoke-paused-1` | still `Exited`, id unchanged: a stopped container is not started. |
 | `docker ps -a \| grep -- -old-` | nothing, archives cleaned up. |

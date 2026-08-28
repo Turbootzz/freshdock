@@ -224,10 +224,18 @@ pub fn plan(
         };
         let is_self = crate::selfid::is_own_container(own_id_prefix, Some(member.id.as_str()));
         let opted_out = labels::explicitly_opts_out(&member.labels);
+        let parsed = labels::parse_policy(&member.labels, defaults);
 
         // Independent of the image: a dependent is bumped because its
-        // dependency moved, not because it did.
-        if member.running && !is_self && !opted_out {
+        // dependency moved, not because it did. Watch mode is still excluded,
+        // since a stop and start is a restart, and `freshdock.mode=watch` is
+        // addressed to freshdock where compose's `restart: true` is not.
+        // Unreadable labels are excluded too: nothing here can be trusted.
+        if member.running
+            && !is_self
+            && !opted_out
+            && parsed.as_ref().is_ok_and(|p| p.mode != Mode::Watch)
+        {
             restart_candidates
                 .entry(info.service.clone())
                 .or_default()
@@ -253,7 +261,7 @@ pub fn plan(
             skip(SkipReason::OptedOut);
             continue;
         }
-        let policy = match labels::parse_policy(&member.labels, defaults) {
+        let policy = match parsed {
             Ok(policy) => policy,
             Err(e) => {
                 skip(SkipReason::InvalidLabels(e.to_string()));
@@ -1048,6 +1056,55 @@ mod tests {
             labelled(
                 member("web", "db:service_healthy:true"),
                 &[("freshdock.enable", "false")],
+            ),
+        ];
+        let plan = plan_from(&members, "stack-db-1");
+        assert!(
+            plan.restarts_for(&HashSet::from(["db".to_owned()]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_watch_mode_dependent_is_not_restarted_either() {
+        // `restart: true` is written for compose. `freshdock.mode=watch` is
+        // written for freshdock, and a stop plus a start is a restart.
+        let members = vec![
+            enabled(member("db", "")),
+            labelled(
+                member("web", "db:service_healthy:true"),
+                &[("freshdock.enable", "true"), ("freshdock.mode", "watch")],
+            ),
+        ];
+        let plan = plan_from(&members, "stack-db-1");
+        assert!(
+            plan.restarts_for(&HashSet::from(["db".to_owned()]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unlabelled_dependent_is_still_restarted() {
+        // The guard above must not take the ordinary sidecar with it: an
+        // absent label is not a refusal.
+        let members = vec![
+            enabled(member("db", "")),
+            member("web", "db:service_healthy:true"),
+        ];
+        let plan = plan_from(&members, "stack-db-1");
+        assert_eq!(
+            plan.restarts_for(&HashSet::from(["db".to_owned()])),
+            vec!["stack-web-1"]
+        );
+    }
+
+    #[test]
+    fn a_dependent_with_unreadable_labels_is_not_restarted() {
+        let members = vec![
+            enabled(member("db", "")),
+            labelled(
+                member("web", "db:service_healthy:true"),
+                &[("freshdock.enable", "yes-please")],
             ),
         ];
         let plan = plan_from(&members, "stack-db-1");

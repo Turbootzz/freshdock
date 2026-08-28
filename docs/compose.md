@@ -90,7 +90,7 @@ Everything else follows the ordinary rules:
 | Labelled `freshdock.enable=true` (or enabled by `watch_all`), on the moved image | **Yes.** |
 | Unlabelled, and another service waits on it with `service_completed_successfully` | **Yes**, re-run as a one-shot. |
 | Unlabelled and long-running, even on the same image | No. Sharing an image is not consent. |
-| In `watch` mode | No. Watch means detect and report, never restart, and re-running a one-shot is a restart. Sharing an image with a container that does update is not a way around it. |
+| In `watch` mode | No. Watch means detect and report, never restart, and re-running a one-shot is a restart. Such a container is not bumped by a `restart: true` edge either. |
 | `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or `freshdock.mode=off` | No. An explicit opt-out always wins, one-shots included. |
 | Stopped, and not a one-shot | No. If you stopped it, freshdock will not start it. |
 | A one-shot that is currently running | No. It is mid-run, and stomping it would kill a migration in flight. This holds even for an explicit `freshdock recreate` of that container. |
@@ -137,9 +137,13 @@ landed:
 
 This is a **restart**, not an update: the dependent's own image never moves, so
 there is no pull and no rollback surface. The stop honours the container's own
-`stop_signal` and `stop_grace_period`, exactly as a recreate would. A dependent
-that explicitly opts out is left alone, a stopped one is not started, and a
-restart that fails is logged without failing the rollout.
+`stop_signal` and `stop_grace_period`, exactly as a recreate would.
+
+A dependent is left alone when it explicitly opts out, when its labels cannot be
+read, or when it is in `watch` mode: `restart: true` is written for Compose,
+while `freshdock.mode=watch` is written for freshdock and says not to restart
+this container at all. A stopped dependent is not started, and a restart that
+fails is logged without failing the rollout.
 
 ## When a one-shot fails
 
