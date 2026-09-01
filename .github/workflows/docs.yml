@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       # Pin mdbook so local `just docs` and CI render identically; bump deliberately.
-      - uses: taiki-e/install-action@v2.85.4
+      - uses: taiki-e/install-action@v2.87.1
         with:
           tool: mdbook@0.5.3
       - name: Build (create-missing=false fails on broken chapter links)
