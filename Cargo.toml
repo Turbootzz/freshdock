@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
 anyhow = "1.0"
-comfy-table = "7"
+comfy-table = "8"
 futures = "0.3"
 async-trait = "0.1"
 # Calendar primitive only (DST-correct `DateTime<Local>`); cron parser + loop are
