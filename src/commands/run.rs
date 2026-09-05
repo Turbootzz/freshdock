@@ -28,12 +28,13 @@ pub async fn run(
     notifications: NotificationConfig,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
+    // Built before the Docker connect so a missing CA store fails the start.
+    let client = crate::http::client()?;
     let docker = Docker::connect(credentials.clone()).await?;
-    let registry = OciRegistry::new(credentials);
+    let registry = OciRegistry::with_client(client.clone(), credentials);
     // Build the dispatcher once from config, sharing one HTTP client with the
-    // backends. A misconfigured target is skipped with a WARN (resilient): a
-    // notification typo must never stop the daemon from updating containers.
-    let dispatcher = Dispatcher::from_config(notifications, crate::http::client());
+    // backends. A target that fails to build is skipped with a WARN.
+    let dispatcher = Dispatcher::from_config(notifications, client);
     dispatcher.log_configured();
 
     // `tokio::time::interval` panics on a zero period, and a poll interval below

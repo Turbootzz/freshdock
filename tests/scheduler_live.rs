@@ -186,7 +186,7 @@ async fn up_to_date_live_and_watch_containers_are_not_recreated() {
         let fd = freshdock::docker::Docker::connect(credentials.clone())
             .await
             .expect("freshdock docker connect");
-        let registry = OciRegistry::new(credentials);
+        let registry = OciRegistry::new(credentials).expect("http client");
         let cfg = SchedulerConfig {
             poll_interval: Duration::from_secs(1),
             tick: Duration::from_secs(1),

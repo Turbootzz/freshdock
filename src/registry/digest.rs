@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 use super::auth::{CachedToken, parse_www_authenticate};
 use super::{Digest, ImageRef, Registry, RegistryError};
 use crate::config::{CredentialStore, canonicalize_host};
+use crate::http::HttpError;
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -126,20 +127,30 @@ pub struct OciRegistry {
 }
 
 impl OciRegistry {
-    pub fn new(store: Arc<CredentialStore>) -> Self {
-        Self::build(store, None)
+    /// Build a registry client, failing when there is no usable CA store.
+    pub fn new(store: Arc<CredentialStore>) -> Result<Self, HttpError> {
+        Ok(Self::with_client(crate::http::client()?, store))
+    }
+
+    /// Build on an existing client so the daemon shares one connection pool.
+    pub fn with_client(client: Client, store: Arc<CredentialStore>) -> Self {
+        Self::build(client, store, None)
     }
 
     /// Test seam: route every request at `base_url` (a mock server). The auth
     /// realm is still discovered from the challenge the mock returns.
-    pub fn with_base_url(store: Arc<CredentialStore>, base_url: &str) -> Self {
+    pub fn with_base_url(client: Client, store: Arc<CredentialStore>, base_url: &str) -> Self {
         let endpoints = Endpoints::new(base_url).expect("test base url must be valid");
-        Self::build(store, Some(endpoints))
+        Self::build(client, store, Some(endpoints))
     }
 
-    fn build(store: Arc<CredentialStore>, registry_override: Option<Endpoints>) -> Self {
+    fn build(
+        client: Client,
+        store: Arc<CredentialStore>,
+        registry_override: Option<Endpoints>,
+    ) -> Self {
         Self {
-            client: crate::http::client(),
+            client,
             store,
             token_cache: Mutex::new(HashMap::new()),
             registry_override,

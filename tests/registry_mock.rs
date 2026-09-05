@@ -46,8 +46,17 @@ fn store_with_bad_dockerhub_creds() -> Arc<CredentialStore> {
     Arc::new(build_store(config, std::iter::empty::<(String, String)>()))
 }
 
+/// The shared client, which every test host has a CA store for.
+fn test_client() -> reqwest::Client {
+    freshdock::http::client().expect("http client")
+}
+
 fn anonymous_registry(server: &MockServer) -> OciRegistry {
-    OciRegistry::with_base_url(Arc::new(CredentialStore::default()), &server.uri())
+    OciRegistry::with_base_url(
+        test_client(),
+        Arc::new(CredentialStore::default()),
+        &server.uri(),
+    )
 }
 
 /// The `WWW-Authenticate` challenge value pointing the client back at the mock's
@@ -177,7 +186,7 @@ async fn credentials_are_forwarded_to_the_token_endpoint() {
     // Credentials keyed by the image's host (ghcr.io).
     let config = Config::from_toml("[registry.ghcr]\nusername = \"u\"\ntoken = \"pat\"\n").unwrap();
     let store = build_store(config, std::iter::empty::<(String, String)>());
-    let registry = OciRegistry::with_base_url(Arc::new(store), &server.uri());
+    let registry = OciRegistry::with_base_url(test_client(), Arc::new(store), &server.uri());
 
     let digest = registry
         .fetch_digest(&ImageRef::parse("ghcr.io/owner/repo"))
@@ -353,7 +362,11 @@ async fn rejected_creds_on_public_image_falls_back_to_anonymous() {
         .mount(&server)
         .await;
 
-    let registry = OciRegistry::with_base_url(store_with_bad_dockerhub_creds(), &server.uri());
+    let registry = OciRegistry::with_base_url(
+        test_client(),
+        store_with_bad_dockerhub_creds(),
+        &server.uri(),
+    );
     let digest = registry
         .fetch_digest(&ImageRef::parse("alpine"))
         .await
@@ -374,7 +387,11 @@ async fn rejected_creds_on_private_image_surfaces_credentials_rejected() {
         .mount(&server)
         .await;
 
-    let registry = OciRegistry::with_base_url(store_with_bad_dockerhub_creds(), &server.uri());
+    let registry = OciRegistry::with_base_url(
+        test_client(),
+        store_with_bad_dockerhub_creds(),
+        &server.uri(),
+    );
     let err = registry
         .fetch_digest(&ImageRef::parse("owner/repo"))
         .await
@@ -393,7 +410,8 @@ async fn unreachable_endpoint_surfaces_as_network_unavailable() {
     drop(listener);
     let dead = format!("http://127.0.0.1:{port}");
 
-    let registry = OciRegistry::with_base_url(Arc::new(CredentialStore::default()), &dead);
+    let registry =
+        OciRegistry::with_base_url(test_client(), Arc::new(CredentialStore::default()), &dead);
     let err = registry
         .fetch_digest(&ImageRef::parse("alpine"))
         .await

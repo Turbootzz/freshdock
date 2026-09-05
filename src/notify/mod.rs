@@ -812,7 +812,7 @@ mod tests {
         let built = build_target(
             "mail",
             smtp_target(None, Some(SmtpTls::Implicit), Some(false)),
-            &crate::http::client(),
+            &crate::http::client().expect("http client"),
         );
         assert!(built.is_ok(), "an agreeing pair must not drop the target");
     }
@@ -823,7 +823,7 @@ mod tests {
         let err = match build_target(
             "mail",
             smtp_target(None, Some(SmtpTls::Plaintext), Some(true)),
-            &crate::http::client(),
+            &crate::http::client().expect("http client"),
         ) {
             Err(e) => e,
             Ok(_) => panic!("a contradictory tls pair must be rejected"),
@@ -845,7 +845,10 @@ mod tests {
         );
         // Resilient: the bad target is dropped, not an error — the daemon keeps
         // running (here with no targets left).
-        let d = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
+        let d = Dispatcher::from_config(
+            NotificationConfig { targets },
+            crate::http::client().expect("http client"),
+        );
         assert!(d.is_empty());
     }
 
@@ -939,7 +942,10 @@ mod tests {
                 triggers: None,
             },
         );
-        let d = Dispatcher::from_config(NotificationConfig { targets }, crate::http::client());
+        let d = Dispatcher::from_config(
+            NotificationConfig { targets },
+            crate::http::client().expect("http client"),
+        );
         let out = capture_logs(|| d.log_configured());
         assert!(out.contains("notification targets configured"), "{out}");
         assert!(out.contains("ops(webhook)"), "{out}");
