@@ -27,6 +27,9 @@ skip = [
     # Build-time proc-macro only — no binary-size or runtime cost. Drop this
     # once the icu/idna stack has migrated to syn 3.
     { name = "syn", version = "2" },
+    # lettre 0.11.23 moved to base64 0.23; bollard, reqwest, hyper-util and
+    # email-encoding are still on 0.22. Drop this once they catch up.
+    { name = "base64", version = "0.22" },
 ]
 skip-tree = []
 
