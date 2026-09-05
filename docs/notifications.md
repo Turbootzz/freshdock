@@ -12,7 +12,7 @@ a target as a [`[notifications.<name>]`](configuration.md#notificationsname) tab
 |---|---|---|
 | `available` | A newer image exists but was **not** applied. | `watch` |
 | `succeeded` | A recreate passed its [health gate](health-and-rollback.md). | `live` / `nightly` / `weekly` / `monthly` |
-| `failed` | A recreate failed health and was **rolled back**. | `live` / `nightly` / `weekly` / `monthly` |
+| `failed` | A recreate failed health and was **rolled back**, or a [Compose rollout](compose.md#when-a-one-shot-fails) aborted on a failed one-shot (one event per project; `container` then names the project). | `live` / `nightly` / `weekly` / `monthly` |
 
 Each target may subscribe to a subset with `triggers = [...]`; omitting it (or `[]`)
 subscribes to all three. The failure message includes the reason (health-check

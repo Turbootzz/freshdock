@@ -7,8 +7,9 @@
 #   cp freshdock.toml.example freshdock.toml
 #
 # Resolution order: --config <path> flag > $FRESHDOCK_CONFIG > ./freshdock.toml.
-# Every value here can also come from environment variables. See
-# docs/configuration.md#environment-variables or `freshdock --help`.
+# Most values here can also come from environment variables (see
+# docs/configuration.md#environment-variables or `freshdock --help`). The one
+# exception is a registry host with dots in it, which only the file can hold.
 # Secrets are redacted in all log output, even at RUST_LOG=trace.
 
 # ── Fleet-wide defaults ──────────────────────────────────────────────────────
@@ -19,8 +20,8 @@
 # [settings]
 # default_mode     = "watch" # mode for enabled containers without a freshdock.mode
 #                            # label: live | nightly | weekly | monthly | watch | off
-# watch_all        = false   # enable every container unless it opts out
-#                            # (freshdock.enable=false, watchtower enable=false, mode=off)
+# watch_all        = false   # true: every running container counts as enabled unless
+#                            # it opts out (freshdock.enable=false, watchtower enable=false, mode=off)
 # compose_aware    = true    # roll a Compose project out as one unit
 # one_shot_timeout = 600     # seconds a compose one-shot may run before the rollout gives up
 # cleanup          = false   # remove the replaced image after a healthy update;

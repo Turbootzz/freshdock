@@ -22,8 +22,10 @@ smoke test, and what is out of scope.
 | lscr.io | optional | as the registry requires |
 | Other OCI + bearer | as the registry requires | as the registry requires |
 
-GHCR, Quay, and lscr authenticate with a token alone; Docker Hub also needs its
-account name (`FRESHDOCK_REGISTRY_DOCKERHUB_USERNAME`).
+Quay and lscr authenticate with a token alone. GHCR wants any non-empty username
+next to the PAT (`FRESHDOCK_REGISTRY_GHCR_USERNAME`); an omitted username is sent
+as empty, which GHCR may reject. Docker Hub needs its real account name
+(`FRESHDOCK_REGISTRY_DOCKERHUB_USERNAME`).
 
 Anonymous Docker Hub is rate-limited (about 100 requests per 6 h); adding
 credentials raises the budget. freshdock dedupes to one request per unique image to

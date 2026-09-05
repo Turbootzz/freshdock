@@ -25,7 +25,10 @@ jobs:
         with:
           tool: mdbook@0.5.3
       - name: Lint docs typography (mirrors `just docs-lint`)
-        run: "! grep -rnP '[\\x{2013}\\x{2014}\\x{2026}\\x{2192}\\x{2248}\\x{2264}\\x{2265}]' README.md CONTRIBUTING.md RELEASE.md SECURITY.md freshdock.toml.example docs examples"
+        run: |
+          status=0
+          grep -rnP '[\x{2013}\x{2014}\x{2026}\x{2192}\x{2248}\x{2264}\x{2265}]' README.md CONTRIBUTING.md RELEASE.md SECURITY.md freshdock.toml.example docs examples || status=$?
+          test "$status" -eq 1
       - name: Build (create-missing=false fails on broken chapter links)
         run: mdbook build
       # Only stage the Pages artifact on main; PRs just validate the build.

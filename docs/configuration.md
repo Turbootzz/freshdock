@@ -115,8 +115,8 @@ did before.
 freshdock skips its own container when it enables containers this way, so the
 daemon never tries to update itself. It recognises itself by the Docker default
 hostname (the short container id). If you give the freshdock container a custom
-`hostname`, add `freshdock.mode=off` to it, or set `freshdock.enable=true` on it if you do
-want it updated. The same applies when freshdock runs with
+`hostname`, add `freshdock.mode=off` to it, or set `freshdock.enable=true` and an updating
+`freshdock.mode` on it if you do want it updated. The same applies when freshdock runs with
 `network_mode: container:<name>`: it then carries the namespace owner's hostname,
 so label both containers explicitly in that setup. The skip is evaluated per
 invocation, so a `freshdock check` run outside the daemon's container still shows
@@ -182,8 +182,11 @@ When present, it is resolved in this order:
 
 An explicit path (flag or env) that doesn't exist is an error; a missing default
 `./freshdock.toml` is fine (you get an empty config). Secrets in the file are
-redacted in all log output, even at `RUST_LOG=trace`, and can be supplied via
-[environment variables](#environment-variables) instead.
+redacted in all log output, even at `RUST_LOG=trace`. Registry tokens, Telegram
+bot tokens, and SMTP passwords can come from
+[environment variables](#environment-variables) instead; a webhook or Discord URL
+stays in the file unless the whole target is declared with
+`FRESHDOCK_NOTIFY_<NAME>_URL`.
 
 The file has three top-level tables, all optional: `[settings]`, `[registry.*]`,
 and `[notifications.*]`.
@@ -196,7 +199,7 @@ that overrides it.
 ```toml
 [settings]
 default_mode   = "watch"   # fallback mode; invalid value falls back to watch
-watch_all        = false   # enable every container unless it opts out
+watch_all        = false   # true: every running container counts as enabled unless it opts out
                            # (enable=false, watchtower enable=false, mode=off)
 compose_aware    = true    # roll a Compose project out as one unit
 one_shot_timeout = 600     # seconds a compose one-shot may run before the rollout gives up

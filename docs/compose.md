@@ -195,9 +195,9 @@ rollout complete: 3 step(s)
 
 ## Limits
 
-- A rollout is triggered by a container freshdock already watches. The project is
-  examined because an update was found for one of its labelled containers. A
-  one-shot on an image that no watched container shares is never reached; give
+- A rollout is triggered by an enabled container: the scheduler finds an update
+  for one of the project's enabled containers, or you run `freshdock recreate` on
+  one. A one-shot on an image that no enabled container shares is never reached; give
   the one-shot the same image as the service that depends on it (the normal
   Compose pattern), or label a service that does run that image.
 - A single-service project behaves as it did before. When the plan comes down to

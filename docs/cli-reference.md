@@ -34,7 +34,8 @@ freshdock check
 
 Read-only. Lists every enabled container (`freshdock.enable=true`, or every
 container that does not opt out under
-[`watch_all`](configuration.md#watching-every-container)), resolves the
+[`watch_all`](configuration.md#watching-every-container), the daemon's own
+container excepted), resolves the
 latest digest once per unique image, and prints a status table. It never pulls,
 stops, or recreates anything. The dedupe conserves Docker Hub's anonymous budget
 of 100 pulls / 6 h; manifest fetches count as pulls.
@@ -84,8 +85,9 @@ skip the update (the command reports the skip and exits `0`).
 |---|---|
 | `<NAME>` | Name or ID of the running container to recreate. |
 
-It ignores `freshdock.mode`, since modes drive the scheduler and not manual
-intent, but the enable gate still applies. A container that is not enabled (no
+It ignores the scheduling modes (`live`, `nightly`, `weekly`, `monthly`, `watch`),
+since those drive the scheduler and not manual intent, but the enable gate and
+the `off` opt-out still apply. A container that is not enabled (no
 `freshdock.enable=true`, unless
 [`watch_all`](configuration.md#watching-every-container) is on) or that opts out
 with `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or
