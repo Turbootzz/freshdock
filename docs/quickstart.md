@@ -1,6 +1,6 @@
 # Quickstart
 
-Get freshdock watching a container in about a minute. No config file required —
+Get freshdock watching a container in about a minute. No config file is required:
 freshdock is driven by container labels and environment variables, notifications
 [included](notifications.md#declaring-targets-from-the-environment).
 
@@ -16,7 +16,7 @@ docker pull ghcr.io/turbootzz/freshdock:latest   # container image
 
 ## 2. See what freshdock would do (read-only)
 
-Label a container to opt it in, then run `check` — it never changes anything:
+Label a container to opt it in, then run `check`, which never changes anything:
 
 ```yaml
 services:
@@ -30,14 +30,13 @@ services:
 freshdock check
 ```
 
-You'll get a table of opted-in containers and whether each has an update available.
-(See the [CLI reference](cli-reference.md#freshdock-check) for what the status cells
-mean.)
+You get a table of opted-in containers and whether each has an update available. The
+[CLI reference](cli-reference.md#freshdock-check) explains what the status cells mean.
 
 ## 3. Run the daemon
 
-freshdock is **opt-in** and defaults enabled containers to `watch` (notice updates,
-never restart). Start the scheduler:
+freshdock is opt-in and defaults enabled containers to `watch` (notice updates, never
+restart). Start the scheduler:
 
 ```bash
 docker run -d \
@@ -47,14 +46,13 @@ docker run -d \
   ghcr.io/turbootzz/freshdock:latest run
 ```
 
-This is the [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml) example. A
-read-only socket is enough for `watch`.
+This is the [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml)
+example. A read-only socket is enough for `watch`.
 
-Don't want to label every container? `FRESHDOCK_WATCH_ALL=true` includes them all
-unless they opt out, see
-[watching every container](configuration.md#watching-every-container).
+To avoid labelling every container, `FRESHDOCK_WATCH_ALL=true` includes them all unless
+they opt out. See [watching every container](configuration.md#watching-every-container).
 
-## 4. Let it actually update something
+## 4. Let it update something
 
 Switch a container to an updating mode and give the daemon a writable socket:
 
@@ -65,15 +63,15 @@ Switch a container to an updating mode and give the daemon a writable socket:
       - "freshdock.notify=true"    # if you've configured a notifier
 ```
 
-Updates are [health-gated with automatic rollback](health-and-rollback.md) — a broken
-new image is reverted, not left running.
+Updates are [health-gated with automatic rollback](health-and-rollback.md): a broken new
+image is reverted, not left running.
 
 ## Next steps
 
-- [Configuration reference](configuration.md) — every label, setting, and env var.
-- [Scheduling](scheduling.md) — modes and cron syntax.
-- [Notifications](notifications.md) — webhook, Discord, Telegram, SMTP.
-- [Registry authentication](registry-auth.md) — private images.
-- [Deployment](deployment.md) — systemd, socket permissions, compatibility.
-- [Troubleshooting](troubleshooting.md) — something not behaving? Start here.
+- [Configuration reference](configuration.md): every label, setting, and env var.
+- [Scheduling](scheduling.md): modes and cron syntax.
+- [Notifications](notifications.md): webhook, Discord, Telegram, SMTP.
+- [Registry authentication](registry-auth.md): private images.
+- [Deployment](deployment.md): systemd, socket permissions, compatibility.
+- [Troubleshooting](troubleshooting.md): start here when something misbehaves.
 - [Coming from Watchtower?](migrating-from-watchtower.md)

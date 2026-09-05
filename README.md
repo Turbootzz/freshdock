@@ -4,7 +4,7 @@
 
 # freshdock
 
-**A modern, health-gated Docker container auto-updater — a maintained successor to Watchtower, in a single Rust binary.**
+**A modern, health-gated Docker container auto-updater. A maintained successor to Watchtower, in a single Rust binary.**
 
 [![CI](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml/badge.svg)](https://github.com/Turbootzz/freshdock/actions/workflows/ci.yml)
 [![Crate](https://img.shields.io/crates/v/freshdock)](https://crates.io/crates/freshdock)
@@ -13,42 +13,40 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Turbootzz)
 
-[Quickstart](https://turbootzz.github.io/freshdock/quickstart.html) · [Docs](https://turbootzz.github.io/freshdock/) · [Configuration](https://turbootzz.github.io/freshdock/configuration.html) · [From Watchtower](https://turbootzz.github.io/freshdock/migrating-from-watchtower.html)
+[Website](https://freshdock.dev) · [Quickstart](https://turbootzz.github.io/freshdock/quickstart.html) · [Docs](https://turbootzz.github.io/freshdock/) · [Configuration](https://turbootzz.github.io/freshdock/configuration.html) · [From Watchtower](https://turbootzz.github.io/freshdock/migrating-from-watchtower.html)
 
 </div>
 
 ---
 
+Why freshdock instead of Watchtower? See the [side-by-side comparison](https://freshdock.dev/watchtower-alternative).
+
 ## What it does
 
-freshdock watches your running containers, notices when a newer image is published,
-and updates them **safely** — a broken new image rolls back automatically instead of
-leaving you with a dead service.
+freshdock watches your running containers, notices when a newer image is published, and
+updates them safely: a broken new image rolls back automatically instead of leaving you
+with a dead service.
 
 | Capability | What you get |
 |---|---|
-| **Health-gated rollback** | A container counts as updated only after its healthcheck passes (or a grace period for those without one). If the new image fails to come up, the previous container is restored — and you're notified. |
+| **Health-gated rollback** | A container counts as updated only after its healthcheck passes, or after a grace period if it has none. If the new image fails to come up, the previous container is restored and you are notified. |
 | **Per-container modes** | Drive each container with Docker labels: `live`, `nightly`, `weekly`, `monthly`, `watch`, `off`. Mix them freely on one daemon. |
-| **Five registries** | Docker Hub, GHCR, Quay.io, lscr.io, and any OCI bearer-token registry — anonymous or authenticated. |
+| **Five registries** | Docker Hub, GHCR, Quay.io, lscr.io, and any OCI bearer-token registry, anonymous or authenticated. |
 | **Four notifiers** | Webhook, Discord, Telegram, and SMTP, each subscribable to the events it cares about. |
-| **Lifecycle hooks** | Run commands inside the container around an update: a pre-update hook can veto/defer (exit 75), a post-update hook handles maintenance like cache clears. |
-| **Compose-aware rollouts** | A Compose project updates as one unit: the one-shot `migrate` service your app waits on is re-run *before* the new code starts, and a failed migration aborts the rollout instead of leaving new code on an old schema. Read straight from Compose's own labels, no compose file needed. |
-| **VPN stacks survive updates** | Containers that route through another container's network (`network_mode: container:X` — the gluetun pattern) are re-attached automatically after that container updates, instead of being left offline. |
-| **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly — migrate a fleet without relabelling. `FRESHDOCK_WATCH_ALL=true` restores Watchtower's opt-out model if you want it. |
+| **Lifecycle hooks** | Run commands inside the container around an update. A pre-update hook can veto or defer (exit 75); a post-update hook handles maintenance like cache clears. |
+| **Compose-aware rollouts** | A Compose project updates as one unit: the one-shot `migrate` service your app waits on is re-run before the new code starts, and a failed migration aborts the rollout. Read from Compose's own labels, no compose file needed. |
+| **VPN stacks survive updates** | Containers routed through another container's network (`network_mode: container:X`, the gluetun pattern) are re-attached after that container updates instead of being left offline. |
+| **Watchtower drop-in** | Reads `com.centurylinklabs.watchtower.*` labels (enable, monitor-only, lifecycle hooks) directly, so a fleet migrates without relabelling. `FRESHDOCK_WATCH_ALL=true` restores Watchtower's opt-out model, still on `watch` until `FRESHDOCK_DEFAULT_MODE` picks an updating mode. |
 | **Optional cleanup** | Remove superseded images after a healthy update; optionally prune dangling images. |
-| **Single static binary** | ≤ 10 MB, no runtime dependencies. No JVM, no Go runtime, no 100 MB image to manage your homelab. |
+| **Single static binary** | Under 10 MB, no runtime dependencies. No JVM, no Go runtime, no 100 MB image to manage your homelab. |
 
-> **Opt-in by design.** freshdock ignores every container until you set
-> `freshdock.enable=true`, and an enabled container with no explicit mode defaults to
-> `watch` (detect-and-notify, never restart). Nothing is touched until you ask, with
-> one narrow exception: inside a Compose project, an unlabelled service another
-> service waits on with `service_completed_successfully` is re-run as part of that
-> project's rollout, because the compose file itself says it has to finish first.
-> An explicit opt-out is still honoured.
-> Prefer Watchtower's model? `FRESHDOCK_WATCH_ALL=true` includes every container
-> unless it opts out, still on the safe default mode until you pick another with
-> `FRESHDOCK_DEFAULT_MODE`. See
-> [watching every container](https://turbootzz.github.io/freshdock/configuration.html#watching-every-container).
+freshdock is opt-in: it ignores every container until you set `freshdock.enable=true`, and
+an enabled container with no explicit mode defaults to `watch` (detect and notify, never
+restart). One narrow exception: inside a Compose project, an unlabelled one-shot that
+another service waits on is re-run as part of the rollout. An explicit opt-out still
+wins. See [Compose projects](https://turbootzz.github.io/freshdock/compose.html). To
+include every container unless it opts out, see
+[watching every container](https://turbootzz.github.io/freshdock/configuration.html#watching-every-container).
 
 ## Quickstart
 
@@ -74,8 +72,9 @@ services:
 freshdock check    # read-only: which containers have updates available?
 ```
 
-Ready to let it update something? Switch to `freshdock.mode=nightly` (and give the
-daemon a writable socket). Full walkthrough → [**Quickstart**](https://turbootzz.github.io/freshdock/quickstart.html).
+To let it update something, switch to `freshdock.mode=nightly` and give the daemon a
+writable socket. Full walkthrough in the
+[Quickstart](https://turbootzz.github.io/freshdock/quickstart.html).
 
 ## Install
 
@@ -89,10 +88,10 @@ docker run -d --name freshdock --restart unless-stopped \
   ghcr.io/turbootzz/freshdock:latest run
 ```
 
-Prebuilt static-musl binaries (amd64 / arm64 / armv7) are attached to each
-[release](https://github.com/Turbootzz/freshdock/releases), together with a
-`SHA256SUMS` file to verify them (`sha256sum -c SHA256SUMS`). From source:
-`git clone … && just build` (binary at `target/release/freshdock`).
+Prebuilt static-musl binaries (amd64, arm64, armv7) are attached to each
+[release](https://github.com/Turbootzz/freshdock/releases), with a `SHA256SUMS` file to
+verify them (`sha256sum -c SHA256SUMS`). From source: clone the repo and run `just build`
+(binary at `target/release/freshdock`).
 
 ## Update modes
 
@@ -100,8 +99,8 @@ Prebuilt static-musl binaries (amd64 / arm64 / armv7) are attached to each
 |---|---|
 | `live` | Poll frequently; pull and recreate on every new digest. |
 | `nightly` / `weekly` / `monthly` | Check on a cron schedule (default 04:00); recreate if newer. |
-| `watch` | Detect updates and **notify only** — never pull or restart. |
-| `off` | Ignore the container entirely. |
+| `watch` | Detect updates and notify only, never pull or restart. |
+| `off` | Never updated. Still listed by `freshdock check`. |
 
 Set the mode (and an optional cron override) with labels:
 
@@ -112,8 +111,9 @@ Set the mode (and an optional cron override) with labels:
       - "freshdock.schedule=0 2 * * 1"   # 02:00 every Monday (overrides the default)
 ```
 
-Full label vocabulary and cron syntax → [**Configuration**](https://turbootzz.github.io/freshdock/configuration.html#labels)
-and [**Scheduling**](https://turbootzz.github.io/freshdock/scheduling.html).
+Full label vocabulary and cron syntax:
+[Configuration](https://turbootzz.github.io/freshdock/configuration.html#labels) and
+[Scheduling](https://turbootzz.github.io/freshdock/scheduling.html).
 
 ## Documentation
 
@@ -123,27 +123,29 @@ and [**Scheduling**](https://turbootzz.github.io/freshdock/scheduling.html).
 | [Configuration](https://turbootzz.github.io/freshdock/configuration.html) | Every label, env var, and `freshdock.toml` table (the single source of truth). |
 | [CLI reference](https://turbootzz.github.io/freshdock/cli-reference.html) | `check`, `recreate`, `run`, and all flags. |
 | [Scheduling & modes](https://turbootzz.github.io/freshdock/scheduling.html) | Update modes and cron syntax. |
+| [Compose projects](https://turbootzz.github.io/freshdock/compose.html) | A stack updated as one unit: one-shot migrations, `depends_on` ordering. |
 | [Notifications](https://turbootzz.github.io/freshdock/notifications.html) | Webhook, Discord, Telegram, SMTP. |
 | [Health & rollback](https://turbootzz.github.io/freshdock/health-and-rollback.html) | The recreate lifecycle and image cleanup. |
+| [Lifecycle hooks](https://turbootzz.github.io/freshdock/lifecycle-hooks.html) | Pre-update and post-update commands. |
 | [Registry auth](https://turbootzz.github.io/freshdock/registry-auth.html) | Private registries and credentials. |
 | [Deployment](https://turbootzz.github.io/freshdock/deployment.html) | Container, systemd, socket permissions, compatibility. |
 | [Troubleshooting](https://turbootzz.github.io/freshdock/troubleshooting.html) | Symptom-first fixes for common first-run issues. |
 | [Migrating from Watchtower](https://turbootzz.github.io/freshdock/migrating-from-watchtower.html) | Label/flag translation. |
 | [Architecture & roadmap](https://turbootzz.github.io/freshdock/PLAN.html) | Design, phases, goals, risks. |
 
-Runnable example stacks: [`examples/compose/`](examples/compose/). A commented
-config template: [`freshdock.toml.example`](freshdock.toml.example).
+Runnable example stacks: [`examples/compose/`](examples/compose/). A commented config
+template: [`freshdock.toml.example`](freshdock.toml.example).
 
 ## Why freshdock
 
-[Watchtower](https://github.com/containrrr/watchtower) — the de-facto Docker
-auto-updater for years — was archived by its maintainers on 17 December 2025, and
-shipped an embedded Docker SDK (API 1.25) incompatible with Docker Engine 29+. The
-community has forks, but none combine what matters for a small homelab:
+[Watchtower](https://github.com/containrrr/watchtower) was the de-facto Docker
+auto-updater for years. Its maintainers archived it on 17 December 2025, and it shipped an
+embedded Docker SDK (API 1.25) incompatible with Docker Engine 29+. The community has
+forks, but none combine what matters for a small homelab:
 
-1. **Modern Docker API** — the API version is negotiated with your daemon at connect time via [bollard](https://github.com/fussybeaver/bollard), so freshdock speaks the newest API that daemon actually supports.
-2. **Safe updates** — a broken new image rolls back automatically instead of leaving a dead container.
-3. **Small footprint** — a single static binary, not a 100+ MB image to manage your other containers.
+1. Modern Docker API: the API version is negotiated with your daemon at connect time via [bollard](https://github.com/fussybeaver/bollard), so freshdock speaks the newest API that daemon supports.
+2. Safe updates: a broken new image rolls back automatically instead of leaving a dead container.
+3. Small footprint: a single static binary, not a 100+ MB image to manage your other containers.
 
 ## Compatibility
 
@@ -152,47 +154,32 @@ community has forks, but none combine what matters for a small homelab:
 | Plain Docker | Primary target. The API version is negotiated per daemon; CI exercises the Docker engine shipped on GitHub's `ubuntu-latest` runners. |
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
-| Podman 4+ | Supported via the Docker-compatible socket (see [socket discovery](#which-socket-freshdock-uses)). |
+| Podman 4+ | Supported via the Docker-compatible socket. |
 | Docker Compose | A project is updated as one unit: one-shot `service_completed_successfully` services are re-run first, the rest follow in `depends_on` order. Compose files are never read or written. |
-| Compose-based UIs (Dockge, Komodo, …) | Supported; the compose files themselves are untouched. |
-| Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
+| Compose-based UIs (Dockge, Komodo, and similar) | Supported; the compose files themselves are untouched. |
+| Kubernetes / Swarm | Out of scope. Use platform-native mechanisms. |
 
-One known daemon-version floor: re-creating a container attached to **more than one
-network** needs Docker API 1.44 (Docker 25.0) — older daemons cannot attach several
-networks in a single create. freshdock checks this before it stops anything and
-refuses with an explanatory error rather than taking the container down first.
-Single-network containers (the vast majority) are unaffected.
-
-### Which socket freshdock uses
-
-At startup freshdock connects in this order and logs which family answered:
-
-1. `DOCKER_HOST`, if set — `unix://`, `tcp://`, `http://`, `https://` and `ssh://`
-   are all honoured.
-2. The local Docker socket: `/var/run/docker.sock` (named pipe on Windows).
-3. Podman's sockets: `$XDG_RUNTIME_DIR/podman/podman.sock`,
-   `/run/user/$UID/podman/podman.sock`, then `/run/podman/podman.sock`.
-
-A Podman host in a non-standard location needs no special support — point
-`DOCKER_HOST=unix:///path/to/podman.sock` at it.
+Socket discovery order, Podman paths, and the Docker API 1.44 floor for containers on more
+than one network are covered in
+[Deployment](https://turbootzz.github.io/freshdock/deployment.html).
 
 ## Status & roadmap
 
-Phases 0–7 are complete and freshdock has been stable since `1.0.0`.
-The full plan and architecture live in [the roadmap](https://turbootzz.github.io/freshdock/PLAN.html);
+Phases 0-7 are complete and freshdock has been stable since `1.0.0`. The full plan and
+architecture live in [the roadmap](https://turbootzz.github.io/freshdock/PLAN.html);
 release mechanics in [RELEASE.md](RELEASE.md); per-version notes in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for local setup,
-the quality gates, and dependency hygiene. Security reports: [SECURITY.md](SECURITY.md).
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, the
+quality gates, and dependency hygiene. Security reports: [SECURITY.md](SECURITY.md).
 
 ## Support
 
-freshdock is free and open source. If it keeps your homelab up to date, you can
-support its development through [**GitHub Sponsors**](https://github.com/sponsors/Turbootzz).
-Sponsoring is entirely optional — stars, bug reports, and pull requests help just as much.
+freshdock is free and open source. If it keeps your homelab up to date, you can support its
+development through [GitHub Sponsors](https://github.com/sponsors/Turbootzz). Sponsoring is
+optional; stars, bug reports, and pull requests help just as much.
 
 ## License
 

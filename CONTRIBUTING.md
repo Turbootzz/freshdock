@@ -1,7 +1,7 @@
 # Contributing to freshdock
 
 Thanks for your interest! freshdock is built phase-by-phase per
-[docs/PLAN.md](docs/PLAN.md) — please read it (especially the goals and **non-goals**
+[docs/PLAN.md](docs/PLAN.md). Please read it (especially the goals and **non-goals**
 in §3) before proposing scope changes.
 
 ## Ways to help
@@ -10,7 +10,7 @@ in §3) before proposing scope changes.
   labels involved.
 - Feedback on [docs/PLAN.md](docs/PLAN.md): registries, notification targets, or
   label conventions you'd want supported.
-- Tell us what broke for you in Watchtower or its forks — pain points are the best
+- Tell us what broke for you in Watchtower or its forks; pain points are the best
   feature requests.
 
 ## Local development
@@ -31,7 +31,7 @@ local hooks and CI run on the exact same compiler and clippy ruleset.
 ### The quality gate
 
 ```bash
-just ci      # fmt-check + clippy + test + deny — run this before claiming done
+just ci      # fmt-check + clippy + test + deny, run this before claiming done
 ```
 
 | Recipe | What it runs |
@@ -65,9 +65,9 @@ cargo test --test recreate_roundtrip_live -- --ignored
 
 [deny.toml](deny.toml) is strict and enforced in CI:
 
-- **License allowlist** — Apache-2.0, MIT, BSD-3-Clause, Unicode-3.0, ISC,
+- **License allowlist**: Apache-2.0, MIT, BSD-3-Clause, Unicode-3.0, ISC,
   CDLA-Permissive-2.0, 0BSD. Anything else fails.
-- `multiple-versions = "deny"` — resolve duplicate transitive versions before merging.
+- `multiple-versions = "deny"`: resolve duplicate transitive versions before merging.
 - `wildcards = "deny"` and `yanked = "deny"`.
 
 Adding a dependency means: pick a license-clean crate, run `just deny`, and resolve
@@ -76,7 +76,7 @@ any duplicate-version warnings. New dependencies should be justified against PLA
 
 ## Conventions
 
-- **Comments explain _why_, not _what_** — document non-obvious intent and gotchas,
+- **Comments explain _why_, not _what_**: document non-obvious intent and gotchas,
   not what the code already says. One tight sentence beats a paragraph.
 - Errors use `thiserror` enums in libraries; the binary collapses to `anyhow`.
 - Match the surrounding code's naming, idioms, and comment density.

@@ -16,7 +16,7 @@ freshdock is pre-1.0. Security fixes target the **latest released version** and
 
 Report privately via GitHub's
 [**Report a vulnerability**](https://github.com/Turbootzz/freshdock/security/advisories/new)
-button (Security → Advisories), or by email to **thijs@bendy.nl**.
+button (Security, then Advisories), or by email to **thijs@bendy.nl**.
 
 Please include:
 
@@ -30,7 +30,7 @@ anonymous.
 
 ## Scope notes
 
-freshdock talks to the Docker socket, which is effectively root on the host — grant
+freshdock talks to the Docker socket, which is effectively root on the host. Grant
 that access deliberately (see [deployment](docs/deployment.md#docker-socket-permissions)).
 Registry tokens and notification secrets are redacted in logs (even at
 `RUST_LOG=trace`); a leak of a secret into log output is in scope.

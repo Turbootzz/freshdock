@@ -44,6 +44,10 @@ install-hooks:
 docs:
     mdbook build
 
+# Fail on typographic dashes, arrows, and ellipses in the docs (plain ASCII only).
+docs-lint:
+    status=0; grep -rnP '[\x{2013}\x{2014}\x{2026}\x{2192}\x{2248}\x{2264}\x{2265}]' README.md CONTRIBUTING.md RELEASE.md SECURITY.md freshdock.toml.example docs examples || status=$?; test "$status" -eq 1
+
 # Serve the docs locally with live reload and open a browser.
 docs-serve:
     mdbook serve --open

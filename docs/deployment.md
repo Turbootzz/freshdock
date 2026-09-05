@@ -2,7 +2,7 @@
 
 freshdock is a single static binary that talks to the Docker socket. Run it however
 suits you: as a container alongside the ones it manages, or directly on the host
-(e.g. under systemd). For configuration, see the
+(under systemd, for example). For configuration, see the
 [configuration reference](configuration.md).
 
 ## As a container (recommended)
@@ -17,28 +17,28 @@ docker run -d \
   ghcr.io/turbootzz/freshdock:latest run
 ```
 
-Or with compose — see the runnable stacks in
+Or with compose. The runnable stacks live in
 [`examples/compose/`](https://github.com/Turbootzz/freshdock/tree/main/examples/compose):
 
-- [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml) — watch-only, read-only socket.
-- [`mixed-modes.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/mixed-modes.yml) — live + nightly + watch on one daemon.
-- [`notifications-enabled.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/notifications-enabled.yml) — mounts a `freshdock.toml`.
-- [`registry-authenticated.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/registry-authenticated.yml) — private registry via env.
+- [`minimal-watch.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/minimal-watch.yml): watch-only, read-only socket.
+- [`mixed-modes.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/mixed-modes.yml): live + nightly + watch on one daemon.
+- [`notifications-enabled.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/notifications-enabled.yml): mounts a `freshdock.toml`.
+- [`registry-authenticated.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/registry-authenticated.yml): private registry via env.
 - [`watch-all.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/watch-all.yml): opt-out mode, every container included unless it opts out.
-- [`compose-project.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/compose-project.yml) — a stack with a one-shot migration, rolled out as one unit. See [Compose projects](compose.md).
+- [`compose-project.yml`](https://github.com/Turbootzz/freshdock/blob/main/examples/compose/compose-project.yml): a stack with a one-shot migration, rolled out as one unit. See [Compose projects](compose.md).
 
 ### Socket: read-only vs writable
 
 | Workload | Socket mount |
 |---|---|
-| `watch` / `check` only (never recreates) | `:ro` is enough — `-v /var/run/docker.sock:/var/run/docker.sock:ro` |
-| Any updating mode (`live`/`nightly`/`weekly`/`monthly`, or `recreate`) | writable — `-v /var/run/docker.sock:/var/run/docker.sock` |
+| `watch` / `check` only (never recreates) | `:ro` is enough: `-v /var/run/docker.sock:/var/run/docker.sock:ro` |
+| Any updating mode (`live`/`nightly`/`weekly`/`monthly`, or `recreate`) | writable: `-v /var/run/docker.sock:/var/run/docker.sock` |
 
 ### Configuration: environment first
 
 Most deployments need no config file. Fleet-wide settings, registry credentials,
-and the `run` flags are all environment variables — pass them under `environment:`
-in compose (or `Environment=` in a systemd unit):
+notification targets, and the `run` flags are all environment variables. Pass them under `environment:` in
+compose, or `Environment=` in a systemd unit:
 
 ```yaml
 services:
@@ -55,17 +55,17 @@ services:
 ```
 
 Add `FRESHDOCK_WATCH_ALL: "true"` to that block if you would rather not label each
-container: every running container is then included unless it opts out, on the
-mode set by `FRESHDOCK_DEFAULT_MODE`. See
+container: every running container is then included unless it opts out, on the mode
+set by `FRESHDOCK_DEFAULT_MODE`. See
 [watching every container](configuration.md#watching-every-container).
 
 The full list is the [env-var table](configuration.md#environment-variables).
 
-### Notifications (no file needed)
+### Notifications
 
 A notification target can be declared from the environment with a
-[shoutrrr-style URL](notifications.md#declaring-targets-from-the-environment) — no
-file to mount:
+[shoutrrr-style URL](notifications.md#declaring-targets-from-the-environment), with
+no file to mount:
 
 ```yaml
 services:
@@ -80,8 +80,8 @@ services:
     restart: unless-stopped
 ```
 
-Prefer a file? Declare the target in a `[notifications.<name>]` table, mount it
-read-only, and keep its secret in the environment instead:
+To use a file instead, declare the target in a `[notifications.<name>]` table, mount
+it read-only, and keep its secret in the environment:
 
 ```yaml
 services:
@@ -132,13 +132,12 @@ journalctl -u freshdock -f
 freshdock talks to `/var/run/docker.sock`. `permission denied` on the socket means
 the process isn't allowed to use it:
 
-- **On the host:** run as a user in the `docker` group.
-- **In a container:** the socket's group GID inside the container must match the
-  host socket's owner. On some hosts you must pass `--group-add <gid>` (find it with
+- On the host: run as a user in the `docker` group.
+- In a container: the socket's group GID inside the container must match the host
+  socket's owner. On some hosts you must pass `--group-add <gid>` (find it with
   `stat -c '%g' /var/run/docker.sock`).
 
-Note: access to the Docker socket is effectively root on the host — grant it
-deliberately.
+Access to the Docker socket is effectively root on the host, so grant it with care.
 
 ## Compatibility
 
@@ -149,22 +148,21 @@ deliberately.
 | Portainer (CE and Business) | Supported via the same Docker socket. |
 | Podman 4+ | Supported via the Docker-compatible socket (discovery below). |
 | Docker Compose | A multi-service project is updated as one unit, in `depends_on` order. See [Compose projects](compose.md). |
-| Compose-based UIs (Dockge, Komodo, …) | Supported; compose files are never read or edited. |
-| Kubernetes / Swarm | Out of scope — use platform-native mechanisms. |
+| Compose-based UIs (Dockge, Komodo, and similar) | Supported; compose files are never read or edited. |
+| Kubernetes / Swarm | Out of scope; use platform-native mechanisms. |
 
-One daemon-version floor applies: re-creating a container attached to **more than
-one network** requires Docker API 1.44 (Docker 25.0), because older daemons cannot
-attach several networks in a single create call. freshdock checks the negotiated
-API version *before* it stops anything, so on an older daemon such a container is
-refused with an explanatory error instead of being taken down and then failing to
-come back. Detach the extra networks (re-attaching them after the update) or
-upgrade the daemon.
+One daemon-version floor applies: re-creating a container attached to more than one
+network requires Docker API 1.44 (Docker 25.0), because older daemons cannot attach
+several networks in a single create call. freshdock checks the negotiated API
+version before it stops anything, so on an older daemon such a container is refused
+with an explanatory error rather than being taken down and left unable to come back.
+Detach the extra networks (re-attaching them after the update) or upgrade the daemon.
 
 ### Which socket freshdock uses
 
 freshdock connects in this order at startup and logs which family answered:
 
-1. `DOCKER_HOST`, if set — `unix://`, `tcp://`, `http://`, `https://` and `ssh://`
+1. `DOCKER_HOST`, if set. `unix://`, `tcp://`, `http://`, `https://` and `ssh://`
    are all honoured. Only the scheme is logged; the value may carry credentials.
 2. The local Docker socket: `/var/run/docker.sock` (named pipe on Windows).
 3. Podman's sockets: `$XDG_RUNTIME_DIR/podman/podman.sock`,
@@ -175,4 +173,4 @@ configuration. For anything else, set `DOCKER_HOST=unix:///path/to/podman.sock`.
 
 A recreate replaces the container with a new ID, so a UI that pinned the old ID may
 briefly show it "out of sync" until its next refresh. freshdock never edits your
-compose/stack files — only the running container.
+compose/stack files, only the running container.

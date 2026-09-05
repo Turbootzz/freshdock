@@ -1,7 +1,7 @@
-# freshdock — A Modern Rust-based Watchtower Successor
+# freshdock: A Modern Rust-based Watchtower Successor
 
-> **Project name:** `freshdock` — verified available on crates.io, GitHub, Docker Hub, npm, PyPI.
-> **Status:** Shipped — v1.1.0 (Phases 0–7 complete).
+> **Project name:** `freshdock`, verified available on crates.io, GitHub, Docker Hub, npm, PyPI.
+> **Status:** Shipped (Phases 0-7 complete). Current version: see the changelog.
 > **Author:** Thijs (Turboot).
 > **Date:** May 2026 (original plan).
 
@@ -15,7 +15,7 @@
 
 ## 1. Context
 
-Watchtower (`containrrr/watchtower`) was archived on **17 December 2025** and is no longer maintained. Beyond being abandoned, the codebase ships an outdated embedded Docker SDK (API 1.25), which makes it incompatible with Docker Engine 29+ (which requires API ≥ 1.44). The original maintainers themselves discourage the use of the active forks. There is a clear, current gap in the ecosystem for a maintained, modern, full-cycle (check → pull → restart) container auto-updater.
+Watchtower (`containrrr/watchtower`) was archived on **17 December 2025** and is no longer maintained. Beyond being abandoned, the codebase ships an outdated embedded Docker SDK (API 1.25), which makes it incompatible with Docker Engine 29+ (which requires API 1.44 or newer). The original maintainers themselves discourage the use of the active forks. There is a clear, current gap in the ecosystem for a maintained, modern, full-cycle (check, pull, restart) container auto-updater.
 
 This project fills that gap, while serving a secondary goal: a substantial real-world project to deepen Rust skills (async, Tokio, error modelling, traits, state machines, packaging).
 
@@ -38,11 +38,11 @@ This project fills that gap, while serving a secondary goal: a substantial real-
 
 | Tool | What it does | Gap |
 |---|---|---|
-| Cup (`sergi0g/cup`) | Very fast checker (5.4 MB binary, 58 images in ~3.7s on a Pi 5), CLI + web | **Deliberately does not pull or restart** — checker only. |
+| Cup (`sergi0g/cup`) | Very fast checker (5.4 MB binary, 58 images in ~3.7s on a Pi 5), CLI + web | **Deliberately does not pull or restart**, checker only. |
 
 ### The gap this project fills
 
-There is **no full-cycle (check → pull → recreate → restart → cleanup) Rust-based container auto-updater** with active maintenance. Users who want automation today fall back on heavier Go tools that pull 100+ MB images. A Rust tool that combines Cup-level footprint with Watchtower-level capability does not exist yet.
+There is **no full-cycle (check, pull, recreate, restart, cleanup) Rust-based container auto-updater** with active maintenance. Users who want automation today fall back on heavier Go tools that pull 100+ MB images. A Rust tool that combines Cup-level footprint with Watchtower-level capability does not exist yet.
 
 ---
 
@@ -51,7 +51,7 @@ There is **no full-cycle (check → pull → recreate → restart → cleanup) R
 ### Goals
 
 1. Be a true drop-in replacement for Watchtower's "set and forget" use case in homelabs.
-2. Support modern Docker (API ≥ 1.44) and Podman without hacks.
+2. Support modern Docker (API 1.44 or newer) and Podman without hacks.
 3. Multiple update strategies on a per-container basis (live, scheduled, watch-only).
 4. Healthy-by-default: never leave the user with a broken container if a rollback is possible.
 5. Single static binary, small footprint, fast cold start.
@@ -59,7 +59,7 @@ There is **no full-cycle (check → pull → recreate → restart → cleanup) R
 
 ### Non-Goals (explicitly out of scope, at least for v1)
 
-- Kubernetes — Kubernetes has its own update mechanisms; do not compete with them.
+- Kubernetes: Kubernetes has its own update mechanisms; do not compete with them.
 - Docker Swarm orchestration logic.
 - Approval workflows / web UI in v1 (consider for v2).
 - Multi-host agent architecture (consider for v2).
@@ -74,11 +74,11 @@ What this project will do better than the existing landscape:
 
 1. **Modern Docker API.** The API version is negotiated with the daemon at connect time, so freshdock speaks whatever that daemon supports.
 2. **Health-gated updates.** A container is only considered "successfully updated" when the new instance reaches its `healthcheck` healthy state (or stays running for a configurable grace period if no healthcheck exists). Failed updates trigger automatic rollback to the previous image.
-3. **Per-container schedule mixing.** A single deployment can have container A on live updates, container B on nightly, container C on weekly, container D in watch-only mode — driven by Docker labels, no global compromise.
+3. **Per-container schedule mixing.** A single deployment can have container A on live updates, container B on nightly, container C on weekly, container D in watch-only mode, driven by Docker labels, no global compromise.
 4. **Dependency-aware ordering.** Containers with `depends_on` are stopped/started in the correct order (inspired by Tugtainer).
-5. **Smaller and faster than Go alternatives** while retaining the full update cycle (target: ≤ 10 MB binary, ≤ 30 MB resident memory at idle).
+5. **Smaller and faster than Go alternatives** while retaining the full update cycle (target: at most 10 MB binary, at most 30 MB resident memory at idle).
 6. **OCI-correct.** Works with Podman's API socket without modification.
-7. **Honest defaults.** Watch-only is the default — opt-in to auto-update per container, not opt-out. This protects users from "Watchtower broke my server overnight" stories.
+7. **Honest defaults.** Watch-only is the default: opt-in to auto-update per container, not opt-out. This protects users from "Watchtower broke my server overnight" stories.
 
 ---
 
@@ -92,7 +92,7 @@ What this project will do better than the existing landscape:
 | `nightly` | Check at a fixed daily window (default 04:00 local time). |
 | `weekly` | Check once per week (configurable day + time). |
 | `monthly` | Check on the Nth day of the month (configurable). |
-| `watch` | Detect updates and notify only — never pull or restart. |
+| `watch` | Detect updates and notify only, never pull or restart. |
 | `off` | Ignore the container entirely. |
 
 Global default mode is configurable; per-container labels override.
@@ -111,7 +111,7 @@ For each eligible container, on each scheduled tick:
 
 1. Resolve current image reference (name + tag, or digest).
 2. Query registry for the digest of that tag.
-3. If digest unchanged → skip.
+3. If digest unchanged, skip.
 4. If digest changed:
    1. Pull new image.
    2. Inspect old container; capture full config (env, mounts, networks, restart policy, healthcheck, labels, command, etc.).
@@ -134,7 +134,7 @@ For each eligible container, on each scheduled tick:
 - Webhook (generic POST with JSON body).
 - Discord webhook (formatted embed).
 - Telegram bot (broadly used in the homelab community; keeps deployment scope small).
-- Email (SMTP) — basic.
+- Email (SMTP): basic.
 
 Notification triggers: update available (watch mode), update succeeded, update failed (with rollback status).
 
@@ -146,13 +146,13 @@ Notification triggers: update available (watch mode), update succeeded, update f
 - `lscr.io` (LinuxServer).
 - Generic OCI-compliant registries with bearer-token auth.
 
-ECR, GCR, ACR, Harbor with custom auth → v2.
+ECR, GCR, ACR, Harbor with custom auth: v2.
 
 ### 5.6 Configuration
 
 Two configuration paths:
 
-1. **Container labels** (preferred — Watchtower-compatible style).
+1. **Container labels** (preferred, Watchtower-compatible style).
 2. **Single config file** (`freshdock.toml`) for global defaults: poll intervals, notification endpoints, registry credentials, default schedule.
 
 Environment variables override config file for credentials.
@@ -164,7 +164,7 @@ Environment variables override config file for credentials.
 | Plain Docker (24.x, 25.x, 27.x, 28.x, 29+) | Talks to `/var/run/docker.sock` | Primary target. |
 | Docker Desktop (Linux/macOS/Windows) | Same socket | Tested manually. |
 | Portainer (CE + BE) | Talks to the same Docker socket Portainer uses | Document the "Portainer's stack view may briefly show out-of-sync state after a recreate" caveat. |
-| Podman 4+ | Falls back to Podman's sockets (`$XDG_RUNTIME_DIR/podman/podman.sock`, `/run/user/$UID/podman/podman.sock`, `/run/podman/podman.sock`) when no Docker socket answers | Rootless and rootful. `DOCKER_HOST=unix://…` overrides for non-standard paths. |
+| Podman 4+ | Falls back to Podman's sockets (`$XDG_RUNTIME_DIR/podman/podman.sock`, `/run/user/$UID/podman/podman.sock`, `/run/podman/podman.sock`) when no Docker socket answers | Rootless and rootful. `DOCKER_HOST=unix://...` overrides for non-standard paths. |
 | Dockge / Komodo / other compose-based UIs | Updates individual containers via the daemon socket | Compose stack files are not edited; users see the new image once they re-run their compose. |
 
 ---
@@ -195,7 +195,7 @@ A workspace with separate crates is overkill for v1. Start as a single binary cr
 src/
   main.rs              // entry, CLI parsing, daemon bootstrap
   config.rs            // TOML + env loading
-  labels.rs            // label parsing → per-container policy
+  labels.rs            // label parsing -> per-container policy
   docker/
     mod.rs             // bollard wrappers
     inspect.rs         // capture full container spec for recreation
@@ -203,8 +203,8 @@ src/
   registry/
     mod.rs
     auth.rs            // token negotiation per registry
-    digest.rs          // HEAD /manifests/<tag> → digest
-  scheduler.rs         // mode → tick → container set
+    digest.rs          // HEAD /manifests/<tag> -> digest
+  scheduler.rs         // mode -> tick -> container set
   updater.rs           // the lifecycle state machine
   health.rs            // healthcheck waiting + grace period
   rollback.rs          // -old- container handling
@@ -226,31 +226,31 @@ Watchtower-style "restart with the same options" is the single most error-prone 
 3. Re-attach all networks the old container was on (with the same aliases and IP if static).
 4. Re-attach all mounts (binds, volumes, tmpfs).
 5. Preserve restart policy, log driver, capabilities, security opts, sysctls, ulimits, devices, GPU options.
-6. Preserve labels — but strip the lifecycle labels added by this tool itself, then re-add.
+6. Preserve labels, but strip the lifecycle labels added by this tool itself, then re-add.
 
 Write an integration test that creates a container with a "weird" config (custom network with alias, healthcheck, capabilities, GPU stub, restart policy) and verifies that after a recreate the inspected output is byte-identical except for the image digest and the container ID.
 
-This test is the project's quality gate — if it passes, the tool is safe to ship. If it fails, the tool is dangerous.
+This test is the project's quality gate. If it passes, the tool is safe to ship. If it fails, the tool is dangerous.
 
 ---
 
 ## 7. Phased Roadmap
 
-> **✅ All phases (0–7) have shipped.** The tool reached v1.0.0 and is now at v1.1.0. The
+> **✅ All phases (0-7) have shipped.** The tool reached v1.0.0 and keeps shipping (see the changelog). The
 > estimates and "cut if pacing slips" caveats below are preserved as the original plan; in
 > the end nothing was cut. Phase-by-phase status is noted inline.
 
 Estimates assume part-time evening/weekend work alongside the dual study programme.
 
-### Phase 0 — Reserve the name & scaffolding (1 week) — ✅ shipped
+### Phase 0: Reserve the name & scaffolding (1 week) ✅ shipped
 
-- **Reserve `freshdock` everywhere before anything else.** Crate names on crates.io are permanent and first-come-first-served. Order: (a) publish a 0.0.1 placeholder crate with a minimal `Cargo.toml` and a stub `main.rs`; (b) create the GitHub repo under your account or a `freshdock` org — this also reserves the GHCR namespace (`ghcr.io/<owner>/freshdock`) for free, since GHCR uses the GitHub namespace automatically; (c) optional — register `freshdock.dev` or `.io` if still available. Docker Hub is intentionally skipped: v1 publishes to GHCR only (revisit post-v1 if discoverability matters).
+- **Reserve `freshdock` everywhere before anything else.** Crate names on crates.io are permanent and first-come-first-served. Order: (a) publish a 0.0.1 placeholder crate with a minimal `Cargo.toml` and a stub `main.rs`; (b) create the GitHub repo under your account or a `freshdock` org, which also reserves the GHCR namespace (`ghcr.io/<owner>/freshdock`) for free, since GHCR uses the GitHub namespace automatically; (c) optional: register `freshdock.dev` or `.io` if still available. Docker Hub is intentionally skipped: v1 publishes to GHCR only (revisit post-v1 if discoverability matters).
 - Pick licence: AGPL-3.0 (like Cup, protects against commercial appropriation) or MIT/Apache-2.0 dual (maximum adoption). Decide before first real commit.
 - Set up CI (GitHub Actions: fmt, clippy, test, cross-compile to musl for amd64 + arm64).
 - Set up cargo-deny for license/dependency hygiene.
 - Repo skeleton, README stub with the three differentiators (modern Docker, health-gated rollback, Rust footprint) front and centre.
 
-### Phase 1 — Read-only spike (2 weeks) — ✅ shipped
+### Phase 1: Read-only spike (2 weeks) ✅ shipped
 
 Goal: prove the concept end-to-end without touching containers.
 
@@ -261,37 +261,37 @@ Goal: prove the concept end-to-end without touching containers.
 
 This becomes the watch-only mode for free.
 
-### Phase 2 — Single recreate (2 weeks) — ✅ shipped
+### Phase 2: Single recreate (2 weeks) ✅ shipped
 
-- Implement the `inspect → stop → rename → create → start` cycle for one container.
+- Implement the `inspect -> stop -> rename -> create -> start` cycle for one container.
 - Handle the basic config preservation (env, mounts, networks, restart policy).
 - Manual testing only at this stage.
 
-### Phase 3 — Health gating + rollback (1–2 weeks) — ✅ shipped
+### Phase 3: Health gating + rollback (1-2 weeks) ✅ shipped
 
 - Wait-for-healthy logic.
 - Grace period for containers without healthchecks.
 - Rollback path on failure.
 - The "weird config" integration test mentioned in §6.3.
 
-### Phase 4 — Scheduling (1 week) — ✅ shipped
+### Phase 4: Scheduling (1 week) ✅ shipped
 
 - The five modes (`live`, `nightly`, `weekly`, `monthly`, `watch`).
 - Cron expression parsing.
 - Per-container override via labels.
 
-### Phase 5 — Multi-registry + auth (2 weeks) — ✅ shipped
+### Phase 5: Multi-registry + auth (2 weeks) ✅ shipped
 
 - GHCR, Quay, lscr.io, generic bearer-token registries.
 - Credentials from config file + env.
 - Rate-limit-aware checking (the Cup approach: HEAD requests, not pulls).
 
-### Phase 6 — Notifications (1 week) — ✅ shipped
+### Phase 6: Notifications (1 week) ✅ shipped
 
 - Webhook, Discord, Telegram, SMTP.
 - Trigger matrix: success / failure / available-only.
 
-### Phase 7 — Polish and v1.0 release (2 weeks) — ✅ shipped
+### Phase 7: Polish and v1.0 release (2 weeks) ✅ shipped
 
 - Documentation site (mdBook or just a thorough README).
 - Docker image (multi-arch: amd64, arm64, armv7).
@@ -299,7 +299,7 @@ This becomes the watch-only mode for free.
 - Migration guide from Watchtower (label translation table).
 - v1.0.0 tag.
 
-**Total estimate: ~12 weeks of part-time work to v1.0.** Cut Phase 5 and Phase 6 in half if pacing slips — they extend cleanly post-v1.
+**Total estimate: ~12 weeks of part-time work to v1.0.** Cut Phase 5 and Phase 6 in half if pacing slips. They extend cleanly post-v1.
 
 ### Post-v1 (no commitment, just ideas)
 
@@ -317,8 +317,8 @@ This becomes the watch-only mode for free.
 |---|---|
 | Recreation loses a non-obvious container setting and silently breaks something. | The §6.3 integration test as a hard quality gate; community beta period before tagging v1.0. |
 | Registry auth zoo is bigger than expected. | Scope strictly: ship v1 with five well-known registries; document a clear extension point for others. |
-| Burnout from a long parallel project. | Phase boundaries are checkpoints; v1 is not "every feature" — it is "watch-only + nightly auto-update reliably". Ship that. |
-| Crowded space — "yet another Watchtower clone". | Differentiate honestly on three things only: modern Docker, health-gated rollback, Rust footprint. Lead with these in the README. |
+| Burnout from a long parallel project. | Phase boundaries are checkpoints; v1 is not "every feature". It is "watch-only + nightly auto-update reliably". Ship that. |
+| Crowded space, "yet another Watchtower clone". | Differentiate honestly on three things only: modern Docker, health-gated rollback, Rust footprint. Lead with these in the README. |
 | Portainer users hit confusing UI desync after recreations. | Document the behaviour in a dedicated README section; don't pretend it doesn't happen. |
 | User expectations from the dead Watchtower carry over and don't match reality. | Provide a "Coming from Watchtower?" page that explicitly maps old labels and flags to the new ones. |
 
@@ -326,7 +326,7 @@ This becomes the watch-only mode for free.
 
 ## 9. Success Criteria for v1.0
 
-- Runs as a single static binary (≤ 10 MB) with no runtime dependencies.
+- Runs as a single static binary (at most 10 MB) with no runtime dependencies.
 - Successfully auto-updates a fleet of 20+ mixed containers across at least three different image registries on a real homelab for two weeks without intervention.
 - Survives an intentionally bad image push (broken healthcheck) by rolling back cleanly and notifying.
 - Documentation lets a Watchtower user migrate in under 15 minutes.
@@ -338,18 +338,18 @@ This becomes the watch-only mode for free.
 
 These were left open at Phase 0 kickoff; all four are now resolved:
 
-1. ~~AGPL-3.0 (like Cup) vs MIT/Apache-2.0 dual licence?~~ → **Apache-2.0** (`Cargo.toml` / `LICENSE`).
-2. ~~CLI subcommand vs daemon-only?~~ → **CLI subcommands shipped**: `check`, `recreate`, `run`.
-3. ~~`tokio-cron-scheduler` or hand-roll?~~ → **Hand-rolled** (`src/cron.rs` + `src/scheduler.rs`); `chrono` is used only for DST-correct local-time calendar math, not scheduling.
-4. ~~`fd.*` alias for `freshdock.*`?~~ → **Not adopted.** Only the full `freshdock.*` prefix is parsed (`src/labels.rs`).
+1. ~~AGPL-3.0 (like Cup) vs MIT/Apache-2.0 dual licence?~~ Decided: **Apache-2.0** (`Cargo.toml` / `LICENSE`).
+2. ~~CLI subcommand vs daemon-only?~~ Decided: **CLI subcommands shipped**: `check`, `recreate`, `run`.
+3. ~~`tokio-cron-scheduler` or hand-roll?~~ Decided: **Hand-rolled** (`src/cron.rs` + `src/scheduler.rs`); `chrono` is used only for DST-correct local-time calendar math, not scheduling.
+4. ~~`fd.*` alias for `freshdock.*`?~~ Decided: **Not adopted.** Only the full `freshdock.*` prefix is parsed (`src/labels.rs`).
 
 ---
 
 ## 11. References
 
 - containrrr/watchtower archive announcement (Dec 2025).
-- `sergi0g/cup` — Rust container update checker.
-- `crazy-max/diun` — notification-only Go tool.
-- `quenary/tugtainer` — Go web UI auto-updater with dependency awareness.
-- `fjall/bollard` — Rust Docker SDK (API 1.52).
-- Watchtower's original recreation logic (Go) — for reference on edge cases worth replicating.
+- `sergi0g/cup`: Rust container update checker.
+- `crazy-max/diun`: notification-only Go tool.
+- `quenary/tugtainer`: Go web UI auto-updater with dependency awareness.
+- `fjall/bollard`: Rust Docker SDK (API 1.52).
+- Watchtower's original recreation logic (Go), for reference on edge cases worth replicating.

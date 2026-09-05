@@ -1,7 +1,7 @@
 [book]
 title = "freshdock"
 authors = ["Turbootzz <thijs@turboot.com>"]
-description = "A modern, health-gated Docker container auto-updater — a maintained Watchtower successor in a single Rust binary."
+description = "A modern, health-gated Docker container auto-updater. A maintained Watchtower successor in a single Rust binary."
 src = "docs"
 language = "en"
 
@@ -15,6 +15,7 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/Turbootzz/freshdock"
 edit-url-template = "https://github.com/Turbootzz/freshdock/edit/main/docs/{path}"
 smart-punctuation = true
+additional-css = ["./docs/custom.css"]
 
 [output.html.search]
 enable = true
