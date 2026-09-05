@@ -194,7 +194,7 @@ struct RowPrep {
 
 fn build_table(no_color: bool) -> Table {
     let mut t = Table::new();
-    t.load_preset(if no_color { NOTHING } else { UTF8_FULL });
+    t.load_style(if no_color { NOTHING } else { UTF8_FULL });
     t.set_header(vec![
         "container",
         "image",
