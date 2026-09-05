@@ -1,7 +1,7 @@
 [book]
 title = "freshdock"
 authors = ["Turbootzz <thijs@turboot.com>"]
-description = "A modern, health-gated Docker container auto-updater — a maintained Watchtower successor in a single Rust binary."
+description = "A modern, health-gated Docker container auto-updater. A maintained Watchtower successor in a single Rust binary."
 src = "docs"
 language = "en"
 

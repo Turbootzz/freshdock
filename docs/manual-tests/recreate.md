@@ -30,8 +30,8 @@ health is **rolled back** to the previous container.
 ## Steps
 
 `freshdock recreate` is a *manual* admin tool, not the automatic update
-loop. It refuses two opt-out signals — `freshdock.enable` not `true`, or
-`freshdock.mode=off` — and otherwise honours the operator's explicit
+loop. It refuses two opt-out signals (`freshdock.enable` not `true`, or
+`freshdock.mode=off`) and otherwise honours the operator's explicit
 invocation regardless of the scheduler mode (`live`, `nightly`,
 `weekly`, `monthly`, `watch`). This is why the test container below
 uses `mode=watch`: a watch-mode container is *never* touched by the
@@ -49,9 +49,9 @@ docker run -d --name fd-smoke \
 curl -fsS http://localhost:8081/ > /dev/null && echo "nginx OK"
 
 # 3. Capture Config.Image *before* the recreate so we can assert the
-#    round-trip below. This must read `nginx:alpine` — not the resolved
+#    round-trip below. This must read `nginx:alpine`, not the resolved
 #    `Image` digest, which is a separate field.
-docker inspect fd-smoke --format '{{.Config.Image}}'   # → nginx:alpine
+docker inspect fd-smoke --format '{{.Config.Image}}'   # -> nginx:alpine
 
 # 4. Run the recreate.
 ./target/release/freshdock recreate fd-smoke
@@ -59,9 +59,9 @@ docker inspect fd-smoke --format '{{.Config.Image}}'   # → nginx:alpine
 
 ## Expected observations
 
-- The CLI prints `recreated fd-smoke: healthy — removed old container fd-smoke-old-<unix-ts>, new id <id>`.
+- The CLI prints `recreated fd-smoke: healthy ...`, naming the removed archive `fd-smoke-old-<unix-ts>` and the new id.
 - `docker ps -a` shows a **single** `fd-smoke` container, running with a fresh
-  id — the archived `fd-smoke-old-<unix-ts>` was removed once the new instance
+  id; the archived `fd-smoke-old-<unix-ts>` was removed once the new instance
   passed health gating. (nginx:alpine has no healthcheck, so success is decided
   by the grace period; add a healthcheck to exercise the `healthy` path.)
 - The new container has the same port mapping (`0.0.0.0:8081->80/tcp`),
@@ -70,7 +70,7 @@ docker inspect fd-smoke --format '{{.Config.Image}}'   # → nginx:alpine
 - **`Config.Image` round-trip (regression #25).** After the recreate,
   `docker inspect fd-smoke --format '{{.Config.Image}}'` must read
   byte-identical to the pre-recreate value (`nginx:alpine`). Drift to
-  `library/nginx:alpine` is the original bug — it must not return.
+  `library/nginx:alpine` is the original bug. It must not return.
 - `curl -fsS http://localhost:8081/` still returns the default nginx
   page from the new container.
 
@@ -94,7 +94,7 @@ recreate orchestrator or `ContainerSpec` projection changes.
 
 This uses `alpine` running `sleep` rather than `nginx:alpine`, so the
 container doesn't fight the config (nginx fails when run as uid 1000 with
-its cache dirs replaced by tmpfs — orthogonal to recreate). The point of
+its cache dirs replaced by tmpfs, orthogonal to recreate). The point of
 this smoke is to verify *spec preservation*, not application behaviour.
 
 ```bash
@@ -136,7 +136,7 @@ docker run -d --name fd-smoke-weird \
   -e APP_MODE=production -e 'APP_TOKEN=base64=padded==' -e EMPTY_VAR= \
   alpine sleep 600
 
-# Attach the second network with its own alias — mirrors the multi-network
+# Attach the second network with its own alias. Mirrors the multi-network
 # attachment that `weird_spec_preserves_multi_network_endpoints_with_aliases`
 # pins on the fixture side.
 docker network connect --alias weird-back fd-back fd-smoke-weird
@@ -149,7 +149,7 @@ before=$(docker inspect fd-smoke-weird)
 
 # Spot-check the headline #25 assertion: Config.Image must round-trip
 # byte-identical (alpine, NOT library/alpine).
-docker inspect fd-smoke-weird --format '{{.Config.Image}}'   # → alpine
+docker inspect fd-smoke-weird --format '{{.Config.Image}}'   # -> alpine
 
 # Diff the recreate-relevant slices of the inspect. Container ID and
 # Image (resolved digest) are expected to differ; everything else under
@@ -178,12 +178,12 @@ diff \
                                               # expected: empty diff
 
 # NetworkSettings.Networks: a strict diff would fail because the new
-# container gets a fresh IP / MAC / EndpointID — those are network-driver
+# container gets a fresh IP / MAC / EndpointID. Those are network-driver
 # assignments, not part of the spec. Docker also auto-adds the new
 # container's own short id as an alias on every attached network, which
-# differs per instance. Project to the durable invariants — set of
+# differs per instance. Project to the durable invariants: the set of
 # attached networks + the *user-assigned* aliases (filtering out the
-# auto-added short id) — and diff those.
+# auto-added short id). Then diff those.
 sid_before=$(echo "$before" | jq -r '.[0].Id[0:12]')
 sid_after=$(echo "$after"  | jq -r '.[0].Id[0:12]')
 diff \

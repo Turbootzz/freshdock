@@ -2,8 +2,8 @@
 
 freshdock has three subcommands: [`check`](#freshdock-check) (read-only),
 [`recreate`](#freshdock-recreate-name) (one container, manual), and
-[`run`](#freshdock-run) (the scheduler daemon). Run `freshdock --help` or
-`freshdock <command> --help` for the same information at the terminal.
+[`run`](#freshdock-run) (the scheduler daemon). `freshdock --help` and
+`freshdock <command> --help` print the same information at the terminal.
 
 ## Global options
 
@@ -11,15 +11,15 @@ Available on every subcommand.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--no-color` | colour on a TTY | Disable ANSI colour. Use for log files / non-interactive output. Setting `NO_COLOR` to any non-empty value does the same. |
+| `--no-color` | colour on a TTY | Disable ANSI colour, for log files and non-interactive output. `NO_COLOR` set to any non-empty value does the same. |
 | `--config <PATH>` | see below | Path to an optional `freshdock.toml`. |
 
-The config file is optional — freshdock is configured primarily through
-[environment variables](configuration.md#environment-variables) and per-container
-labels, and a file is only needed to declare notification targets. When you do use
-one, the resolution order is `--config <PATH>` → `$FRESHDOCK_CONFIG` →
-`./freshdock.toml`. An explicit path that's missing is an error; a missing default
-file is fine. See the [configuration reference](configuration.md#the-optional-freshdocktoml-file).
+The config file is optional: you need one only for a registry host whose name has
+dots in it, since everything else, notification targets included, has an
+[environment variable](configuration.md#environment-variables). Resolution order is
+`--config <PATH>`, then `$FRESHDOCK_CONFIG`, then `./freshdock.toml`; an explicit
+path that is missing is an error, a missing default file is fine. See the
+[configuration reference](configuration.md#the-optional-freshdocktoml-file).
 
 `RUST_LOG` controls log verbosity (default `info`; try `freshdock=debug` or
 `trace`). Secrets are always redacted.
@@ -33,28 +33,28 @@ freshdock check
 ```
 
 Read-only. Lists every opted-in container (`freshdock.enable=true`), resolves the
-latest digest **once per unique image** (deduped to conserve Docker Hub's anonymous
-budget of 100 pulls / 6 h — manifest fetches count as pulls), and prints a status
-table. It **never** pulls,
-stops, or recreates anything.
+latest digest once per unique image, and prints a status table. It never pulls,
+stops, or recreates anything. The dedupe conserves Docker Hub's anonymous budget
+of 100 pulls / 6 h; manifest fetches count as pulls.
 
 The table has six columns: `container`, `image`, `mode`, `current digest`,
-`latest digest`, and `update?`. The **`update?`** column is `yes` (a newer digest
-exists), `no` (up to date), or `-`/`?` when no comparison was possible. When a digest
-can't be resolved, the **`latest digest`** column shows the reason instead:
+`latest digest`, and `update?`. The `update?` column is `yes` (a newer digest
+exists), `no` (up to date), or `-`/`?` when no comparison was possible. When a
+digest can't be resolved, `latest digest` shows the reason instead:
 
 | `latest digest` value | Meaning |
 |---|---|
-| a short digest (e.g. `sha256:ab12cd…`) | The resolved upstream digest; compare with `update?`. |
-| `pinned (no check)` | Image is pinned to a digest — no moving tag to follow. |
+| a short digest (e.g. `sha256:ab12cd...`) | The resolved upstream digest; compare with `update?`. |
+| `pinned (no check)` | Image is pinned to a digest, so there is no moving tag to follow. |
 | `auth required (set credentials)` | The registry needs credentials that aren't configured. See [registry-auth](registry-auth.md). |
 | `network unavailable` | The registry couldn't be reached; nothing is assumed. |
-| `error: …` | The probe failed for another reason (the message follows). |
+| `error: ...` | The probe failed for another reason (the message follows). |
 
-Docker can record one local image under **several** manifest digests — pulling a tag
-whose multi-arch index was republished without a change to your platform's manifest
-adds the new index digest beside the old one. freshdock reports `no` when the upstream
-digest is any of them, and shows that digest as `current digest`.
+Docker can record one local image under several manifest digests: pulling a tag
+whose multi-arch index was republished without a change to your platform's
+manifest adds the new index digest beside the old one. freshdock reports `no`
+when the upstream digest is any of them, and shows that digest as
+`current digest`.
 
 Examples:
 
@@ -72,21 +72,21 @@ RUST_LOG=info freshdock check   # include registry rate-limit info
 freshdock recreate <NAME>
 ```
 
-Manually update **one** container by name or ID: inspect → pull → stop → rename →
-create → start, then [health-gate](health-and-rollback.md) the new container and
-**roll back** to the previous one if it fails. A configured
-[pre-update lifecycle hook](lifecycle-hooks.md) runs between pull and stop and
-can skip the update (the command reports the skip and exits `0`).
+Manually update one container by name or ID: inspect, pull, stop, rename, create,
+start, then [health-gate](health-and-rollback.md) the new container and roll back
+to the previous one if it fails. A configured
+[pre-update lifecycle hook](lifecycle-hooks.md) runs between pull and stop and can
+skip the update (the command reports the skip and exits `0`).
 
 | Argument | Meaning |
 |---|---|
 | `<NAME>` | Name or ID of the running container to recreate. |
 
-It does **not** consult `freshdock.mode` (modes drive the scheduler, not manual
-intent), but it **refuses** a container that is `freshdock.enable=false` or
-`freshdock.mode=off` — a graceful no-op, so you can't accidentally recreate a
-container you've explicitly opted out. Any other mode (including `watch`) is allowed
-because you typed the command yourself.
+It ignores `freshdock.mode`, since modes drive the scheduler and not manual
+intent, but it refuses a container that is `freshdock.enable=false` or
+`freshdock.mode=off`: a graceful no-op, so an explicit opt-out can't be recreated
+by accident. Any other mode, `watch` included, is allowed because you typed the
+command yourself.
 
 ---
 
@@ -98,8 +98,8 @@ freshdock run [--interval <SECS>] [--tick <SECS>] [--stop-timeout <SECS>]
 
 The scheduler daemon. Each tick it lists running containers, parses their labels,
 and acts on the ones that are due: `live`/`nightly`/`weekly`/`monthly` are updated
-(health-gated, with rollback); `watch` is report-only. Runs in the foreground until
-`SIGINT`/`SIGTERM`, then finishes the in-flight container and exits. See
+(health-gated, with rollback), `watch` is report-only. Runs in the foreground
+until `SIGINT`/`SIGTERM`, then finishes the in-flight container and exits. See
 [scheduling](scheduling.md) for the timing model.
 
 | Option | Env var | Default | Meaning |

@@ -1,5 +1,5 @@
 # Updating an image from a private registry (GHCR). Credentials are passed via
-# environment, so no config file is needed — set GHCR_USER and GHCR_TOKEN in your
+# environment, so no config file is needed. Set GHCR_USER and GHCR_TOKEN in your
 # shell or an .env file beside this compose file.
 # Validate: docker compose -f registry-authenticated.yml config
 services:

@@ -2,15 +2,15 @@
 
 Verifies the opt-in image cleanup that runs after a successful, health-passed
 update (PLAN §5.2 step 8). Cleanup is **off by default**; it removes the image
-the *replaced* container was running, and is best-effort — a shared image still
+the *replaced* container was running, and is best-effort (a shared image still
 referenced by another container is kept, and a cleanup failure never fails the
-update.
+update).
 
 There are two knobs:
 
-- `[settings] cleanup = true` (or per container `freshdock.cleanup=true`) —
+- `[settings] cleanup = true` (or per container `freshdock.cleanup=true`):
   remove the replaced image after a healthy update.
-- `[settings] prune_dangling = true` — additionally run a daemon-wide
+- `[settings] prune_dangling = true`: additionally run a daemon-wide
   dangling-image prune after each successful update.
 
 The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdock/blob/main/src/docker/recreate.rs)
@@ -61,10 +61,10 @@ docker image inspect "$old_id" >/dev/null 2>&1 \
 
 ## Expected observations
 
-- The CLI prints `recreated fd-cleanup: healthy — ...`.
+- The CLI prints `recreated fd-cleanup: healthy ...`.
 - Step 4 prints `OK: superseded image removed`.
 - With `freshdock.cleanup=false` (or the label omitted and `[settings] cleanup`
-  unset), step 4 instead prints `FAIL` — i.e. the old image is **kept**. That is
+  unset), step 4 instead prints `FAIL`, i.e. the old image is **kept**. That is
   the correct default-off behaviour; re-run the procedure without the cleanup
   label to confirm.
 - **Shared-image guard.** If a second container is still running on `$old_id`

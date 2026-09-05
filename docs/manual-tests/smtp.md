@@ -10,7 +10,7 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
 
 - `freshdock` built locally: `just build`.
 - A local SMTP catcher. [mailpit](https://github.com/axllent/mailpit) is the
-  simplest — it exposes SMTP on `:1025` and a web inbox on `:8025`:
+  simplest. It exposes SMTP on `:1025` and a web inbox on `:8025`:
 
   ```bash
   docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
@@ -29,7 +29,7 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
    from = "freshdock@example.com"
    to = ["admin@example.com"]
    tls = "none"
-   # triggers omitted → subscribes to available, succeeded, and failed
+   # triggers omitted: subscribes to available, succeeded, and failed
    ```
 
    Or skip the file entirely and declare the same target with an
@@ -45,7 +45,7 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
    `tls = "none"` disables encryption.
 
    `port` is spelled out on purpose: an omitted port defaults from the mode, and
-   for `tls = "none"` that is the classic SMTP port 25 — mailpit listens on 1025.
+   for `tls = "none"` that is the classic SMTP port 25. Mailpit listens on 1025.
 
 2. Trigger a notification. The quickest path is a watch-mode container with a
    newer image available; or force a failed update (a broken healthcheck) to
@@ -56,12 +56,12 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
    ```
 
    Startup logs one WARN per plaintext target (`smtp target uses a PLAINTEXT
-   transport …`) — expected here, and the reason `tls = "none"` never belongs in
+   transport ...`), expected here, and the reason `tls = "none"` never belongs in
    a deployment.
 
 3. Open the mailpit inbox at <http://localhost:8025> and confirm a message
-   arrived with the rendered **Subject** (`Update available: …` /
-   `Updated: …` / `Update failed: …`) and the matching body.
+   arrived with the rendered **Subject** (`Update available: ...` /
+   `Updated: ...` / `Update failed: ...`) and the matching body.
 
 ## STARTTLS + auth
 
@@ -96,7 +96,7 @@ them (mailpit's `--smtp-auth` modes, a real provider, or
    ```
 
 2. Confirm the message is delivered. A STARTTLS handshake failure surfaces as a
-   `smtp send failed: …` WARN line; delivery is non-fatal, so the daemon keeps
+   `smtp send failed: ...` WARN line; delivery is non-fatal, so the daemon keeps
    running regardless.
 
 ## Pass criteria

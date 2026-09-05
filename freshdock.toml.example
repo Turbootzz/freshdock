@@ -1,4 +1,4 @@
-# freshdock.toml — example configuration.
+# freshdock.toml: example configuration.
 #
 # The file is OPTIONAL: freshdock runs without it (public images need no
 # credentials, notifications are simply off). Copy this next to where you run
@@ -7,7 +7,7 @@
 #   cp freshdock.toml.example freshdock.toml
 #
 # Resolution order: --config <path> flag > $FRESHDOCK_CONFIG > ./freshdock.toml.
-# Every value here can also come from environment variables — see
+# Every value here can also come from environment variables. See
 # docs/configuration.md#environment-variables or `freshdock --help`.
 # Secrets are redacted in all log output, even at RUST_LOG=trace.
 
