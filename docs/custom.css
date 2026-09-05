@@ -1,0 +1,11 @@
+/* Wider content column so reference tables fit without sideways scrolling. */
+:root {
+    --content-max-width: 1100px;
+}
+
+/* Let long label and env-var names wrap inside table cells. */
+table td code,
+table th code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}

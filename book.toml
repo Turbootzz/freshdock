@@ -15,6 +15,7 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/Turbootzz/freshdock"
 edit-url-template = "https://github.com/Turbootzz/freshdock/edit/main/docs/{path}"
 smart-punctuation = true
+additional-css = ["./docs/custom.css"]
 
 [output.html.search]
 enable = true
