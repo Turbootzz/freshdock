@@ -1,6 +1,6 @@
 //! The single "is there a newer image?" path, shared by `freshdock check` and
-//! the scheduler daemon (DRY). Resolves the local manifest digest, routes to
-//! the registry, and returns a [`ProbeOutcome`] each caller renders or acts on.
+//! the scheduler daemon (DRY). Resolves the tag's local image, routes to the
+//! registry, and returns a [`ProbeOutcome`] each caller turns into a verdict.
 //!
 //! Routing: digest-pinned refs (`sha256:<id>` or `repo@sha256:<id>`) return
 //! [`ProbeOutcome::Pinned`] before any registry call (issue #27); every other
@@ -8,9 +8,12 @@
 //! flow. A registry that needs (or rejects) credentials surfaces as
 //! [`ProbeOutcome::AuthRequired`].
 
+use bollard::models::ContainerSummary;
 use tracing::warn;
 
+use crate::docker::DockerError;
 use crate::docker::check::DockerCheck;
+use crate::docker::spec::SpecError;
 use crate::registry::{ImageRef, Registry, RegistryError};
 
 /// Every manifest digest the local image is recorded under. A republished
@@ -31,6 +34,21 @@ impl LocalDigests {
         (!self.0.is_empty()).then(|| !self.contains(latest))
     }
 
+    /// The verdict for one container: upstream's digest is not among the tag's
+    /// local digests, or the container is [`behind_tag`].
+    pub fn update_available_for(
+        &self,
+        latest: &str,
+        container_image_id: Option<&str>,
+        tag_image_id: Option<&str>,
+    ) -> Option<bool> {
+        // Gated on known digests: otherwise a locally built image reads as stale.
+        if !self.0.is_empty() && behind_tag(container_image_id, tag_image_id) {
+            return Some(true);
+        }
+        self.update_available(latest)
+    }
+
     /// The digest to show as "current": the one upstream serves when we already
     /// carry it, otherwise whichever Docker reports first.
     pub fn current_for<'a>(&'a self, latest: &'a str) -> Option<&'a str> {
@@ -45,13 +63,21 @@ impl LocalDigests {
     }
 }
 
+/// Is the container running an image the tag no longer resolves to?
+pub fn behind_tag(container_image_id: Option<&str>, tag_image_id: Option<&str>) -> bool {
+    matches!((container_image_id, tag_image_id), (Some(c), Some(t)) if c != t)
+}
+
 /// Verdict of probing one image reference for an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// The upstream digest was fetched. `local` holds every manifest digest the
-    /// local image is recorded under; ask
-    /// [`update_available`](LocalDigests::update_available) for the verdict.
-    Fetched { local: LocalDigests, latest: String },
+    /// The upstream digest was fetched. Ask
+    /// [`update_available_for`](LocalDigests::update_available_for) for the verdict.
+    Fetched {
+        local: LocalDigests,
+        latest: String,
+        tag_image_id: Option<String>,
+    },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
     /// The registry needs credentials we don't have. Reported, not errored —
@@ -65,6 +91,60 @@ pub enum ProbeOutcome {
     NetworkUnavailable,
     /// The fetch failed for some other reason; the message is for display/logs.
     Error(String),
+}
+
+/// What to probe for one container: its reference and the image it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProbeTarget {
+    /// The reference the container was created from, e.g. `nginx:alpine`.
+    pub image: String,
+    /// The id of the image the container runs, when the daemon reported one.
+    pub image_id: Option<String>,
+}
+
+impl ProbeTarget {
+    /// A target with no known image id; the verdict is then membership only.
+    #[cfg(test)]
+    pub fn from_ref(image: &str) -> Self {
+        Self {
+            image: image.to_owned(),
+            image_id: None,
+        }
+    }
+}
+
+/// The probe target for a listed container. A listing `Image` that is not a bare
+/// image id is `Config.Image` verbatim, so it needs no inspect.
+pub async fn resolve_target(
+    docker: &impl DockerCheck,
+    container: &ContainerSummary,
+) -> Result<ProbeTarget, DockerError> {
+    let image = container
+        .image
+        .as_deref()
+        .ok_or(DockerError::Spec(SpecError::Missing("Image")))?;
+    if !is_image_id(image) {
+        return Ok(ProbeTarget {
+            image: image.to_owned(),
+            image_id: container.image_id.clone(),
+        });
+    }
+    let id = container
+        .id
+        .as_deref()
+        .ok_or(DockerError::Spec(SpecError::Missing("Id")))?;
+    let identity = docker.container_image(id).await?;
+    Ok(ProbeTarget {
+        image: identity.reference,
+        image_id: identity.image_id,
+    })
+}
+
+/// Is this a bare image id rather than a reference?
+pub(crate) fn is_image_id(image: &str) -> bool {
+    image
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Resolve whether `image` has a newer digest upstream. See the module docs for
@@ -83,17 +163,24 @@ pub async fn probe_image(
     // ContainerSummary.image_id is the image *config* digest, not the *manifest*
     // digest the registry returns via Docker-Content-Digest. Resolve the local
     // manifest digest from `image inspect → RepoDigests`.
-    let local = match docker.inspect_image_repo_digests(image).await {
-        Ok(digests) => LocalDigests::new(local_manifest_digests(image, &digests)),
+    let (local, tag_image_id) = match docker.inspect_image(image).await {
+        Ok(img) => (
+            LocalDigests::new(local_manifest_digests(image, &img.repo_digests)),
+            img.id,
+        ),
         Err(e) => {
             warn!(image = %image, error = %e, "image inspect failed; current digest will be unknown");
-            LocalDigests::default()
+            (LocalDigests::default(), None)
         }
     };
 
     let image_ref = ImageRef::parse(image);
     match registry.fetch_digest(&image_ref).await {
-        Ok(d) => ProbeOutcome::Fetched { local, latest: d.0 },
+        Ok(d) => ProbeOutcome::Fetched {
+            local,
+            latest: d.0,
+            tag_image_id,
+        },
         Err(RegistryError::NetworkUnavailable(reason)) => {
             warn!(repo = %image_ref.repository, %reason, "network unavailable");
             ProbeOutcome::NetworkUnavailable
@@ -171,7 +258,7 @@ pub(crate) fn strip_tag(image_no_digest: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::docker::DockerError;
+    use crate::docker::check::{ContainerImage, LocalImage};
     use crate::registry::Digest;
     use async_trait::async_trait;
     use bollard::models::ContainerSummary;
@@ -250,7 +337,7 @@ mod tests {
         )]);
         let registry = FakeRegistry::new(DIG_C);
 
-        let ProbeOutcome::Fetched { local, latest } =
+        let ProbeOutcome::Fetched { local, latest, .. } =
             probe_image(&docker, &registry, "caddy:latest").await
         else {
             panic!("expected a fetched outcome");
@@ -387,35 +474,62 @@ mod tests {
     /// Recording fake that counts inspect calls so we can prove the pinned
     /// short-circuit never touches the daemon.
     struct FakeDocker {
-        repo_digests: HashMap<String, Vec<String>>,
+        images: HashMap<String, LocalImage>,
+        /// Container id to what an inspect reports for it.
+        containers: HashMap<String, ContainerImage>,
         inspect_calls: AtomicUsize,
+        container_inspects: AtomicUsize,
     }
 
     impl FakeDocker {
         fn new(repo_digests: &[(&str, &str)]) -> Self {
-            Self {
-                repo_digests: repo_digests
-                    .iter()
-                    .map(|(img, rd)| ((*img).to_owned(), vec![(*rd).to_owned()]))
-                    .collect(),
-                inspect_calls: AtomicUsize::new(0),
-            }
+            let one_each: Vec<(&str, &[&str])> = repo_digests
+                .iter()
+                .map(|(img, rd)| (*img, std::slice::from_ref(rd)))
+                .collect();
+            Self::with_digests(&one_each)
         }
         /// Several RepoDigests entries for one image — what a republished
         /// multi-arch index leaves behind (issue #74).
         fn with_digests(repo_digests: &[(&str, &[&str])]) -> Self {
             Self {
-                repo_digests: repo_digests
+                images: repo_digests
                     .iter()
                     .map(|(img, rds)| {
                         (
                             (*img).to_owned(),
-                            rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                            LocalImage {
+                                id: None,
+                                repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                            },
                         )
                     })
                     .collect(),
+                containers: HashMap::new(),
                 inspect_calls: AtomicUsize::new(0),
+                container_inspects: AtomicUsize::new(0),
             }
+        }
+        /// The id the tag resolves to locally.
+        fn with_image_id(mut self, image: &str, id: &str) -> Self {
+            self.images.entry(image.to_owned()).or_default().id = Some(id.to_owned());
+            self
+        }
+        fn with_container(mut self, id: &str, reference: &str, image_id: Option<&str>) -> Self {
+            self.containers.insert(
+                id.to_owned(),
+                ContainerImage {
+                    reference: reference.to_owned(),
+                    image_id: image_id.map(str::to_owned),
+                },
+            );
+            self
+        }
+        fn inspect_calls(&self) -> usize {
+            self.inspect_calls.load(Ordering::SeqCst)
+        }
+        fn container_inspects(&self) -> usize {
+            self.container_inspects.load(Ordering::SeqCst)
         }
     }
 
@@ -424,12 +538,16 @@ mod tests {
         async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
             Ok(vec![])
         }
-        async fn inspect_image_repo_digests(
-            &self,
-            image: &str,
-        ) -> Result<Vec<String>, DockerError> {
+        async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
             self.inspect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.repo_digests.get(image).cloned().unwrap_or_default())
+            Ok(self.images.get(image).cloned().unwrap_or_default())
+        }
+        async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
+            self.container_inspects.fetch_add(1, Ordering::SeqCst);
+            self.containers
+                .get(id)
+                .cloned()
+                .ok_or(DockerError::Spec(SpecError::Missing("Config.Image")))
         }
     }
 
@@ -489,6 +607,7 @@ mod tests {
             ProbeOutcome::Fetched {
                 local: LocalDigests::new(vec![DIG_A.to_owned()]),
                 latest: DIG_A.to_owned(),
+                tag_image_id: None,
             }
         );
     }
@@ -503,6 +622,7 @@ mod tests {
             ProbeOutcome::Fetched {
                 local: LocalDigests::new(vec![DIG_A.to_owned()]),
                 latest: DIG_B.to_owned(),
+                tag_image_id: None,
             }
         );
     }
@@ -519,6 +639,7 @@ mod tests {
             ProbeOutcome::Fetched {
                 local: LocalDigests::default(),
                 latest: DIG_A.to_owned(),
+                tag_image_id: None,
             }
         );
         assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
@@ -540,6 +661,151 @@ mod tests {
         let outcome = probe_image(&docker, &registry, "ghcr.io/owner/private:v1").await;
         assert_eq!(outcome, ProbeOutcome::CredentialsRejected);
         assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+    }
+
+    // --- one container's verdict against the tag ---
+
+    const OLD_ID: &str = "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
+    const NEW_ID: &str = "sha256:0e7f2f0e2e8b4a4b8c3d1a5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
+
+    fn summary(id: &str, image: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            image: Some(image.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn behind_the_tag_is_an_update_even_when_its_own_image_has_no_digests() {
+        let docker = FakeDocker::new(&[("caddy:latest", &format!("caddy@{DIG_B}"))])
+            .with_image_id("caddy:latest", NEW_ID);
+        let registry = FakeRegistry::new(DIG_B);
+
+        let ProbeOutcome::Fetched {
+            local,
+            latest,
+            tag_image_id,
+        } = probe_image(&docker, &registry, "caddy:latest").await
+        else {
+            panic!("expected a fetched outcome");
+        };
+        assert_eq!(
+            local.update_available(&latest),
+            Some(false),
+            "membership alone reports the tag as up to date"
+        );
+        assert_eq!(
+            local.update_available_for(&latest, Some(OLD_ID), tag_image_id.as_deref()),
+            Some(true),
+            "the container runs an older image than the tag"
+        );
+    }
+
+    #[test]
+    fn same_image_as_the_tag_uses_membership() {
+        let local = LocalDigests::new(vec![DIG_A.to_owned()]);
+        assert_eq!(
+            local.update_available_for(DIG_A, Some(NEW_ID), Some(NEW_ID)),
+            Some(false)
+        );
+        assert_eq!(
+            local.update_available_for(DIG_B, Some(NEW_ID), Some(NEW_ID)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unknown_local_digest_is_not_an_update_even_when_the_ids_differ() {
+        assert_eq!(
+            LocalDigests::default().update_available_for(DIG_A, Some(OLD_ID), Some(NEW_ID)),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_ids_fall_back_to_membership() {
+        let local = LocalDigests::new(vec![DIG_A.to_owned()]);
+        assert_eq!(
+            local.update_available_for(DIG_A, None, Some(NEW_ID)),
+            Some(false)
+        );
+        assert_eq!(
+            local.update_available_for(DIG_A, Some(OLD_ID), None),
+            Some(false)
+        );
+        assert_eq!(
+            LocalDigests::default().update_available_for(DIG_A, None, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_target_reads_config_image_and_image_id_from_the_inspect() {
+        let docker = FakeDocker::new(&[]).with_container("c1", "nginx:alpine", Some(OLD_ID));
+        let target = resolve_target(&docker, &summary("c1", OLD_ID))
+            .await
+            .unwrap();
+        assert_eq!(target.image, "nginx:alpine");
+        assert_eq!(target.image_id.as_deref(), Some(OLD_ID));
+    }
+
+    #[tokio::test]
+    async fn resolve_target_propagates_an_inspect_failure() {
+        // The listing names an id, so the inspect is the only source there is.
+        let docker = FakeDocker::new(&[]);
+        assert!(
+            resolve_target(&docker, &summary("c1", OLD_ID))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_target_uses_the_listing_when_it_names_a_reference() {
+        let docker = FakeDocker::new(&[]);
+        let summary = ContainerSummary {
+            image_id: Some(OLD_ID.to_owned()),
+            ..summary("c1", "nginx:alpine")
+        };
+        let target = resolve_target(&docker, &summary).await.unwrap();
+        assert_eq!(target.image, "nginx:alpine");
+        assert_eq!(target.image_id.as_deref(), Some(OLD_ID));
+        assert_eq!(docker.container_inspects(), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_target_inspects_only_when_the_listing_carries_an_image_id() {
+        let docker = FakeDocker::new(&[]).with_container("c1", "nginx:alpine", Some(OLD_ID));
+        let target = resolve_target(&docker, &summary("c1", OLD_ID))
+            .await
+            .unwrap();
+        assert_eq!(target.image, "nginx:alpine");
+        assert_eq!(target.image_id.as_deref(), Some(OLD_ID));
+        assert_eq!(docker.container_inspects(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_target_errors_when_the_listing_has_no_image() {
+        let docker = FakeDocker::new(&[]);
+        let summary = ContainerSummary {
+            image: None,
+            ..summary("c1", "ignored")
+        };
+        assert!(resolve_target(&docker, &summary).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_container_created_by_id_stays_pinned_without_any_image_inspect() {
+        // `Config.Image` is itself an id: there is no tag to follow.
+        let docker = FakeDocker::new(&[]).with_container("c1", OLD_ID, Some(OLD_ID));
+        let registry = FakeRegistry::new(DIG_A);
+        let target = resolve_target(&docker, &summary("c1", OLD_ID))
+            .await
+            .unwrap();
+        let outcome = probe_image(&docker, &registry, &target.image).await;
+        assert_eq!(outcome, ProbeOutcome::Pinned);
+        assert_eq!(docker.inspect_calls(), 0);
     }
 
     #[tokio::test]

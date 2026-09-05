@@ -21,6 +21,14 @@ clippy:
 test:
     cargo test --locked --all-features
 
+# The live daemon gate, as CI runs it: every `#[ignore]`d test against a real
+# daemon. `--test-threads=1` serialises the tests inside each binary (cargo
+# already runs one test target at a time); they share one daemon and some move an
+# image tag. WARNING: this includes a scheduler tick, which sweeps every
+# container on the host labelled `freshdock.enable=true`.
+live:
+    cargo test --locked --all-features --tests -- --ignored --nocapture --test-threads=1
+
 # Check licenses, advisories, and bans (requires `cargo install cargo-deny`).
 deny:
     cargo deny check

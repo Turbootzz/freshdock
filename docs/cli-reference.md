@@ -51,6 +51,7 @@ digest can't be resolved, `latest digest` shows the reason instead:
 | `pinned (no check)` | Image is pinned to a digest, so there is no moving tag to follow. |
 | `auth required (set credentials)` | The registry needs credentials that aren't configured. See [registry-auth](registry-auth.md). |
 | `network unavailable` | The registry couldn't be reached; nothing is assumed. |
+| `error: container inspect failed: ...` | The daemon could not be asked what the container runs. A local read failure, not a registry one. |
 | `error: ...` | The probe failed for another reason (the message follows). |
 
 Docker can record one local image under several manifest digests: pulling a tag
@@ -58,6 +59,12 @@ whose multi-arch index was republished without a change to your platform's
 manifest adds the new index digest beside the old one. freshdock reports `no`
 when the upstream digest is any of them, and shows that digest as
 `current digest`.
+
+A container can also be behind its own tag, when an earlier update moved the tag
+on and this one still runs the image it pointed at before. Its row shows `-` for
+`current digest`, since the superseded image can carry no digest of its own, and
+`yes` for `update?` even though that digest is already in the local store. The
+update then recreates it from the image the tag resolves to now.
 
 Examples:
 

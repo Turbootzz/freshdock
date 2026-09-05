@@ -115,7 +115,9 @@ impl Docker {
             ..Default::default()
         };
         let summaries = self.client.list_containers(Some(opts)).await?;
-        Ok(summaries.iter().map(project_member).collect())
+        let mut members: Vec<ProjectMember> = summaries.iter().map(project_member).collect();
+        crate::rollout::resolve_member_images(self, &mut members).await?;
+        Ok(members)
     }
 
     /// Pull the given image reference from its registry, draining the
@@ -390,8 +392,6 @@ fn multi_network_guard(api_version: &str, networks: usize) -> Result<(), DockerE
     }
 }
 
-/// Container name from a summary (leading `/` trimmed), falling back to id.
-/// Shared by the scheduler's per-tick sweep and the network-dependent scan.
 /// Project a listing row onto the daemon-agnostic [`ProjectMember`].
 ///
 /// `running` counts `restarting` and `paused` as up: neither has *finished*,
@@ -415,6 +415,8 @@ fn project_member(c: &ContainerSummary) -> ProjectMember {
     }
 }
 
+/// Container name from a summary (leading `/` trimmed), falling back to id.
+/// Shared by the scheduler's per-tick sweep and the network-dependent scan.
 pub(crate) fn container_name(c: &ContainerSummary) -> String {
     c.names
         .as_ref()

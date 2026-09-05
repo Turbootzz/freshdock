@@ -99,6 +99,8 @@ pub async fn run_with(
                 health: health.clone(),
                 prune_dangling: settings.prune_dangling,
                 one_shot_timeout: settings.one_shot_timeout,
+                // Asked for by hand: take everything on the tag.
+                tag_image_id: None,
             },
             clock,
             settings.policy_defaults(),
