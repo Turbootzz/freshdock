@@ -7,5 +7,5 @@
 table td code,
 table th code {
     white-space: normal;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
