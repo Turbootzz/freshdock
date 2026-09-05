@@ -1,7 +1,7 @@
 # freshdock: A Modern Rust-based Watchtower Successor
 
 > **Project name:** `freshdock`, verified available on crates.io, GitHub, Docker Hub, npm, PyPI.
-> **Status:** Shipped, v1.1.0 (Phases 0-7 complete).
+> **Status:** Shipped (Phases 0-7 complete). Current version: see the changelog.
 > **Author:** Thijs (Turboot).
 > **Date:** May 2026 (original plan).
 
@@ -236,7 +236,7 @@ This test is the project's quality gate. If it passes, the tool is safe to ship.
 
 ## 7. Phased Roadmap
 
-> **✅ All phases (0-7) have shipped.** The tool reached v1.0.0 and is now at v1.1.0. The
+> **✅ All phases (0-7) have shipped.** The tool reached v1.0.0 and keeps shipping (see the changelog). The
 > estimates and "cut if pacing slips" caveats below are preserved as the original plan; in
 > the end nothing was cut. Phase-by-phase status is noted inline.
 

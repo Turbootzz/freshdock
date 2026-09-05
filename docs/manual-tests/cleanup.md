@@ -61,7 +61,8 @@ docker image inspect "$old_id" >/dev/null 2>&1 \
 
 ## Expected observations
 
-- The CLI prints `recreated fd-cleanup: healthy ...`.
+- The CLI prints a line starting `recreated fd-cleanup: healthy` that names the
+  removed archive and the new id.
 - Step 4 prints `OK: superseded image removed`.
 - With `freshdock.cleanup=false` (or the label omitted and `[settings] cleanup`
   unset), step 4 instead prints `FAIL`, i.e. the old image is **kept**. That is

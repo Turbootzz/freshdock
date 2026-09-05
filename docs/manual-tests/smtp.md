@@ -56,8 +56,8 @@ verifies the transport (connection, STARTTLS, auth) against a real catcher.
    ```
 
    Startup logs one WARN per plaintext target (`smtp target uses a PLAINTEXT
-   transport ...`), expected here, and the reason `tls = "none"` never belongs in
-   a deployment.
+   transport ...`). That warning is expected here, and it is the reason
+   `tls = "none"` never belongs in a deployment.
 
 3. Open the mailpit inbox at <http://localhost:8025> and confirm a message
    arrived with the rendered **Subject** (`Update available: ...` /

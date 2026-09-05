@@ -110,9 +110,9 @@ Each `depends_on` condition maps to what freshdock waits for:
 | `service_healthy` | When the dependency is part of the rollout, its own [health gate](health-and-rollback.md) is what the dependents wait on: the next service is not started until it reports healthy. A dependency the rollout does not touch is already up, so there is nothing to wait for. |
 | `service_started` | Ordering alone, nothing extra to wait for. |
 
-A one-shot has 10 minutes to finish before the rollout gives up on it. That
-budget is generous by design: a schema migration on a large database is the case
-it exists for, and abandoning one halfway is worse than waiting.
+A one-shot has 10 minutes to finish before the rollout gives up on it. Raise the
+budget with `[settings] one_shot_timeout` or `FRESHDOCK_ONE_SHOT_TIMEOUT` (seconds)
+for a slow migration; abandoning one halfway is worse than waiting.
 
 Cyclic `depends_on` cannot happen through Compose, which rejects it. If a
 hand-written label produces one anyway, freshdock logs it and rolls the affected

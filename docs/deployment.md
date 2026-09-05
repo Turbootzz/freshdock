@@ -36,8 +36,8 @@ Or with compose. The runnable stacks live in
 
 ### Configuration: environment first
 
-Most deployments need no config file. Fleet-wide settings, registry credentials, and
-the `run` flags are all environment variables. Pass them under `environment:` in
+Most deployments need no config file. Fleet-wide settings, registry credentials,
+notification targets, and the `run` flags are all environment variables. Pass them under `environment:` in
 compose, or `Environment=` in a systemd unit:
 
 ```yaml

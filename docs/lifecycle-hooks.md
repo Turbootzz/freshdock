@@ -99,8 +99,8 @@ without relabelling, and its timeouts are interpreted in Watchtower's unit
 | `com.centurylinklabs.watchtower.lifecycle.post-update` | `freshdock.lifecycle.post-update` |
 | `...lifecycle.pre-update-timeout` (**minutes**) | `freshdock.lifecycle.pre-update-timeout` (**seconds**) |
 | `...lifecycle.post-update-timeout` (**minutes**) | `freshdock.lifecycle.post-update-timeout` (**seconds**) |
-| `--enable-lifecycle-hooks` / `WATCHTOWER_LIFECYCLE_HOOKS` | *(not needed)*, setting a hook label is the opt-in |
-| `...lifecycle.pre-check` / `...lifecycle.post-check` | *(no equivalent)*, freshdock has no per-cycle check hooks; logged and ignored |
+| `--enable-lifecycle-hooks` / `WATCHTOWER_LIFECYCLE_HOOKS` | *(not needed)*: setting a hook label is the opt-in |
+| `...lifecycle.pre-check` / `...lifecycle.post-check` | *(no equivalent)*: freshdock has no per-cycle check hooks, so these are logged and ignored |
 
 Note the timeout unit difference when translating to the native labels: Watchtower
 counts minutes, freshdock counts seconds. A Watchtower `pre-update-timeout: "5"`

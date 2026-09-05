@@ -33,7 +33,7 @@ What's honoured directly:
 | Watchtower label | Effect in freshdock |
 |---|---|
 | `com.centurylinklabs.watchtower.enable=true` | Same as `freshdock.enable=true`. The container lands on freshdock's safe default mode (`watch`, or `[settings] default_mode`), so it will not auto-update like Watchtower did until you give it an active mode. |
-| `com.centurylinklabs.watchtower.enable=false` | Not opted in (same as having no labels, since freshdock is opt-in anyway). Under [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) it is a real exclusion. |
+| `com.centurylinklabs.watchtower.enable=false` | An explicit opt-out: never enabled, never re-run as a compose one-shot, never repaired as a network-namespace sidecar (an absent label allows both of those). Under [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) it is the exclusion label. |
 | `com.centurylinklabs.watchtower.monitor-only=true` | Same as `freshdock.mode=watch`; beats `[settings] default_mode`. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-update` / `post-update` | Same as the [`freshdock.lifecycle.*` hooks](lifecycle-hooks.md). |
 | `...lifecycle.pre-update-timeout` / `post-update-timeout` | Honoured in Watchtower's unit (minutes, converted; `0` = unlimited). The `freshdock.lifecycle.*-timeout` labels count seconds. |
@@ -85,7 +85,7 @@ If you prefer clean labels, or need the finer-grained knobs, this is the native 
 | Watchtower label | freshdock label | Notes |
 |---|---|---|
 | `com.centurylinklabs.watchtower.enable=true` | `freshdock.enable=true` | Opt in. |
-| `com.centurylinklabs.watchtower.enable=false` (with global watch) | *omit the labels*, or `freshdock.mode=off` | freshdock ignores unlabelled containers, so there's usually nothing to disable. With [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) on, keep the exclusion label (either spelling works). |
+| `com.centurylinklabs.watchtower.enable=false` (with global watch) | *omit the labels*, or `freshdock.mode=off` | freshdock ignores unlabelled containers, so there is usually nothing to disable. Keep the label on a compose one-shot or a network-namespace sidecar you never want touched. With [`FRESHDOCK_WATCH_ALL`](#keeping-watchtowers-opt-out-model) on, keep the exclusion label (either spelling works). |
 | `com.centurylinklabs.watchtower.monitor-only=true` | `freshdock.mode=watch` | Detect and notify, never pull or recreate. |
 | *(no per-container schedule)* | `freshdock.mode=nightly`/`weekly`/`monthly` + `freshdock.schedule=<cron>` | Scheduling is per container in freshdock, not a single global cron. |
 | `com.centurylinklabs.watchtower.lifecycle.pre-update` | `freshdock.lifecycle.pre-update` | Exec in the old container, but stricter: any non-zero exit (not only `75`), a timeout, or a failed exec skips the update. Timeout labels count seconds in freshdock, minutes in Watchtower. See [lifecycle hooks](lifecycle-hooks.md). |

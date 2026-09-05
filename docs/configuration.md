@@ -76,25 +76,17 @@ Notes:
 
 ## Compose projects
 
-A container that shares a Docker Compose project with others is not updated on
-its own. freshdock reads the project's `com.docker.compose.*` labels, re-runs the
-one-shot services the project waits on
-(`depends_on: {condition: service_completed_successfully}`) before the code that
-depends on them, and updates the rest in dependency order. A one-shot that fails
-aborts the rollout, leaving everything downstream on its previous image.
+A container in a multi-service Docker Compose project is not updated on its own.
+freshdock reads the project's `com.docker.compose.*` labels, re-runs the one-shots
+the project waits on (`condition: service_completed_successfully`) first, then
+updates the rest in `depends_on` order. A failed one-shot aborts the rollout. The
+label gate still applies, with one exception: an unlabelled one-shot that the
+project waits on is re-run anyway. Explicit opt-outs and `watch` mode still win.
 
-A project that holds nothing but the container that triggered it has nothing to
-order and nothing to restart, so the ordinary single-container path is used and
-behaviour is unchanged.
-
-This is on by default. `[settings] compose_aware = false` (or
-`FRESHDOCK_COMPOSE_AWARE=false`) turns it off and updates every container
-individually again.
-
-The label gate is unchanged, with one narrow exception: an unlabelled service
-that the project waits on with `service_completed_successfully` is re-run anyway,
-since that condition is the compose file itself declaring it must complete first.
-Explicit opt-outs still win. Full rules in [Compose projects](compose.md).
+On by default; `[settings] compose_aware = false` or `FRESHDOCK_COMPOSE_AWARE=false`
+turns it off. `[settings] one_shot_timeout` (`FRESHDOCK_ONE_SHOT_TIMEOUT`) sets how
+long a one-shot may run, default 600 seconds. Full rules in
+[Compose projects](compose.md#what-gets-updated).
 
 ---
 
@@ -123,7 +115,7 @@ did before.
 freshdock skips its own container when it enables containers this way, so the
 daemon never tries to update itself. It recognises itself by the Docker default
 hostname (the short container id). If you give the freshdock container a custom
-`hostname`, add `freshdock.mode=off` to it, or give it an updating mode if you do
+`hostname`, add `freshdock.mode=off` to it, or set `freshdock.enable=true` on it if you do
 want it updated. The same applies when freshdock runs with
 `network_mode: container:<name>`: it then carries the namespace owner's hostname,
 so label both containers explicitly in that setup. The skip is evaluated per
@@ -158,6 +150,7 @@ by `_`.
 | `FRESHDOCK_DEFAULT_MODE` | `[settings] default_mode` | One of `live`/`nightly`/`weekly`/`monthly`/`watch`/`off`. An invalid value warns and the file value (else `watch`) applies. |
 | `FRESHDOCK_WATCH_ALL` | `[settings] watch_all` | `true`/`false`/`1`/`0`, case-insensitive. Treats every running container as enabled unless it opts out. See [watching every container](#watching-every-container). |
 | `FRESHDOCK_COMPOSE_AWARE` | `[settings] compose_aware` | `true`/`false`/`1`/`0`, case-insensitive. On by default. Rolls a Compose project out as one unit. See [Compose projects](compose.md). |
+| `FRESHDOCK_ONE_SHOT_TIMEOUT` | `[settings] one_shot_timeout` | Whole number of seconds a compose one-shot may run before the rollout gives up. Default `600`. An invalid value warns and the file value applies. |
 | `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
 | `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
 | `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
@@ -203,10 +196,12 @@ that overrides it.
 ```toml
 [settings]
 default_mode   = "watch"   # fallback mode; invalid value falls back to watch
-watch_all      = false     # enable every container unless it opts out
-compose_aware  = true      # roll a Compose project out as one unit
-cleanup        = false     # remove the replaced image after a healthy update
-prune_dangling = false     # daemon-wide dangling-image prune after each update
+watch_all        = false   # enable every container unless it opts out
+                           # (enable=false, watchtower enable=false, mode=off)
+compose_aware    = true    # roll a Compose project out as one unit
+one_shot_timeout = 600     # seconds a compose one-shot may run before the rollout gives up
+cleanup          = false   # remove the replaced image after a healthy update
+prune_dangling   = false   # daemon-wide dangling-image prune after each update (no per-container label)
 ```
 
 | Key | Env var | Type | Default | Notes |
@@ -214,8 +209,9 @@ prune_dangling = false     # daemon-wide dangling-image prune after each update
 | `default_mode` | `FRESHDOCK_DEFAULT_MODE` | string (a mode name) | unset, so `watch` | Applied to enabled containers without a `freshdock.mode` label. A `freshdock.mode` label always overrides it. |
 | `watch_all` | `FRESHDOCK_WATCH_ALL` | bool | `false` | Enables every running container unless it opts out, and gives those containers `default_mode` (else `watch`). See [watching every container](#watching-every-container). |
 | `compose_aware` | `FRESHDOCK_COMPOSE_AWARE` | bool | `true` | Treats a Compose project as one update unit: re-runs the one-shots it waits on, updates in `depends_on` order, and aborts if a one-shot fails. See [Compose projects](compose.md). |
+| `one_shot_timeout` | `FRESHDOCK_ONE_SHOT_TIMEOUT` | integer (seconds) | `600` | How long a compose one-shot may run before the rollout aborts. Raise it for slow migrations. |
 | `cleanup` | `FRESHDOCK_CLEANUP` | bool | `false` | Default for `freshdock.cleanup`. Best-effort; a shared image in use elsewhere is kept, and a cleanup failure never fails the update. |
-| `prune_dangling` | `FRESHDOCK_PRUNE_DANGLING` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. |
+| `prune_dangling` | `FRESHDOCK_PRUNE_DANGLING` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. No per-container label. |
 
 ### `[registry.<name>]`
 
@@ -319,8 +315,8 @@ FRESHDOCK_REGISTRY_GHCR_TOKEN=ghp_xxx
 
 ### With a file (for notifications)
 
-Once you want notifications, declare the target in a `freshdock.toml` and keep
-the secret in the environment:
+To keep a notification target in the file instead of a `FRESHDOCK_NOTIFY_<NAME>_URL`,
+declare it there and keep the secret in the environment:
 
 ```toml
 # freshdock.toml

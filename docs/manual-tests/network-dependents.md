@@ -72,7 +72,7 @@ docker inspect fd-peer --format '{{.Image}}'                    # image ID
 
 ## Expected observations
 
-- The CLI prints `recreated fd-base: healthy ...`, and the log carries an
+- The CLI prints a line starting `recreated fd-base: healthy`, and the log carries an
   `re-attaching network-namespace dependent` line naming `fd-peer`.
 - `docker inspect fd-peer --format '{{.State.StartedAt}}'` is **newer** than the
   value from step 4; the dependent was re-created, not left behind.
@@ -137,7 +137,7 @@ dependent has to re-attach even though nothing was updated.
 
 If a dependent's re-creation fails (it was removed by hand mid-run, its name
 collides, the daemon refuses the create), the run still reports
-`recreated fd-base: healthy ...` and logs a warning naming the dependent.
+a line starting `recreated fd-base: healthy` and logs a warning naming the dependent.
 Re-attachment repairs collateral damage; it never turns a good update into a
 failure, and one broken dependent never stops the next one from being fixed.
 

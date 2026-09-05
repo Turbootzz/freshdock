@@ -59,7 +59,8 @@ docker inspect fd-smoke --format '{{.Config.Image}}'   # -> nginx:alpine
 
 ## Expected observations
 
-- The CLI prints `recreated fd-smoke: healthy ...`, naming the removed archive `fd-smoke-old-<unix-ts>` and the new id.
+- The CLI prints a line starting `recreated fd-smoke: healthy` that names the
+  removed archive `fd-smoke-old-<unix-ts>` and the new id.
 - `docker ps -a` shows a **single** `fd-smoke` container, running with a fresh
   id; the archived `fd-smoke-old-<unix-ts>` was removed once the new instance
   passed health gating. (nginx:alpine has no healthcheck, so success is decided

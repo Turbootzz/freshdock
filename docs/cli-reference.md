@@ -11,7 +11,7 @@ Available on every subcommand.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--no-color` | colour on a TTY | Disable ANSI colour, for log files and non-interactive output. `NO_COLOR` set to any non-empty value does the same. |
+| `--no-color` | colour on | Disable ANSI colour. There is no terminal detection, so set it (or `NO_COLOR` to any non-empty value) when writing to a log file or another non-interactive sink. |
 | `--config <PATH>` | see below | Path to an optional `freshdock.toml`. |
 
 The config file is optional: you need one only for a registry host whose name has
@@ -32,7 +32,9 @@ path that is missing is an error, a missing default file is fine. See the
 freshdock check
 ```
 
-Read-only. Lists every opted-in container (`freshdock.enable=true`), resolves the
+Read-only. Lists every enabled container (`freshdock.enable=true`, or every
+container that does not opt out under
+[`watch_all`](configuration.md#watching-every-container)), resolves the
 latest digest once per unique image, and prints a status table. It never pulls,
 stops, or recreates anything. The dedupe conserves Docker Hub's anonymous budget
 of 100 pulls / 6 h; manifest fetches count as pulls.
@@ -83,10 +85,12 @@ skip the update (the command reports the skip and exits `0`).
 | `<NAME>` | Name or ID of the running container to recreate. |
 
 It ignores `freshdock.mode`, since modes drive the scheduler and not manual
-intent, but it refuses a container that is `freshdock.enable=false` or
-`freshdock.mode=off`: a graceful no-op, so an explicit opt-out can't be recreated
-by accident. Any other mode, `watch` included, is allowed because you typed the
-command yourself.
+intent, but the enable gate still applies. A container that is not enabled (no
+`freshdock.enable=true`, unless
+[`watch_all`](configuration.md#watching-every-container) is on) or that opts out
+with `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or
+`freshdock.mode=off` is refused as a graceful no-op. Any other mode, `watch`
+included, is allowed because you typed the command yourself.
 
 ---
 
@@ -98,7 +102,7 @@ freshdock run [--interval <SECS>] [--tick <SECS>] [--stop-timeout <SECS>]
 
 The scheduler daemon. Each tick it lists running containers, parses their labels,
 and acts on the ones that are due: `live`/`nightly`/`weekly`/`monthly` are updated
-(health-gated, with rollback), `watch` is report-only. Runs in the foreground
+(health-gated, with rollback); `watch` is report-only. Runs in the foreground
 until `SIGINT`/`SIGTERM`, then finishes the in-flight container and exits. See
 [scheduling](scheduling.md) for the timing model.
 
