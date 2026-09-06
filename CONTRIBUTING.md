@@ -39,6 +39,7 @@ just ci      # fmt-check + clippy + test + deny, run this before claiming done
 | `just fmt` / `just fmt-check` | apply / verify formatting |
 | `just clippy` | `clippy --all-targets --all-features --locked -- -D warnings` (warnings = errors) |
 | `just test` | `cargo test --locked --all-features` |
+| `just live` | the `#[ignore]`d live tests, against a real daemon (not part of `just ci`) |
 | `just deny` | license / advisory / dependency check via `cargo-deny` |
 | `just build` | release build |
 
@@ -60,6 +61,19 @@ release. Run it locally with:
 ```bash
 cargo test --test recreate_roundtrip_live -- --ignored
 ```
+
+### Live daemon tests
+
+Behaviour that only a real daemon can show (what the engine does to a container
+spec on re-create, a shared network namespace, compose one-shot ordering, image
+cleanup) belongs in an `#[ignore]`d integration test, not in a fake. `just live`
+is the gate, and CI runs that same recipe, so a new test or a whole new file is
+picked up with no CI change.
+
+Careful where you run it: the suite includes a scheduler tick against your own
+daemon, which sweeps every container on the host labelled
+`freshdock.enable=true`, so anyone dogfooding freshdock will have their own
+containers recreated.
 
 ## Dependency hygiene
 
