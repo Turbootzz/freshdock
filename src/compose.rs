@@ -68,8 +68,7 @@ pub struct ComposeInfo {
 pub struct ProjectMember {
     pub name: String,
     pub id: String,
-    /// The container's `Image` as the daemon reports it. Note that a listing
-    /// falls back to a bare image id once the tag it was created from has moved.
+    /// The container's `Config.Image`, which does not change when the tag moves.
     pub image_ref: String,
     /// The resolved image id, which still matches when `image_ref` does not.
     pub image_id: Option<String>,

@@ -85,14 +85,23 @@ matches if either one matches, the Vixie-cron union rule. `0 4 13 * 5` fires at
 
 1. The image digest is probed against its registry.
 2. For `watch`: if a newer digest appeared, an `available`
-   [notification](notifications.md) is dispatched (once per distinct digest).
+   [notification](notifications.md) is dispatched (once per distinct digest). A
+   `watch` container that is behind its own tag notifies too, so the digest in
+   the notification can be one that is already present locally.
 3. For the updating modes: if a newer digest exists, the container is recreated
    and [health-gated, with rollback on failure](health-and-rollback.md).
 
-The digest is compared for membership: Docker can record one local image under
-several manifest digests, and the container counts as up to date when upstream's
-digest is any of them. Otherwise a republished multi-arch index would recreate a
-healthy container on every run.
+The digest is compared per container. Docker can record one image under several
+manifest digests, and the container counts as up to date when upstream's digest
+is any of them; otherwise a republished multi-arch index would recreate a healthy
+container on every run. A container that runs a different image than its tag
+resolves to locally is behind it and is updated as well, which is what keeps a
+second container on a shared tag from being hidden by the first one's update.
+
+A digest that failed the health gate is not retried until upstream publishes a
+new one; `freshdock recreate` still forces it. That memory is in-process only:
+restarting the daemon, or a container leaving the running list for a poll, lets
+the same digest be tried once more.
 
 Inside a multi-service Compose project, step 3 becomes a project rollout. The
 one-shot services the project waits on are re-run first, the rest follow in

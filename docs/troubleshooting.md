@@ -106,6 +106,17 @@ Its image is pinned to a digest (`repo@sha256:<digest>`), so there is no moving 
 to follow and freshdock will never update it. Switch to a tag (`repo:1.27`) if you
 want updates.
 
+Earlier releases also showed this for a container whose tag had moved on locally,
+typically a second container on the same tag right after the first one was
+updated. The container is now probed by the reference it was created from, so
+that case reports a real `update?` verdict and is updated like any other.
+
+A container created from an image id rather than a tag is genuinely pinned, which
+includes a sidecar freshdock repaired after its network namespace was recreated
+(see [the sidecar section](#a-sidecar-on-network_mode-containerx-lost-its-network)).
+Put it back on a tag with `docker compose up -d <service>`, or recreate it from
+its tag by hand.
+
 See [Configuration: pinned images](configuration.md#labels).
 
 ## Updates fail with a read-only socket

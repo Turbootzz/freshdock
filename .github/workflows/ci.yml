@@ -54,6 +54,9 @@ jobs:
   integration:
     name: Live recreate gate
     runs-on: ubuntu-latest
+    # The gate itself runs in about two minutes; the rest is the build. Generous
+    # headroom, but bounded, so a wedged daemon cannot burn a six-hour slot.
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
@@ -78,15 +81,14 @@ jobs:
       - name: Assert Docker daemon is up
         run: docker version
 
-      - name: Live recreate round-trip (quality gate)
-        run: cargo test --locked --test recreate_roundtrip_live -- --ignored --nocapture
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: just
 
-      # The other `#[ignore]`d live suite. It belongs in the same job because it
-      # needs the same thing (a real daemon) and covers the other half of the
-      # daemon surface: one scheduler tick end-to-end, including the connect +
-      # API-version negotiation path that every command shares.
-      - name: Live scheduler tick
-        run: cargo test --locked --test scheduler_live -- --ignored --nocapture
+      # Every `#[ignore]`d test, so a new live test needs no change here.
+      # The recipe carries the flags and why they matter.
+      - name: Live daemon gate
+        run: just live
 
   cross-compile:
     name: Cross-compile (${{ matrix.target }})
