@@ -109,7 +109,11 @@ docker network create fd-back  >/dev/null
 # `Binds` shape that this manual procedure does.
 mkdir -p /tmp/fd-state /tmp/fd-secrets
 
-# Launch with the kitchen-sink dimensions: non-default user, multi-port
+# Launch with the kitchen-sink dimensions: non-default user (uid 1500, not
+# 1000: `--ulimit nproc` counts every thread of that uid on the host, and on a
+# workstation uid 1000 is the desktop user with far more than 512 of them, so
+# the container would fail to exec with "resource temporarily unavailable"),
+# multi-port
 # binding (one with explicit HostIp), bind mounts + tmpfs (HostConfig.Tmpfs
 # dict), multiple cap_add / cap_drop, sysctls, restart policy with retry
 # count, memory + nano-cpus + pids limit, custom stop signal + timeout,
@@ -120,7 +124,7 @@ docker run -d --name fd-smoke-weird \
   --label freshdock.mode=watch \
   --label freshdock.notify=true \
   --label app=weird --label team=platform --label owner=owner@example.invalid \
-  --user 1000:1000 \
+  --user 1500:1500 \
   --network fd-front --network-alias weird-front \
   -p 127.0.0.1:18443:8443 -p 19090:9090 \
   -v /tmp/fd-state:/var/lib/state:rw -v /tmp/fd-secrets:/run/secrets:ro \
