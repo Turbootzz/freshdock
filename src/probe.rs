@@ -232,12 +232,13 @@ pub(crate) fn pinned_digest(image: &str) -> Option<&str> {
 /// All matching entries are returned: they name the same local image, and any
 /// of them may be the one upstream currently resolves to.
 pub(crate) fn local_manifest_digests(image: &str, repo_digests: &[String]) -> Vec<String> {
-    let want_repo = strip_tag(image.split('@').next().unwrap_or(image));
+    let want_repo =
+        crate::registry::familiar_repository(strip_tag(image.split('@').next().unwrap_or(image)));
     repo_digests
         .iter()
         .filter_map(|rd| {
             let (repo, digest) = rd.split_once('@')?;
-            (repo == want_repo).then(|| digest.to_owned())
+            (crate::registry::familiar_repository(repo) == want_repo).then(|| digest.to_owned())
         })
         .collect()
 }
@@ -450,6 +451,69 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn qualified_hub_reference_matches_the_familiar_repo_digest() {
+        let repo_digests = ["nginx@sha256:aaa".to_owned()];
+        assert_eq!(
+            local_manifest_digests("docker.io/library/nginx:alpine", &repo_digests),
+            vec!["sha256:aaa".to_owned()]
+        );
+        assert_eq!(
+            local_manifest_digests("index.docker.io/library/nginx:alpine", &repo_digests),
+            vec!["sha256:aaa".to_owned()]
+        );
+        assert_eq!(
+            local_manifest_digests("library/nginx:alpine", &repo_digests),
+            vec!["sha256:aaa".to_owned()]
+        );
+    }
+
+    #[test]
+    fn qualified_hub_user_repo_matches_its_digest() {
+        let repo_digests = ["nginxinc/nginx-unprivileged@sha256:bbb".to_owned()];
+        assert_eq!(
+            local_manifest_digests("docker.io/nginxinc/nginx-unprivileged:1.27", &repo_digests),
+            vec!["sha256:bbb".to_owned()]
+        );
+    }
+
+    #[test]
+    fn other_registries_still_match_literally() {
+        let repo_digests = ["ghcr.io/astral-sh/uv@sha256:ccc".to_owned()];
+        assert_eq!(
+            local_manifest_digests("ghcr.io/astral-sh/uv:alpine", &repo_digests),
+            vec!["sha256:ccc".to_owned()]
+        );
+        assert!(local_manifest_digests("docker.io/library/uv:alpine", &repo_digests).is_empty());
+    }
+
+    #[test]
+    fn fully_qualified_repo_digests_match_a_familiar_reference() {
+        // Podman records RepoDigests fully qualified.
+        let repo_digests = ["docker.io/library/nginx@sha256:aaa".to_owned()];
+        assert_eq!(
+            local_manifest_digests("nginx:alpine", &repo_digests),
+            vec!["sha256:aaa".to_owned()]
+        );
+        assert_eq!(
+            local_manifest_digests("docker.io/library/nginx:alpine", &repo_digests),
+            vec!["sha256:aaa".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn qualified_reference_with_a_familiar_repo_digest_is_up_to_date() {
+        let docker = FakeDocker::new(&[("docker.io/library/nginx:alpine", "nginx@sha256:aaa")]);
+        let registry = FakeRegistry::new("sha256:aaa");
+
+        let ProbeOutcome::Fetched { local, latest, .. } =
+            probe_image(&docker, &registry, "docker.io/library/nginx:alpine").await
+        else {
+            panic!("expected a fetched outcome");
+        };
+        assert_eq!(local.update_available(&latest), Some(false));
     }
 
     // --- pinned-ref detection (#27) ---
