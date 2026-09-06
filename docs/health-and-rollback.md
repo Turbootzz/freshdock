@@ -23,6 +23,10 @@ The recreated container preserves the original config (networks, volumes, env, c
 user, and so on); a dedicated round-trip test asserts the inspected config comes back
 byte-identical.
 
+One exception: a hostname Docker assigned itself (the old container's short id)
+is not copied. The new container gets its own id as hostname, exactly as
+`docker compose up` would give it. A hostname you set explicitly is preserved.
+
 ## Health verdicts
 
 After start, freshdock polls the container until it reaches one of three verdicts:
