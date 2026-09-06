@@ -13,6 +13,21 @@ use crate::labels::{self, Mode};
 use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
+/// `freshdock recreate` refused to touch the container.
+#[derive(Debug, thiserror::Error)]
+pub enum RecreateError {
+    /// The container is not opted into freshdock.
+    #[error(
+        "refusing to recreate {container}: not opted into freshdock (enable={enabled}, \
+         mode={mode}; set freshdock.enable=true and a mode other than off)"
+    )]
+    NotOptedIn {
+        container: String,
+        enabled: bool,
+        mode: Mode,
+    },
+}
+
 /// Recreate a single container by name, health-gated: inspect → pull → stop →
 /// rename → create → start → wait-for-healthy → (remove old | rollback).
 ///
@@ -73,15 +88,12 @@ pub async fn run_with(
         settings.policy_defaults(),
     )?;
     if !policy.enabled || policy.mode == Mode::Off {
-        warn!(
-            container = %name,
-            mode = %policy.mode,
-            enabled = policy.enabled,
-            "refusing to recreate: container is not opted into freshdock \
-             (set freshdock.enable=true and a non-off mode to allow even \
-             manual recreate)"
-        );
-        return Ok(());
+        return Err(RecreateError::NotOptedIn {
+            container: name.to_owned(),
+            enabled: policy.enabled,
+            mode: policy.mode,
+        }
+        .into());
     }
 
     for note in labels::watchtower_diagnostics(spec.config.labels.as_ref().unwrap_or(&empty)) {
@@ -217,11 +229,10 @@ mod tests {
     use bollard::models::ContainerConfig;
 
     /// Fake whose only real method is `inspect` (returns a configurable label
-    /// set). `pull` returns an error (so a gate-pass surfaces as `Err`); every
-    /// op past it panics, so any test where the policy gate *fails* to
-    /// short-circuit blows up loudly.
+    /// set). `pull` records into `calls` and errors; every op past it panics.
     struct GateOps {
         labels: Option<HashMap<String, String>>,
+        calls: std::sync::Mutex<Vec<&'static str>>,
     }
 
     impl GateOps {
@@ -233,10 +244,17 @@ mod tests {
                         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                         .collect(),
                 ),
+                calls: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn without_labels() -> Self {
-            Self { labels: None }
+            Self {
+                labels: None,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().expect("calls mutex poisoned").clone()
         }
     }
 
@@ -256,9 +274,11 @@ mod tests {
             })
         }
         async fn pull(&self, _image_ref: &ImageRef) -> Result<(), DockerError> {
-            // Always an error, never a panic: a refusal returns Ok before
-            // reaching pull, so run_with's Ok/Err splits gate-refused from
-            // gate-passed on its own.
+            // An error, never a panic: reaching pull is what a gate-pass asserts.
+            self.calls
+                .lock()
+                .expect("calls mutex poisoned")
+                .push("pull");
             Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
                 "pull refused by the test fake",
             )))
@@ -318,7 +338,7 @@ mod tests {
     }
 
     async fn assert_refused_with(ops: GateOps, settings: ResolvedSettings) {
-        run_with(
+        let err = run_with(
             &ops,
             "c",
             &HealthConfig::default(),
@@ -327,7 +347,12 @@ mod tests {
             || 0,
         )
         .await
-        .expect("a refused recreate is a graceful no-op, not an error");
+        .expect_err("a refused recreate must fail so a script can see it");
+        assert!(
+            matches!(err, AppError::Recreate(RecreateError::NotOptedIn { .. })),
+            "{err}"
+        );
+        assert!(ops.calls().is_empty(), "a refusal must touch nothing");
     }
 
     async fn assert_refused(ops: GateOps) {
@@ -361,25 +386,45 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn a_refusal_names_the_observed_enable_and_mode() {
+        let ops = GateOps::with_labels(&[("freshdock.enable", "true"), ("freshdock.mode", "off")]);
+        let err = run_with(
+            &ops,
+            "c",
+            &HealthConfig::default(),
+            &TokioClock,
+            ResolvedSettings::default(),
+            || 0,
+        )
+        .await
+        .expect_err("a refused recreate must fail so a script can see it");
+        let rendered = err.to_string();
+        assert!(rendered.contains("enable=true"), "{rendered}");
+        assert!(rendered.contains("mode=off"), "{rendered}");
+    }
+
     // --- watch_all opt-out mode (issue #79) ---
 
     #[tokio::test]
     async fn unlabelled_with_watch_all_passes_the_gate() {
-        // The pull error can only come from past the gate: reaching it is the
-        // assertion.
-        let result = run_with(
-            &GateOps::without_labels(),
+        // A refusal and a gate-pass both return `Err`; the pull separates them.
+        let ops = GateOps::without_labels();
+        let err = run_with(
+            &ops,
             "c",
             &HealthConfig::default(),
             &TokioClock,
             watch_all(),
             || 0,
         )
-        .await;
+        .await
+        .expect_err("the test fake fails the pull");
         assert!(
-            result.is_err(),
-            "watch_all must let an unlabelled container through the gate"
+            !matches!(err, AppError::Recreate(RecreateError::NotOptedIn { .. })),
+            "watch_all must let an unlabelled container through the gate: {err}"
         );
+        assert_eq!(ops.calls(), ["pull"]);
     }
 
     #[tokio::test]

@@ -34,8 +34,9 @@ pub async fn run(
     store: Arc<CredentialStore>,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(store.clone()).await?;
-    let registry = OciRegistry::new(store);
+    // Built before the Docker connect so a missing CA store fails the start.
+    let registry = OciRegistry::new(store.clone())?;
+    let docker = Docker::connect(store).await?;
     let own_id_prefix = crate::selfid::own_container_id_prefix();
     let cells = collect_cells(
         &docker,

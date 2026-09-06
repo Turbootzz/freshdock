@@ -54,10 +54,14 @@ async fn webhook_posts_the_event_as_json() {
         .mount(&server)
         .await;
 
-    WebhookNotifier::new("hook", server.uri(), freshdock::http::client())
-        .send(&msg)
-        .await
-        .expect("webhook send should succeed");
+    WebhookNotifier::new(
+        "hook",
+        server.uri(),
+        freshdock::http::client().expect("http client"),
+    )
+    .send(&msg)
+    .await
+    .expect("webhook send should succeed");
 }
 
 #[tokio::test]
@@ -73,10 +77,14 @@ async fn discord_posts_a_single_embed() {
         .mount(&server)
         .await;
 
-    DiscordNotifier::new("chat", server.uri(), freshdock::http::client())
-        .send(&msg)
-        .await
-        .expect("discord send should succeed");
+    DiscordNotifier::new(
+        "chat",
+        server.uri(),
+        freshdock::http::client().expect("http client"),
+    )
+    .send(&msg)
+    .await
+    .expect("discord send should succeed");
 }
 
 #[tokio::test]
@@ -96,7 +104,7 @@ async fn telegram_calls_send_message_with_chat_id_and_text() {
         "tg",
         Secret::new("123:ABC"),
         "42",
-        freshdock::http::client(),
+        freshdock::http::client().expect("http client"),
     )
     .with_base_url(server.uri())
     .send(&msg)
@@ -112,10 +120,14 @@ async fn a_non_2xx_response_is_a_typed_status_error() {
         .mount(&server)
         .await;
 
-    let err = WebhookNotifier::new("hook", server.uri(), freshdock::http::client())
-        .send(&succeeded().render())
-        .await
-        .expect_err("a 500 must be an error");
+    let err = WebhookNotifier::new(
+        "hook",
+        server.uri(),
+        freshdock::http::client().expect("http client"),
+    )
+    .send(&succeeded().render())
+    .await
+    .expect_err("a 500 must be an error");
     assert!(
         matches!(err, NotifyError::Status(s) if s.as_u16() == 500),
         "expected NotifyError::Status(500), got {err:?}"
@@ -128,11 +140,16 @@ async fn a_transport_error_never_leaks_the_telegram_token() {
     // (no external network). The bot token is in the URL path; the error must not
     // expose it — post_json strips the URL via reqwest::Error::without_url.
     const TOKEN: &str = "123456:SUPERSECRETBOTTOKEN";
-    let err = TelegramNotifier::new("tg", Secret::new(TOKEN), "42", freshdock::http::client())
-        .with_base_url("http://127.0.0.1:1")
-        .send(&succeeded().render())
-        .await
-        .expect_err("connect to a closed port must fail");
+    let err = TelegramNotifier::new(
+        "tg",
+        Secret::new(TOKEN),
+        "42",
+        freshdock::http::client().expect("http client"),
+    )
+    .with_base_url("http://127.0.0.1:1")
+    .send(&succeeded().render())
+    .await
+    .expect_err("connect to a closed port must fail");
     let shown = format!("{err}");
     assert!(
         !shown.contains("SUPERSECRETBOTTOKEN"),
@@ -184,8 +201,10 @@ async fn dispatch_hits_each_subscribed_target_once_and_skips_others() {
         },
     );
 
-    let dispatcher =
-        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client());
+    let dispatcher = Dispatcher::from_config(
+        NotificationConfig { targets },
+        freshdock::http::client().expect("http client"),
+    );
     dispatcher.dispatch(&failed()).await;
     // Per-server .expect(n) is verified when each MockServer drops here.
 }
@@ -218,8 +237,10 @@ async fn a_bad_target_is_skipped_and_a_good_one_still_fires() {
         },
     );
 
-    let dispatcher =
-        Dispatcher::from_config(NotificationConfig { targets }, freshdock::http::client());
+    let dispatcher = Dispatcher::from_config(
+        NotificationConfig { targets },
+        freshdock::http::client().expect("http client"),
+    );
     dispatcher.dispatch(&succeeded()).await;
     // `good` is asserted via .expect(1) on drop; `broken` never sent (no server).
 }

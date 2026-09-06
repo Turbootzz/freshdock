@@ -22,7 +22,7 @@ fn is_sha256(s: &str) -> bool {
 }
 
 fn anonymous() -> OciRegistry {
-    OciRegistry::new(Arc::new(CredentialStore::default()))
+    OciRegistry::new(Arc::new(CredentialStore::default())).expect("http client")
 }
 
 #[tokio::test]

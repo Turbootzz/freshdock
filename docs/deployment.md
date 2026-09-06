@@ -99,7 +99,9 @@ services:
 ## As a host binary (systemd)
 
 Install the binary (`cargo install freshdock`, a release binary, or `just build`),
-then create a unit:
+then create a unit. The host needs a CA bundle (the `ca-certificates` package) or
+`SSL_CERT_FILE` pointing at one, or freshdock refuses to start; see
+[Troubleshooting](troubleshooting.md#no-ca-certificates-were-found).
 
 ```ini
 # /etc/systemd/system/freshdock.service

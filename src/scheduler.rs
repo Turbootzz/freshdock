@@ -1991,7 +1991,10 @@ mod tests {
                 triggers: None,
             },
         );
-        Dispatcher::from_config(NotificationConfig { targets }, crate::http::client())
+        Dispatcher::from_config(
+            NotificationConfig { targets },
+            crate::http::client().expect("http client"),
+        )
     }
 
     fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerSummary> {

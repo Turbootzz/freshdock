@@ -53,6 +53,7 @@ impl fmt::Debug for Secret {
 /// One registry's credentials. `username` is optional (GHCR accepts any
 /// username with a PAT; Docker Hub requires the real account name).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryCredentials {
     #[serde(default)]
     pub username: Option<String>,
@@ -62,6 +63,7 @@ pub struct RegistryCredentials {
 /// The parsed `freshdock.toml`: registry credentials (Phase 5), notification
 /// targets (Phase 6), and fleet-wide `[settings]` defaults.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub registry: HashMap<String, RegistryCredentials>,
@@ -73,8 +75,9 @@ pub struct Config {
 
 /// The `[settings]` table: fleet-wide defaults a container can override with a
 /// `freshdock.*` label. Kept as raw strings here; [`Config::load`] validates
-/// them into [`ResolvedSettings`] so a bad value warns instead of aborting.
+/// them into [`ResolvedSettings`], where an invalid value warns and falls back.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     /// Mode for an enabled container with no `freshdock.mode` label. An
     /// unrecognised value is warned about and ignored (falls back to `watch`).
@@ -167,7 +170,7 @@ fn parse_env_bool(var: &str, raw: &str) -> Option<bool> {
 /// `FRESHDOCK_COMPOSE_AWARE` onto the `[settings]`
 /// table (env wins per field,
 /// like the registry overlay), then validate. An invalid value is a warning,
-/// not a hard error — the next layer (file value, then built-in default)
+/// not a hard error: the next layer (file value, then built-in default)
 /// applies, so one typo can't stop the daemon from starting.
 fn resolve_settings<I>(mut settings: Settings, env_vars: I) -> ResolvedSettings
 where
@@ -248,7 +251,7 @@ where
 /// unknown value is a clean parse error. `triggers` filters which lifecycle
 /// events reach this target — omitted means all of them.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum NotificationTarget {
     Webhook {
         // `Secret`: a webhook URL can embed a token (Discord's always does), and
@@ -404,11 +407,103 @@ pub enum ConfigError {
         path: String,
         source: std::io::Error,
     },
-    #[error("parsing config file {path}: {source}")]
+    /// Message and line only: the toml snippet can echo a secret.
+    #[error("parsing config file {path}: {message}{}", .line.map(|n| format!(" (line {n})")).unwrap_or_default())]
     Parse {
         path: String,
-        source: toml::de::Error,
+        line: Option<usize>,
+        message: String,
     },
+}
+
+/// Env names freshdock reads on their own (no `<NAME>` component).
+const PLAIN_ENV_NAMES: [&str; 11] = [
+    "CONFIG",
+    "INTERVAL",
+    "TICK",
+    "STOP_TIMEOUT",
+    "DEFAULT_MODE",
+    "CLEANUP",
+    "PRUNE_DANGLING",
+    "WATCH_ALL",
+    "COMPOSE_AWARE",
+    "ONE_SHOT_TIMEOUT",
+    "LIVE_REQUIRED",
+];
+
+/// Tails of `FRESHDOCK_REGISTRY_<NAME>_*`.
+const REGISTRY_ENV_SUFFIXES: [&str; 2] = ["_USERNAME", "_TOKEN"];
+
+/// Tails of `FRESHDOCK_NOTIFY_<NAME>_*`.
+const NOTIFY_ENV_SUFFIXES: [&str; 4] = ["_URL", "_TRIGGERS", "_BOT_TOKEN", "_PASSWORD"];
+
+/// The `FRESHDOCK_*` names freshdock does not read, in iteration order.
+pub(crate) fn unrecognised_env_names(vars: impl Iterator<Item = (String, String)>) -> Vec<String> {
+    vars.map(|(name, _)| name)
+        .filter(|name| name.starts_with("FRESHDOCK_") && !is_recognised_env_name(name))
+        .collect()
+}
+
+fn is_recognised_env_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("FRESHDOCK_") else {
+        return false;
+    };
+    if PLAIN_ENV_NAMES.contains(&rest) {
+        return true;
+    }
+    if let Some(tail) = rest.strip_prefix("REGISTRY_") {
+        return has_named_suffix(tail, &REGISTRY_ENV_SUFFIXES);
+    }
+    if let Some(tail) = rest.strip_prefix("NOTIFY_") {
+        return has_named_suffix(tail, &NOTIFY_ENV_SUFFIXES);
+    }
+    false
+}
+
+/// The `<NAME>` in a `<NAME><suffix>` tail. An empty name is never acted on.
+fn named_suffix<'a>(tail: &'a str, suffix: &str) -> Option<&'a str> {
+    tail.strip_suffix(suffix).filter(|name| !name.is_empty())
+}
+
+fn has_named_suffix(tail: &str, suffixes: &[&str]) -> bool {
+    suffixes
+        .iter()
+        .any(|suffix| named_suffix(tail, suffix).is_some())
+}
+
+/// Split a toml failure into its 1-based line and a redacted message.
+pub(crate) fn describe_parse_error(text: &str, err: &toml::de::Error) -> (Option<usize>, String) {
+    let line = err
+        .span()
+        .and_then(|span| text.get(..span.start))
+        .map(|before| before.matches('\n').count() + 1);
+    (line, redact_parse_message(err.message()))
+}
+
+/// Stands in for whatever serde quoted, which may be a mistyped secret.
+const REDACTED_VALUE: &str = "<redacted>";
+
+/// Only `unknown field` / `missing field` quote a key; anything else is redacted.
+fn redact_parse_message(message: &str) -> String {
+    if message.starts_with("unknown field") || message.starts_with("missing field") {
+        return message.to_owned();
+    }
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(open) = rest.find(['`', '"']) {
+        let delim = char::from(rest.as_bytes()[open]);
+        out.push_str(&rest[..open]);
+        out.push(delim);
+        out.push_str(REDACTED_VALUE);
+        out.push(delim);
+        // An unterminated run is redacted to the end rather than emitted raw.
+        rest = match rest[open + 1..].find(delim) {
+            Some(close) => &rest[open + 1 + close + 1..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Credentials indexed by canonical registry host, ready for O(1) lookup by the
@@ -492,6 +587,9 @@ impl Config {
                 }
             }
         };
+        for name in unrecognised_env_names(std::env::vars()) {
+            warn!(%name, "unrecognised FRESHDOCK_ environment variable; ignored");
+        }
         // Take notifications + settings out before `build_store` consumes the
         // rest; all three env overlays read the same process env (`vars()` is
         // cheap).
@@ -512,9 +610,13 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        Self::from_toml(&body).map_err(|source| ConfigError::Parse {
-            path: path.display().to_string(),
-            source,
+        Self::from_toml(&body).map_err(|err| {
+            let (line, message) = describe_parse_error(&body, &err);
+            ConfigError::Parse {
+                path: path.display().to_string(),
+                line,
+                message,
+            }
         })
     }
 }
@@ -580,11 +682,11 @@ where
         let Some(rest) = key.strip_prefix("FRESHDOCK_REGISTRY_") else {
             continue;
         };
-        if let Some(name) = rest.strip_suffix("_USERNAME") {
+        if let Some(name) = named_suffix(rest, "_USERNAME") {
             env.entry(canonicalize_host(&name.to_ascii_lowercase()))
                 .or_default()
                 .0 = Some(value);
-        } else if let Some(name) = rest.strip_suffix("_TOKEN") {
+        } else if let Some(name) = named_suffix(rest, "_TOKEN") {
             env.entry(canonicalize_host(&name.to_ascii_lowercase()))
                 .or_default()
                 .1 = Some(Secret::new(value));
@@ -804,9 +906,9 @@ fn declare_env_targets(
         let Some(rest) = key.strip_prefix("FRESHDOCK_NOTIFY_") else {
             continue;
         };
-        if let Some(name) = rest.strip_suffix("_URL") {
+        if let Some(name) = named_suffix(rest, "_URL") {
             decls.entry(name.to_string()).or_default().0 = Some(value.clone());
-        } else if let Some(name) = rest.strip_suffix("_TRIGGERS") {
+        } else if let Some(name) = named_suffix(rest, "_TRIGGERS") {
             decls.entry(name.to_string()).or_default().1 = Some(value.clone());
         }
     }
@@ -877,7 +979,7 @@ where
         let Some(rest) = key.strip_prefix("FRESHDOCK_NOTIFY_") else {
             continue;
         };
-        if let Some(name) = rest.strip_suffix("_BOT_TOKEN") {
+        if let Some(name) = named_suffix(rest, "_BOT_TOKEN") {
             match index.get(name).and_then(|k| targets.get_mut(k)) {
                 Some(NotificationTarget::Telegram { bot_token, .. }) => {
                     *bot_token = Secret::new(value.clone());
@@ -887,7 +989,7 @@ where
                     "ignoring FRESHDOCK_NOTIFY_*_BOT_TOKEN: no matching telegram target"
                 ),
             }
-        } else if let Some(name) = rest.strip_suffix("_PASSWORD") {
+        } else if let Some(name) = named_suffix(rest, "_PASSWORD") {
             match index.get(name).and_then(|k| targets.get_mut(k)) {
                 Some(NotificationTarget::Smtp { password, .. }) => {
                     *password = Some(Secret::new(value.clone()));
@@ -931,6 +1033,186 @@ mod tests {
             .expect("ghcr alias resolves to ghcr.io");
         assert_eq!(c.username.as_deref(), Some("octocat"));
         assert_eq!(c.token.expose(), "ghp_xxx");
+    }
+
+    #[test]
+    fn unknown_settings_key_is_rejected() {
+        let err = Config::from_toml("[settings]\nwatch_al = true\n").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `watch_al`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_table_is_rejected() {
+        let err = Config::from_toml("[setting]\nwatch_all = true\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field `setting`"), "{err}");
+    }
+
+    #[test]
+    fn unknown_registry_key_is_rejected() {
+        let err = Config::from_toml("[registry.ghcr]\ntoken = \"t\"\nuser = \"x\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field `user`"), "{err}");
+    }
+
+    #[test]
+    fn unknown_notification_key_is_rejected() {
+        let err = Config::from_toml(
+            "[notifications.ops]\ntype = \"webhook\"\nurl = \"https://example.com\"\ntrigger = [\"failed\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `trigger`"), "{err}");
+    }
+
+    /// Env pairs whose values are irrelevant: only the names are classified.
+    fn env_names(names: &[&str]) -> std::vec::IntoIter<(String, String)> {
+        env(&names.iter().map(|n| (*n, "x")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn recognised_env_vars_are_not_reported() {
+        let names = env_names(&[
+            "FRESHDOCK_CONFIG",
+            "FRESHDOCK_INTERVAL",
+            "FRESHDOCK_TICK",
+            "FRESHDOCK_STOP_TIMEOUT",
+            "FRESHDOCK_DEFAULT_MODE",
+            "FRESHDOCK_CLEANUP",
+            "FRESHDOCK_PRUNE_DANGLING",
+            "FRESHDOCK_WATCH_ALL",
+            "FRESHDOCK_COMPOSE_AWARE",
+            "FRESHDOCK_ONE_SHOT_TIMEOUT",
+            "FRESHDOCK_LIVE_REQUIRED",
+            "FRESHDOCK_REGISTRY_GHCR_USERNAME",
+            "FRESHDOCK_REGISTRY_GHCR_TOKEN",
+            "FRESHDOCK_NOTIFY_OPS_URL",
+            "FRESHDOCK_NOTIFY_OPS_TRIGGERS",
+            "FRESHDOCK_NOTIFY_OPS_BOT_TOKEN",
+            "FRESHDOCK_NOTIFY_OPS_PASSWORD",
+            "PATH",
+            "HOME",
+        ]);
+        assert!(
+            unrecognised_env_names(names).is_empty(),
+            "a recognised name must not be reported"
+        );
+    }
+
+    #[test]
+    fn misspelled_env_vars_are_reported() {
+        let names = env_names(&[
+            "FRESHDOCK_WATCH_AL",
+            "FRESHDOCK_NOTIFY_OPS_TRIGGER",
+            "FRESHDOCK_REGISTRY_GHCR_TOKN",
+            "FRESHDOCK_WATCH_ALL",
+        ]);
+        assert_eq!(
+            unrecognised_env_names(names),
+            [
+                "FRESHDOCK_WATCH_AL",
+                "FRESHDOCK_NOTIFY_OPS_TRIGGER",
+                "FRESHDOCK_REGISTRY_GHCR_TOKN"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_parse_error_never_echoes_the_offending_line() {
+        let text = "[registry.ghcr]\ntokne = \"ghp_realsecret\"\n";
+        let err = Config::from_toml(text).unwrap_err();
+        let (line, message) = describe_parse_error(text, &err);
+        let rendered = ConfigError::Parse {
+            path: "freshdock.toml".to_owned(),
+            line,
+            message,
+        }
+        .to_string();
+        assert!(rendered.contains("tokne"), "{rendered}");
+        assert!(
+            !rendered.contains("ghp_realsecret"),
+            "the config error echoed a secret: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_empty_env_name_declares_no_notification_target() {
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY__URL", "https://example.com/hook")]),
+        );
+        assert!(
+            cfg.targets.is_empty(),
+            "an empty <NAME> is reported as unrecognised, so it must not declare a target: {:?}",
+            cfg.targets.keys().collect::<Vec<_>>()
+        );
+
+        let cfg = build_notifications(
+            HashMap::new(),
+            env(&[("FRESHDOCK_NOTIFY_OPS_URL", "https://example.com/hook")]),
+        );
+        assert_eq!(cfg.targets.len(), 1, "an ordinary name still declares one");
+    }
+
+    #[test]
+    fn an_empty_env_name_adds_no_credentials() {
+        let store = build_store(
+            Config::default(),
+            env(&[("FRESHDOCK_REGISTRY__TOKEN", "t")]),
+        );
+        assert!(
+            store.is_empty(),
+            "an empty <NAME> is reported as unrecognised, so it must not add credentials: {:?}",
+            store.hosts()
+        );
+
+        let store = build_store(
+            Config::default(),
+            env(&[("FRESHDOCK_REGISTRY_GHCR_TOKEN", "t")]),
+        );
+        assert_eq!(
+            store.hosts(),
+            ["ghcr.io"],
+            "an ordinary name still resolves"
+        );
+    }
+
+    #[test]
+    fn a_parse_error_never_echoes_a_mistyped_value() {
+        // An unquoted token is a type error, built out of the value itself.
+        let text = "[registry.ghcr]\ntoken = 12345\n";
+        let err = Config::from_toml(text).unwrap_err();
+        let (line, message) = describe_parse_error(text, &err);
+        assert_eq!(line, Some(2));
+        assert!(
+            !message.contains("12345"),
+            "the config error echoed a mistyped secret: {message}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_type_error_still_names_the_expected_type() {
+        let text = "[settings]\ncleanup = \"yes\"\n";
+        let err = Config::from_toml(text).unwrap_err();
+        let (_, message) = describe_parse_error(text, &err);
+        assert!(!message.contains("yes"), "{message}");
+        assert!(message.contains("boolean"), "{message}");
+    }
+
+    #[test]
+    fn a_parse_error_names_the_key_and_its_line() {
+        let text = "[settings]\ncleanup = true\nwatch_al = true\n";
+        let err = Config::from_toml(text).unwrap_err();
+        let (line, message) = describe_parse_error(text, &err);
+        assert_eq!(line, Some(3));
+        assert!(message.contains("unknown field `watch_al`"), "{message}");
+        let rendered = ConfigError::Parse {
+            path: "freshdock.toml".to_owned(),
+            line,
+            message,
+        }
+        .to_string();
+        assert!(rendered.contains("(line 3)"), "{rendered}");
     }
 
     #[test]
@@ -1682,7 +1964,10 @@ mod tests {
                 ("FRESHDOCK_NOTIFY_OPS_TRIGGERS", "bogus"),
             ]),
         );
-        let dispatcher = crate::notify::Dispatcher::from_config(cfg, crate::http::client());
+        let dispatcher = crate::notify::Dispatcher::from_config(
+            cfg,
+            crate::http::client().expect("http client"),
+        );
         assert!(dispatcher.is_empty());
     }
 

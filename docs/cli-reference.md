@@ -98,8 +98,11 @@ the `off` opt-out still apply. A container that is not enabled (no
 `freshdock.enable=true`, unless
 [`watch_all`](configuration.md#watching-every-container) is on) or that opts out
 with `freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or
-`freshdock.mode=off` is refused as a graceful no-op. Any other mode, `watch`
-included, is allowed because you typed the command yourself.
+`freshdock.mode=off` is refused: nothing is touched and the command exits `1`, so
+a script can tell a refusal from a completed update. Any other mode, `watch`
+included, is allowed because you typed the command yourself. Exit `1` means only
+that: an update that was rolled back exits `0` (the previous container is running
+again), and so does a hook skip.
 
 ---
 

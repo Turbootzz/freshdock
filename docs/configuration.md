@@ -189,7 +189,10 @@ stays in the file unless the whole target is declared with
 `FRESHDOCK_NOTIFY_<NAME>_URL`.
 
 The file has three top-level tables, all optional: `[settings]`, `[registry.*]`,
-and `[notifications.*]`.
+and `[notifications.*]`. A key freshdock does not know is a startup error naming
+the key and its line, so a typo like `watch_al` cannot silently turn a setting
+off. The environment layer is more forgiving: an unrecognised `FRESHDOCK_*`
+variable is a startup warning naming the variable, and freshdock carries on.
 
 ### `[settings]`
 

@@ -7,6 +7,7 @@ reference page with the full story.
 
 - [freshdock can't reach the daemon / wrong socket](#freshdock-cant-reach-the-daemon--wrong-socket)
 - [`permission denied` on the Docker socket](#permission-denied-on-the-docker-socket)
+- [`no CA certificates were found`](#no-ca-certificates-were-found)
 - [freshdock sees my container but never updates it](#freshdock-sees-my-container-but-never-updates-it)
 - [My container doesn't appear in `check` at all](#my-container-doesnt-appear-in-check-at-all)
 - [`check` reports an update that never goes away](#check-reports-an-update-that-never-goes-away)
@@ -51,6 +52,26 @@ is mounted; as a host binary, the user needs to be in the `docker` group (or run
 systemd with `SupplementaryGroups=docker`).
 
 See [Deployment: Docker socket permissions](deployment.md#docker-socket-permissions).
+
+## `no CA certificates were found`
+
+The TLS root store is empty, so no HTTPS call to a registry or a notification
+target could be verified. `check` and `run` refuse to start; `recreate` builds no
+HTTP client, so it is unaffected. The official image ships a bundle. For a custom
+image, install `ca-certificates` (Debian/Ubuntu/Alpine package name) or mount the
+host bundle:
+
+```bash
+--mount type=bind,src=<host bundle>,dst=/etc/ssl/certs/ca-certificates.crt,readonly
+```
+
+The host path differs per distribution: Debian/Ubuntu/Alpine
+`/etc/ssl/certs/ca-certificates.crt`, Fedora/RHEL `/etc/pki/tls/certs/ca-bundle.crt`,
+openSUSE `/etc/ssl/ca-bundle.pem`.
+
+If `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, only that location is read and the
+usual system paths are skipped, so a stale value in either produces this error on
+a host that does have a bundle. Unset them, or point them at a real one.
 
 ## freshdock sees my container but never updates it
 

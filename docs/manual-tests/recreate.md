@@ -30,10 +30,12 @@ health is **rolled back** to the previous container.
 ## Steps
 
 `freshdock recreate` is a *manual* admin tool, not the automatic update
-loop. It refuses two opt-out signals (`freshdock.enable` not `true`, or
-`freshdock.mode=off`) and otherwise honours the operator's explicit
-invocation regardless of the scheduler mode (`live`, `nightly`,
-`weekly`, `monthly`, `watch`). This is why the test container below
+loop. It exits 1 without touching a container that is not enabled (no
+`freshdock.enable=true`, unless `watch_all` is on) or that opts out with
+`freshdock.enable=false`, `com.centurylinklabs.watchtower.enable=false`, or
+`freshdock.mode=off`, and otherwise honours the operator's explicit invocation
+regardless of the scheduler mode (`live`, `nightly`, `weekly`, `monthly`,
+`watch`). This is why the test container below
 uses `mode=watch`: a watch-mode container is *never* touched by the
 automatic loop, but is a fine target for a manual `recreate`.
 
