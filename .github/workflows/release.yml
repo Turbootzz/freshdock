@@ -162,11 +162,6 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Merged PRs since the previous release (prereleases count as "previous"),
-      # filtered by .github/release.yml. Generated here rather than via the
-      # action's `generate_release_notes`, which appends to an existing body on a
-      # re-run (softprops/action-gh-release#827) — an explicit body is idempotent
-      # whether or not the release already exists.
       - name: Generate release notes
         env:
           GH_TOKEN: ${{ github.token }}
