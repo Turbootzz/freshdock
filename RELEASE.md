@@ -55,15 +55,28 @@ release-plz here runs `release-pr` **only**; it never tags, releases, or publish
       are updated. The tag you push must equal that version (the `publish` job
       hard-fails on a mismatch).
 
-Release notes need no manual step: the GitHub Release body is auto-generated
-from the merged PRs since the previous release (`generate_release_notes` in
-`release.yml`, filtered by `.github/release.yml`). One caveat, fixable after
-the fact with `gh release edit`: GitHub picks the previous *release* as the
+Release notes need no manual step: the `release` job generates the body from the
+merged PRs since the previous release (the `generate-notes` API, filtered by
+`.github/release.yml`) and writes it to the release. It **owns** the title and
+body — a description typed by hand is overwritten on the next run of the job, so
+edit the release only after the workflow is done.
+
+One caveat, fixable after the fact: GitHub picks the previous *release* as the
 baseline, prereleases included. A stable release cut right after an `-rc`
-rehearsal only lists the PRs merged since the rc; regenerate against the last
-stable tag if that matters.
+rehearsal only lists the PRs merged since the rc. Regenerate against the last
+stable tag if that matters:
+
+```bash
+gh api --method POST repos/Turbootzz/freshdock/releases/generate-notes \
+  -f tag_name=v1.6.0 -f previous_tag_name=v1.5.0 --jq .body \
+  | gh release edit v1.6.0 --notes-file -
+```
 
 ## Cut the release (MANUAL)
+
+Push the tag from the CLI. The GitHub "Draft a new release" UI publishes the
+release before the workflow ever sees the tag, and the workflow then overwrites
+the title and description you typed there with the generated notes.
 
 ```bash
 git tag v1.0.0
