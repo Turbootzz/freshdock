@@ -162,14 +162,18 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # On a re-run the action appends freshly generated notes to the existing
-      # body (softprops/action-gh-release#827), so only generate on first create.
-      - name: Check for existing release
+      # A re-run would append freshly generated notes to the existing body
+      # (softprops/action-gh-release#827), so key off the body rather than the
+      # release: a tag cut from the GitHub Releases UI creates the release first
+      # with an empty body, and that one still needs its notes generated.
+      - name: Check for existing release notes
         id: exists
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          body="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json body --jq .body 2>/dev/null || true)"
+          if [ -n "$body" ]; then
             echo "new=false" >> "$GITHUB_OUTPUT"
           else
             echo "new=true" >> "$GITHUB_OUTPUT"

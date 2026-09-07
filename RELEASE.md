@@ -65,6 +65,10 @@ stable tag if that matters.
 
 ## Cut the release (MANUAL)
 
+Push the tag from the CLI. Do **not** use the GitHub "Draft a new release" UI:
+it publishes the release itself, and the workflow then only attaches binaries to
+whatever body you typed there.
+
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
