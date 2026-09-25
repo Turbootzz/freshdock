@@ -6,6 +6,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{CreateContainerOptions, CreateContainerOptionsBuilder};
 
+use crate::nerdctl::spec::NerdctlSpec;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SpecError {
     #[error("inspect response is missing the {0} field")]
@@ -32,9 +34,14 @@ pub struct ContainerSpec {
 }
 
 /// The runtime-specific part of a [`ContainerSpec`].
+///
+/// The Docker variant is much larger, but a spec lives only for one
+/// container's update, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum SpecBody {
     Docker(DockerSpec),
+    Nerdctl(NerdctlSpec),
 }
 
 /// A container's settings as the Docker API reports them, replayed verbatim
@@ -48,56 +55,92 @@ pub struct DockerSpec {
 
 impl ContainerSpec {
     /// The Docker-API settings.
+    ///
+    /// # Panics
+    ///
+    /// On a spec another backend produced. A process drives one runtime, so a
+    /// spec only ever reaches the backend whose `inspect` built it.
     pub fn docker(&self) -> &DockerSpec {
         match &self.body {
             SpecBody::Docker(d) => d,
+            SpecBody::Nerdctl(_) => panic!("a nerdctl container spec reached the Docker backend"),
         }
     }
 
     pub fn docker_mut(&mut self) -> &mut DockerSpec {
         match &mut self.body {
             SpecBody::Docker(d) => d,
+            SpecBody::Nerdctl(_) => panic!("a nerdctl container spec reached the Docker backend"),
+        }
+    }
+
+    /// The nerdctl settings. Panics on a Docker spec, as [`docker`](Self::docker)
+    /// does the other way round.
+    pub fn nerdctl(&self) -> &NerdctlSpec {
+        match &self.body {
+            SpecBody::Nerdctl(n) => n,
+            SpecBody::Docker(_) => panic!("a Docker container spec reached the nerdctl backend"),
         }
     }
 
     pub fn labels(&self) -> Option<&HashMap<String, String>> {
-        self.docker().config.labels.as_ref()
+        match &self.body {
+            SpecBody::Docker(d) => d.config.labels.as_ref(),
+            SpecBody::Nerdctl(n) => Some(&n.labels),
+        }
     }
 
     /// The signal a stop sends first; `None` means the runtime's default.
     pub fn stop_signal(&self) -> Option<&str> {
-        self.docker().config.stop_signal.as_deref()
+        match &self.body {
+            SpecBody::Docker(d) => d.config.stop_signal.as_deref(),
+            SpecBody::Nerdctl(n) => n.stop_signal(),
+        }
     }
 
     /// Seconds a stop waits before killing; `None` means the runtime's default.
     pub fn stop_timeout(&self) -> Option<i64> {
-        self.docker().config.stop_timeout
+        match &self.body {
+            SpecBody::Docker(d) => d.config.stop_timeout,
+            SpecBody::Nerdctl(n) => n.stop_timeout(),
+        }
     }
 
     /// `HostConfig.NetworkMode`: `bridge`, a network name, `container:<ref>`, …
     pub fn network_mode(&self) -> Option<&str> {
-        self.docker()
-            .host_config
-            .as_ref()
-            .and_then(|hc| hc.network_mode.as_deref())
+        match &self.body {
+            SpecBody::Docker(d) => d
+                .host_config
+                .as_ref()
+                .and_then(|hc| hc.network_mode.as_deref()),
+            SpecBody::Nerdctl(n) => n.network_mode(),
+        }
     }
 
     pub fn set_network_mode(&mut self, mode: String) {
-        self.docker_mut()
-            .host_config
-            .get_or_insert_with(HostConfig::default)
-            .network_mode = Some(mode);
+        match &mut self.body {
+            SpecBody::Docker(d) => {
+                d.host_config
+                    .get_or_insert_with(HostConfig::default)
+                    .network_mode = Some(mode)
+            }
+            SpecBody::Nerdctl(n) => n.set_network_mode(mode),
+        }
     }
 
     /// Forget the settings that belong to a container's *own* network stack:
     /// hostname, domain name, exposed ports and network endpoints. For a
     /// container that borrows another's network namespace, which has none.
     pub fn drop_own_network_identity(&mut self) {
-        let docker = self.docker_mut();
-        docker.config.hostname = None;
-        docker.config.domainname = None;
-        docker.config.exposed_ports = None;
-        docker.network_endpoints = None;
+        match &mut self.body {
+            SpecBody::Docker(docker) => {
+                docker.config.hostname = None;
+                docker.config.domainname = None;
+                docker.config.exposed_ports = None;
+                docker.network_endpoints = None;
+            }
+            SpecBody::Nerdctl(n) => n.drop_own_network_identity(),
+        }
     }
 
     pub fn from_inspect(resp: ContainerInspectResponse) -> Result<Self, SpecError> {

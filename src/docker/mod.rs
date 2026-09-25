@@ -477,7 +477,7 @@ pub(crate) fn container_name(c: &ContainerInfo) -> String {
 /// Re-attachment repairs a bystander rather than updating it, so it
 /// deliberately ignores the `freshdock.enable` policy gate — only the
 /// *explicit* opt-out signals are honoured (see [`explicitly_opts_out`]).
-fn network_dependent_names(
+pub(crate) fn network_dependent_names(
     running: &[ContainerInfo],
     owner_name: &str,
     full_id: &str,
