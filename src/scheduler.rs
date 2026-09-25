@@ -817,11 +817,12 @@ mod tests {
     use super::*;
     use crate::docker::DockerError;
     use crate::docker::check::{ContainerImage, LocalImage};
+    use crate::docker::container::ContainerInfo;
     use crate::docker::spec::ContainerSpec;
     use crate::health::{ContainerRuntimeState, TokioClock};
     use crate::registry::{Digest, ImageRef, RegistryError};
     use async_trait::async_trait;
-    use bollard::models::{ContainerConfig, ContainerSummary};
+    use bollard::models::ContainerConfig;
     use chrono::TimeZone;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -931,8 +932,8 @@ mod tests {
 
     // --- run_tick behaviour with a recording fake ---
 
-    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerInfo {
+        ContainerInfo {
             names: Some(vec![format!("/{name}")]),
             id: Some(format!("id-{name}")),
             image: Some(image.to_owned()),
@@ -950,7 +951,7 @@ mod tests {
     /// serves a fixed container list + local digest, reports healthy, and
     /// counts `create_from_spec` calls so "did a recreate happen?" is checkable.
     struct FakeNode {
-        containers: Mutex<Vec<ContainerSummary>>,
+        containers: Mutex<Vec<ContainerInfo>>,
         /// Every digest the local image is recorded under — a list so the
         /// republished-index case (#74) is expressible.
         local_digests: Vec<String>,
@@ -977,12 +978,12 @@ mod tests {
     }
 
     impl FakeNode {
-        fn new(containers: Vec<ContainerSummary>, local_digest: &str) -> Self {
+        fn new(containers: Vec<ContainerInfo>, local_digest: &str) -> Self {
             Self::with_digests(containers, &[local_digest])
         }
         /// The image recorded under several manifest digests, as a republished
         /// multi-arch index leaves it (#74).
-        fn with_digests(containers: Vec<ContainerSummary>, local_digests: &[&str]) -> Self {
+        fn with_digests(containers: Vec<ContainerInfo>, local_digests: &[&str]) -> Self {
             Self {
                 containers: Mutex::new(containers),
                 local_digests: local_digests.iter().map(|d| (*d).to_owned()).collect(),
@@ -1066,7 +1067,7 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeNode {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             if self.list_fails {
                 Err(err())
             } else {
@@ -1123,9 +1124,11 @@ mod tests {
                 name: name.to_owned(),
                 image_ref: "alpine:3.19".to_owned(),
                 image_id: Some("sha256:oldimg".to_owned()),
-                config: ContainerConfig::default(),
-                host_config: None,
-                network_endpoints: None,
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: ContainerConfig::default(),
+                    host_config: None,
+                    network_endpoints: None,
+                }),
             })
         }
         async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
@@ -1778,12 +1781,12 @@ mod tests {
     const COMPOSE_IMAGE: &str = "app:latest";
 
     /// A running, live-mode compose member of project `stack`.
-    fn compose_summary(service: &str, deps: &str) -> ContainerSummary {
+    fn compose_summary(service: &str, deps: &str) -> ContainerInfo {
         compose_summary_with(service, deps, &[])
     }
 
     /// As [`compose_summary`], plus any extra freshdock labels.
-    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerSummary {
+    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerInfo {
         let mut labels = vec![
             ("freshdock.enable", "true"),
             ("freshdock.mode", "live"),
@@ -1796,7 +1799,7 @@ mod tests {
     }
 
     /// The same container as `list_project` reports it.
-    fn compose_member(summary: &ContainerSummary) -> crate::compose::ProjectMember {
+    fn compose_member(summary: &ContainerInfo) -> crate::compose::ProjectMember {
         crate::compose::ProjectMember {
             name: container_name(summary),
             id: summary.id.clone().unwrap_or_default(),
@@ -1807,7 +1810,7 @@ mod tests {
         }
     }
 
-    fn compose_node() -> (FakeNode, Vec<ContainerSummary>) {
+    fn compose_node() -> (FakeNode, Vec<ContainerInfo>) {
         let running = vec![compose_summary("web", ""), compose_summary("worker", "")];
         let members = running.iter().map(compose_member).collect();
         (
@@ -1959,16 +1962,16 @@ mod tests {
     }
 
     /// Give a summary a fixed container id, for the self-guard tests.
-    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_id(summary: ContainerInfo, id: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             ..summary
         }
     }
 
     /// Give a summary the id of the image it actually runs.
-    fn with_image_id(summary: ContainerSummary, image_id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_image_id(summary: ContainerInfo, image_id: &str) -> ContainerInfo {
+        ContainerInfo {
             image_id: Some(image_id.to_owned()),
             ..summary
         }
@@ -2123,7 +2126,7 @@ mod tests {
         );
     }
 
-    fn live_labels_for(name: &str, image: &str) -> ContainerSummary {
+    fn live_labels_for(name: &str, image: &str) -> ContainerInfo {
         summary(
             name,
             image,
@@ -2360,7 +2363,7 @@ mod tests {
         )
     }
 
-    fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerSummary> {
+    fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerInfo> {
         vec![summary(
             "web",
             "alpine:3.19",
@@ -2799,7 +2802,7 @@ mod tests {
     async fn a_restarted_dependent_keeps_its_own_rejected_digest() {
         // `web` is bumped because `db` moved, not because its own image did.
         let db = compose_summary("db", "");
-        let web = ContainerSummary {
+        let web = ContainerInfo {
             image: Some("other:latest".to_owned()),
             ..compose_summary_with("web", "db:service_healthy:true", &[])
         };

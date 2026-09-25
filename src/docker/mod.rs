@@ -1,4 +1,5 @@
 pub mod check;
+pub mod container;
 pub mod inspect;
 pub mod recreate;
 pub mod rename;
@@ -9,10 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bollard::auth::DockerCredentials;
-use bollard::models::{
-    ContainerState, ContainerStateStatusEnum, ContainerSummary, ContainerSummaryStateEnum,
-    HealthStatusEnum,
-};
+use bollard::models::{ContainerState, ContainerStateStatusEnum, HealthStatusEnum};
 use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptions, PruneImagesOptionsBuilder,
     RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RenameContainerOptionsBuilder,
@@ -23,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::compose::{self, ProjectMember};
 use crate::config::CredentialStore;
+use crate::docker::container::{ContainerInfo, ListedState};
 use crate::docker::recreate::{DockerOps, HookStatus};
 use crate::docker::spec::ContainerSpec;
 use crate::health::{ContainerRuntimeState, HealthProbe};
@@ -50,6 +49,42 @@ pub enum DockerError {
         api_version: String,
         networks: usize,
     },
+    /// The runtime has no such container or image. Backends without typed
+    /// errors report this; the Docker backend keeps bollard's 404.
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// The runtime refused because of the current state, e.g. an image still in
+    /// use. Backends without typed errors report this; the Docker backend keeps
+    /// bollard's 409.
+    #[error("conflict: {0}")]
+    Conflict(String),
+}
+
+impl DockerError {
+    /// Did the runtime say the object does not exist?
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            DockerError::NotFound(_) => true,
+            DockerError::Bollard(e) => bollard_status(e) == Some(404),
+            _ => false,
+        }
+    }
+
+    /// Did the runtime refuse because of the object's current state?
+    pub fn is_conflict(&self) -> bool {
+        match self {
+            DockerError::Conflict(_) => true,
+            DockerError::Bollard(e) => bollard_status(e) == Some(409),
+            _ => false,
+        }
+    }
+}
+
+fn bollard_status(e: &bollard::errors::Error) -> Option<u16> {
+    match e {
+        bollard::errors::Error::DockerResponseServerError { status_code, .. } => Some(*status_code),
+        _ => None,
+    }
 }
 
 pub struct Docker {
@@ -91,12 +126,13 @@ impl Docker {
         })
     }
 
-    pub async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+    pub async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
         let opts = ListContainersOptions {
             all: false,
             ..Default::default()
         };
-        Ok(self.client.list_containers(Some(opts)).await?)
+        let summaries = self.client.list_containers(Some(opts)).await?;
+        Ok(summaries.into_iter().map(ContainerInfo::from).collect())
     }
 
     /// Every container labelled into `project`, running or not (issue #78).
@@ -115,7 +151,10 @@ impl Docker {
             ..Default::default()
         };
         let summaries = self.client.list_containers(Some(opts)).await?;
-        let mut members: Vec<ProjectMember> = summaries.iter().map(project_member).collect();
+        let mut members: Vec<ProjectMember> = summaries
+            .into_iter()
+            .map(|s| project_member(&ContainerInfo::from(s)))
+            .collect();
         crate::rollout::resolve_member_images(self, &mut members).await?;
         Ok(members)
     }
@@ -397,7 +436,7 @@ fn multi_network_guard(api_version: &str, networks: usize) -> Result<(), DockerE
 /// `running` counts `restarting` and `paused` as up: neither has *finished*,
 /// and reading a crash-looping migration as exited would let a rollout treat it
 /// as completed.
-fn project_member(c: &ContainerSummary) -> ProjectMember {
+fn project_member(c: &ContainerInfo) -> ProjectMember {
     ProjectMember {
         name: container_name(c),
         id: c.id.clone().unwrap_or_default(),
@@ -406,18 +445,14 @@ fn project_member(c: &ContainerSummary) -> ProjectMember {
         labels: c.labels.clone().unwrap_or_default(),
         running: matches!(
             c.state,
-            Some(
-                ContainerSummaryStateEnum::RUNNING
-                    | ContainerSummaryStateEnum::RESTARTING
-                    | ContainerSummaryStateEnum::PAUSED
-            )
+            ListedState::Running | ListedState::Restarting | ListedState::Paused
         ),
     }
 }
 
 /// Container name from a summary (leading `/` trimmed), falling back to id.
 /// Shared by the scheduler's per-tick sweep and the network-dependent scan.
-pub(crate) fn container_name(c: &ContainerSummary) -> String {
+pub(crate) fn container_name(c: &ContainerInfo) -> String {
     c.names
         .as_ref()
         .and_then(|n| n.first())
@@ -436,7 +471,7 @@ pub(crate) fn container_name(c: &ContainerSummary) -> String {
 /// deliberately ignores the `freshdock.enable` policy gate — only the
 /// *explicit* opt-out signals are honoured (see [`explicitly_opts_out`]).
 fn network_dependent_names(
-    running: &[ContainerSummary],
+    running: &[ContainerInfo],
     owner_name: &str,
     full_id: &str,
     self_hostname: Option<&str>,
@@ -444,10 +479,7 @@ fn network_dependent_names(
     running
         .iter()
         .filter_map(|summary| {
-            let mode = summary
-                .host_config
-                .as_ref()
-                .and_then(|hc| hc.network_mode.as_deref())?;
+            let mode = summary.network_mode.as_deref()?;
             if !network_mode_references(mode, owner_name, full_id) {
                 return None;
             }
@@ -487,7 +519,7 @@ fn network_dependent_names(
 /// listing row. Absent labels deliberately do *not* opt out: the whole point of
 /// the re-attach pass is repairing an unlabelled bystander whose namespace *we*
 /// broke.
-fn explicitly_opts_out(summary: &ContainerSummary) -> bool {
+fn explicitly_opts_out(summary: &ContainerInfo) -> bool {
     summary
         .labels
         .as_ref()
@@ -560,7 +592,11 @@ impl DockerOps for Docker {
     /// to several networks can only be re-created in one call from API 1.44
     /// (Docker 25.0) onwards.
     async fn preflight_recreate(&self, spec: &ContainerSpec) -> Result<(), DockerError> {
-        let networks = spec.network_endpoints.as_ref().map_or(0, |e| e.len());
+        let networks = spec
+            .docker()
+            .network_endpoints
+            .as_ref()
+            .map_or(0, |e| e.len());
         debug!(container = %spec.name, networks, api_version = %self.api_version, "preflight");
         multi_network_guard(&self.api_version, networks)
     }
@@ -882,13 +918,10 @@ mod tests {
         ));
     }
 
-    fn summary(name: &str, network_mode: Option<&str>) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(name: &str, network_mode: Option<&str>) -> ContainerInfo {
+        ContainerInfo {
             names: Some(vec![format!("/{name}")]),
-            host_config: Some(bollard::models::ContainerSummaryHostConfig {
-                network_mode: network_mode.map(str::to_owned),
-                ..Default::default()
-            }),
+            network_mode: network_mode.map(str::to_owned),
             ..Default::default()
         }
     }
@@ -899,8 +932,8 @@ mod tests {
         network_mode: &str,
         id: &str,
         labels: &[(&str, &str)],
-    ) -> ContainerSummary {
-        ContainerSummary {
+    ) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             labels: Some(
                 labels
@@ -1064,18 +1097,46 @@ mod tests {
     #[test]
     fn container_name_trims_slash_and_falls_back_to_id() {
         assert_eq!(
-            container_name(&ContainerSummary {
+            container_name(&ContainerInfo {
                 names: Some(vec!["/fd-peer".to_owned()]),
                 ..Default::default()
             }),
             "fd-peer"
         );
         assert_eq!(
-            container_name(&ContainerSummary {
+            container_name(&ContainerInfo {
                 id: Some("deadbeef".to_owned()),
                 ..Default::default()
             }),
             "deadbeef"
         );
+    }
+
+    fn server_error(status_code: u16) -> DockerError {
+        DockerError::Bollard(bollard::errors::Error::DockerResponseServerError {
+            status_code,
+            message: "daemon said no".to_owned(),
+        })
+    }
+
+    #[test]
+    fn docker_404_and_409_classify_like_the_neutral_variants() {
+        assert!(server_error(404).is_not_found());
+        assert!(!server_error(404).is_conflict());
+        assert!(server_error(409).is_conflict());
+        assert!(!server_error(409).is_not_found());
+        assert!(DockerError::NotFound("web".to_owned()).is_not_found());
+        assert!(DockerError::Conflict("image in use".to_owned()).is_conflict());
+    }
+
+    #[test]
+    fn other_errors_are_neither_not_found_nor_conflict() {
+        for e in [
+            server_error(500),
+            DockerError::Spec(crate::docker::spec::SpecError::Missing("Config")),
+        ] {
+            assert!(!e.is_not_found(), "{e}");
+            assert!(!e.is_conflict(), "{e}");
+        }
     }
 }

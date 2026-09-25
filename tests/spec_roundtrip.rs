@@ -189,24 +189,27 @@ fn unset_fields_in_inspect_stay_none_in_spec_and_create_body() {
     let spec = ContainerSpec::from_inspect(inspect).expect("minimal spec should build");
 
     assert!(
-        spec.config.healthcheck.is_none(),
+        spec.docker().config.healthcheck.is_none(),
         "no healthcheck in source must not synthesize one in spec"
     );
-    assert!(spec.host_config.is_none(), "no HostConfig must stay None");
     assert!(
-        spec.network_endpoints.is_none(),
+        spec.docker().host_config.is_none(),
+        "no HostConfig must stay None"
+    );
+    assert!(
+        spec.docker().network_endpoints.is_none(),
         "no NetworkSettings.Networks must stay None"
     );
     assert!(
-        spec.config.env.is_none(),
+        spec.docker().config.env.is_none(),
         "no env must stay None, not Some(vec![])"
     );
     assert!(
-        spec.config.entrypoint.is_none(),
+        spec.docker().config.entrypoint.is_none(),
         "no entrypoint must stay None"
     );
     assert!(
-        spec.config.stop_signal.is_none(),
+        spec.docker().config.stop_signal.is_none(),
         "no stop_signal must stay None"
     );
 

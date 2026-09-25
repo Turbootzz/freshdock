@@ -8,7 +8,7 @@
 //! flow. A registry that needs (or rejects) credentials surfaces as
 //! [`ProbeOutcome::AuthRequired`].
 
-use bollard::models::ContainerSummary;
+use crate::docker::container::ContainerInfo;
 use tracing::warn;
 
 use crate::docker::DockerError;
@@ -117,7 +117,7 @@ impl ProbeTarget {
 /// image id is `Config.Image` verbatim, so it needs no inspect.
 pub async fn resolve_target(
     docker: &impl DockerCheck,
-    container: &ContainerSummary,
+    container: &ContainerInfo,
 ) -> Result<ProbeTarget, DockerError> {
     let image = container
         .image
@@ -160,7 +160,7 @@ pub async fn probe_image(
         return ProbeOutcome::Pinned;
     }
 
-    // ContainerSummary.image_id is the image *config* digest, not the *manifest*
+    // ContainerInfo.image_id is the image *config* digest, not the *manifest*
     // digest the registry returns via Docker-Content-Digest. Resolve the local
     // manifest digest from `image inspect → RepoDigests`.
     let (local, tag_image_id) = match docker.inspect_image(image).await {
@@ -260,9 +260,9 @@ pub(crate) fn strip_tag(image_no_digest: &str) -> &str {
 mod tests {
     use super::*;
     use crate::docker::check::{ContainerImage, LocalImage};
+    use crate::docker::container::ContainerInfo;
     use crate::registry::Digest;
     use async_trait::async_trait;
-    use bollard::models::ContainerSummary;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -599,7 +599,7 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeDocker {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             Ok(vec![])
         }
         async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
@@ -732,8 +732,8 @@ mod tests {
     const OLD_ID: &str = "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
     const NEW_ID: &str = "sha256:0e7f2f0e2e8b4a4b8c3d1a5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
 
-    fn summary(id: &str, image: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(id: &str, image: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             image: Some(image.to_owned()),
             ..Default::default()
@@ -828,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_target_uses_the_listing_when_it_names_a_reference() {
         let docker = FakeDocker::new(&[]);
-        let summary = ContainerSummary {
+        let summary = ContainerInfo {
             image_id: Some(OLD_ID.to_owned()),
             ..summary("c1", "nginx:alpine")
         };
@@ -852,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_target_errors_when_the_listing_has_no_image() {
         let docker = FakeDocker::new(&[]);
-        let summary = ContainerSummary {
+        let summary = ContainerInfo {
             image: None,
             ..summary("c1", "ignored")
         };

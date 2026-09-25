@@ -9,13 +9,13 @@ use tracing::warn;
 use crate::config::{CredentialStore, ResolvedSettings};
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
+use crate::docker::container::ContainerInfo;
 use crate::errors::AppError;
 use crate::format::short_digest;
 use crate::labels::{self, Mode, PolicyDefaults};
 use crate::probe::{self, ProbeOutcome, ProbeTarget, pinned_digest};
 use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
-use bollard::models::ContainerSummary;
 
 const AUTH_REQUIRED: &str = "auth required (set credentials)";
 const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
@@ -68,7 +68,7 @@ async fn collect_cells(
 
     let empty = HashMap::new();
 
-    let mut pending: Vec<(String, Mode, ContainerSummary)> = Vec::new();
+    let mut pending: Vec<(String, Mode, ContainerInfo)> = Vec::new();
     for c in containers {
         let lbls = c.labels.as_ref().unwrap_or(&empty);
         // Warn-and-skip like the scheduler: one bad label (on any container,
@@ -303,8 +303,8 @@ mod tests {
     const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const DIG_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerInfo {
+        ContainerInfo {
             names: Some(vec![format!("/{name}")]),
             id: Some(format!("id-{name}")),
             image: Some(image.to_owned()),
@@ -321,7 +321,7 @@ mod tests {
     /// Recording fake daemon: serves a fixed container list + per-image
     /// `LocalImage`s, and counts `inspect_image` calls for the dedupe contract.
     struct FakeDocker {
-        containers: Vec<ContainerSummary>,
+        containers: Vec<ContainerInfo>,
         images: HashMap<String, LocalImage>,
         config_images: HashMap<String, String>,
         failing: HashSet<String>,
@@ -329,7 +329,7 @@ mod tests {
     }
 
     impl FakeDocker {
-        fn new(containers: Vec<ContainerSummary>, repo_digests: &[(&str, &str)]) -> Self {
+        fn new(containers: Vec<ContainerInfo>, repo_digests: &[(&str, &str)]) -> Self {
             let one_each: Vec<(&str, &[&str])> = repo_digests
                 .iter()
                 .map(|(img, rd)| (*img, std::slice::from_ref(rd)))
@@ -338,10 +338,7 @@ mod tests {
         }
         /// Images recorded under several manifest digests each — what a
         /// republished multi-arch index leaves behind (#74).
-        fn with_digests(
-            containers: Vec<ContainerSummary>,
-            repo_digests: &[(&str, &[&str])],
-        ) -> Self {
+        fn with_digests(containers: Vec<ContainerInfo>, repo_digests: &[(&str, &[&str])]) -> Self {
             Self {
                 containers,
                 images: repo_digests
@@ -380,7 +377,7 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeDocker {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             Ok(self.containers.clone())
         }
         async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
@@ -665,8 +662,8 @@ mod tests {
     }
 
     /// Give a summary a fixed container id, for the self-guard tests.
-    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_id(summary: ContainerInfo, id: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             ..summary
         }
@@ -780,8 +777,8 @@ mod tests {
         image: &str,
         image_id: Option<&str>,
         labels: &[(&str, &str)],
-    ) -> ContainerSummary {
-        ContainerSummary {
+    ) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             image_id: image_id.map(str::to_owned),
             ..summary(name, image, labels)
@@ -880,7 +877,7 @@ mod tests {
     #[tokio::test]
     async fn missing_image_in_the_listing_renders_a_placeholder() {
         let docker = FakeDocker::new(
-            vec![ContainerSummary {
+            vec![ContainerInfo {
                 image: None,
                 ..summary("web", "ignored", &[("freshdock.enable", "true")])
             }],

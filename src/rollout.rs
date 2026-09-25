@@ -764,7 +764,7 @@ where
         // here is logged and the rollout still stands. The stop still honours
         // the container's own StopSignal/StopTimeout, as a recreate would.
         let (signal, timeout) = match ops.inspect(&container).await {
-            Ok(spec) => (spec.config.stop_signal.clone(), spec.config.stop_timeout),
+            Ok(spec) => (spec.stop_signal().map(str::to_owned), spec.stop_timeout()),
             Err(e) => {
                 warn!(project = %plan.project, %container, error = %e, "rollout: could not read the dependent's stop options; using the daemon defaults");
                 (None, None)
@@ -1412,14 +1412,16 @@ mod tests {
                 name: member.name.clone(),
                 image_ref: member.image_ref.clone(),
                 image_id: Some("sha256:old".to_owned()),
-                config: bollard::models::ContainerConfig {
-                    labels: Some(member.labels.clone()),
-                    stop_signal: Some("SIGQUIT".to_owned()),
-                    stop_timeout: Some(45),
-                    ..Default::default()
-                },
-                host_config: None,
-                network_endpoints: None,
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: bollard::models::ContainerConfig {
+                        labels: Some(member.labels.clone()),
+                        stop_signal: Some("SIGQUIT".to_owned()),
+                        stop_timeout: Some(45),
+                        ..Default::default()
+                    },
+                    host_config: None,
+                    network_endpoints: None,
+                }),
             })
         }
 
