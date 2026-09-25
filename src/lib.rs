@@ -8,6 +8,7 @@ pub mod format;
 pub mod health;
 pub mod http;
 pub mod labels;
+pub mod nerdctl;
 pub mod notify;
 pub mod probe;
 pub mod registry;

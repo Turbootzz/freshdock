@@ -4,12 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use crate::config::{CredentialStore, ResolvedSettings};
+use crate::config::{CredentialStore, ResolvedSettings, Runtime, RuntimeSettings};
 use crate::docker::Docker;
 use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe, TokioClock};
 use crate::labels::{self, Mode};
+use crate::nerdctl::Nerdctl;
 use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
@@ -55,17 +56,35 @@ pub async fn run(
     name: String,
     credentials: Arc<CredentialStore>,
     settings: ResolvedSettings,
+    runtime: RuntimeSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(credentials).await?;
-    run_with(
-        &docker,
-        &name,
-        &HealthConfig::default(),
-        &TokioClock,
-        settings,
-        current_unix_timestamp,
-    )
-    .await
+    let health = HealthConfig::default();
+    match runtime.runtime {
+        Runtime::Docker => {
+            let docker = Docker::connect(credentials).await?;
+            run_with(
+                &docker,
+                &name,
+                &health,
+                &TokioClock,
+                settings,
+                current_unix_timestamp,
+            )
+            .await
+        }
+        Runtime::Nerdctl => {
+            let nerdctl = Nerdctl::connect(&runtime, credentials).await?;
+            run_with(
+                &nerdctl,
+                &name,
+                &health,
+                &TokioClock,
+                settings,
+                current_unix_timestamp,
+            )
+            .await
+        }
+    }
 }
 
 /// Testable core of `recreate`: parameterised over the daemon ops, health

@@ -58,6 +58,13 @@ pub enum DockerError {
     /// bollard's 409.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Any other runtime failure a backend without typed errors reports, e.g.
+    /// a nerdctl command that failed or printed output freshdock can't read.
+    #[error("container runtime error: {0}")]
+    Runtime(String),
+    /// The runtime cannot do this (yet); refused before anything is touched.
+    #[error("not supported: {0}")]
+    Unsupported(String),
 }
 
 impl DockerError {

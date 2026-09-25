@@ -1,7 +1,8 @@
 //! `freshdock run` — the scheduler daemon entry point (Phase 4).
 //!
-//! Wires the live Docker daemon + OCI registry into [`scheduler::run_with`],
-//! installs SIGINT/SIGTERM handlers that flip a shutdown flag, and bounds the
+//! Wires the configured runtime (the Docker daemon, or containerd through
+//! nerdctl) + OCI registry into [`scheduler::run_with`], installs
+//! SIGINT/SIGTERM handlers that flip a shutdown flag, and bounds the
 //! post-signal drain by `--stop-timeout`.
 
 use std::sync::Arc;
@@ -11,10 +12,15 @@ use chrono::Local;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{CredentialStore, NotificationConfig, ResolvedSettings};
+use crate::config::{
+    CredentialStore, NotificationConfig, ResolvedSettings, Runtime, RuntimeSettings,
+};
 use crate::docker::Docker;
+use crate::docker::check::DockerCheck;
+use crate::docker::recreate::DockerOps;
 use crate::errors::AppError;
-use crate::health::{HealthConfig, TokioClock};
+use crate::health::{HealthConfig, HealthProbe, TokioClock};
+use crate::nerdctl::Nerdctl;
 use crate::notify::Dispatcher;
 use crate::registry::digest::OciRegistry;
 use crate::scheduler::{self, SchedulerConfig};
@@ -27,14 +33,66 @@ pub async fn run(
     credentials: Arc<CredentialStore>,
     notifications: NotificationConfig,
     settings: ResolvedSettings,
+    runtime: RuntimeSettings,
 ) -> Result<(), AppError> {
     info!(
         version = env!("CARGO_PKG_VERSION"),
         "freshdock daemon starting"
     );
-    // Built before the Docker connect so a missing CA store fails the start.
+    // Built before the runtime connect so a missing CA store fails the start.
     let client = crate::http::client()?;
-    let docker = Docker::connect(credentials.clone()).await?;
+    let timing = Timing {
+        interval,
+        tick,
+        stop_timeout,
+    };
+    match runtime.runtime {
+        Runtime::Docker => {
+            let docker = Docker::connect(credentials.clone()).await?;
+            serve(
+                &docker,
+                client,
+                credentials,
+                notifications,
+                settings,
+                timing,
+            )
+            .await
+        }
+        Runtime::Nerdctl => {
+            let nerdctl = Nerdctl::connect(&runtime, credentials.clone()).await?;
+            serve(
+                &nerdctl,
+                client,
+                credentials,
+                notifications,
+                settings,
+                timing,
+            )
+            .await
+        }
+    }
+}
+
+/// The `run` flags, in seconds.
+struct Timing {
+    interval: u64,
+    tick: u64,
+    stop_timeout: u64,
+}
+
+/// Everything after the runtime connect: the same daemon loop for every runtime.
+async fn serve<D>(
+    docker: &D,
+    client: reqwest::Client,
+    credentials: Arc<CredentialStore>,
+    notifications: NotificationConfig,
+    settings: ResolvedSettings,
+    timing: Timing,
+) -> Result<(), AppError>
+where
+    D: DockerCheck + DockerOps + HealthProbe + Sync,
+{
     let registry = OciRegistry::with_client(client.clone(), credentials);
     // Build the dispatcher once from config, sharing one HTTP client with the
     // backends. A target that fails to build is skipped with a WARN.
@@ -44,8 +102,8 @@ pub async fn run(
     // `tokio::time::interval` panics on a zero period, and a poll interval below
     // the tick can never be honoured (due is evaluated once per tick), so clamp:
     // tick ≥ 1s and interval ≥ max(tick, 1s).
-    let tick_secs = tick.max(1);
-    let interval_secs = interval.max(1).max(tick_secs);
+    let tick_secs = timing.tick.max(1);
+    let interval_secs = timing.interval.max(1).max(tick_secs);
     let cfg = SchedulerConfig {
         poll_interval: Duration::from_secs(interval_secs),
         tick: Duration::from_secs(tick_secs),
@@ -72,9 +130,9 @@ pub async fn run(
 
     // The loop finishes the in-flight container before returning; cap that
     // drain so a hung recreate can't block shutdown indefinitely.
-    let stop_timeout = Duration::from_secs(stop_timeout);
+    let stop_timeout = Duration::from_secs(timing.stop_timeout);
     tokio::select! {
-        res = scheduler::run_with(&docker, &registry, &cfg, &TokioClock, Local::now, rx, &dispatcher, settings) => res,
+        res = scheduler::run_with(docker, &registry, &cfg, &TokioClock, Local::now, rx, &dispatcher, settings) => res,
         _ = async {
             let _ = deadline_rx.wait_for(|v| *v).await;
             tokio::time::sleep(stop_timeout).await;

@@ -6,13 +6,14 @@ use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
 use tracing::warn;
 
-use crate::config::{CredentialStore, ResolvedSettings};
+use crate::config::{CredentialStore, ResolvedSettings, Runtime, RuntimeSettings};
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
 use crate::docker::container::ContainerInfo;
 use crate::errors::AppError;
 use crate::format::short_digest;
 use crate::labels::{self, Mode, PolicyDefaults};
+use crate::nerdctl::Nerdctl;
 use crate::probe::{self, ProbeOutcome, ProbeTarget, pinned_digest};
 use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
@@ -33,18 +34,22 @@ pub async fn run(
     no_color: bool,
     store: Arc<CredentialStore>,
     settings: ResolvedSettings,
+    runtime: RuntimeSettings,
 ) -> Result<(), AppError> {
-    // Built before the Docker connect so a missing CA store fails the start.
+    // Built before the runtime connect so a missing CA store fails the start.
     let registry = OciRegistry::new(store.clone())?;
-    let docker = Docker::connect(store).await?;
     let own_id_prefix = crate::selfid::own_container_id_prefix();
-    let cells = collect_cells(
-        &docker,
-        &registry,
-        settings.policy_defaults(),
-        own_id_prefix.as_deref(),
-    )
-    .await?;
+    let defaults = settings.policy_defaults();
+    let cells = match runtime.runtime {
+        Runtime::Docker => {
+            let docker = Docker::connect(store).await?;
+            collect_cells(&docker, &registry, defaults, own_id_prefix.as_deref()).await?
+        }
+        Runtime::Nerdctl => {
+            let nerdctl = Nerdctl::connect(&runtime, store).await?;
+            collect_cells(&nerdctl, &registry, defaults, own_id_prefix.as_deref()).await?
+        }
+    };
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));

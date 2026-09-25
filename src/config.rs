@@ -105,6 +105,119 @@ pub struct Settings {
     /// and its dependents on the old image, so a slow one needs room here.
     #[serde(default)]
     pub one_shot_timeout: Option<u64>,
+    /// Which container runtime to manage: `docker` (the default, which also
+    /// covers Podman's Docker-compatible socket) or `nerdctl`.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// The nerdctl binary, when `runtime = "nerdctl"`. Defaults to `nerdctl`
+    /// looked up on `PATH`.
+    #[serde(default)]
+    pub nerdctl_path: Option<String>,
+    /// The containerd namespace nerdctl works in. Defaults to nerdctl's own
+    /// default, `default`.
+    #[serde(default)]
+    pub containerd_namespace: Option<String>,
+}
+
+/// The container runtime freshdock drives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Runtime {
+    /// The Docker Engine API (Docker, or Podman's compatible socket).
+    #[default]
+    Docker,
+    /// containerd, through the nerdctl binary.
+    Nerdctl,
+}
+
+impl std::str::FromStr for Runtime {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "docker" => Ok(Runtime::Docker),
+            "nerdctl" => Ok(Runtime::Nerdctl),
+            _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Runtime::Docker => "docker",
+            Runtime::Nerdctl => "nerdctl",
+        })
+    }
+}
+
+/// Which runtime to connect to, and how. Kept apart from [`ResolvedSettings`],
+/// which is `Copy` and threads through the scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSettings {
+    pub runtime: Runtime,
+    pub nerdctl_path: String,
+    pub containerd_namespace: String,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            runtime: Runtime::Docker,
+            nerdctl_path: "nerdctl".to_owned(),
+            containerd_namespace: "default".to_owned(),
+        }
+    }
+}
+
+/// Overlay `FRESHDOCK_RUNTIME` / `FRESHDOCK_NERDCTL_PATH` /
+/// `FRESHDOCK_CONTAINERD_NAMESPACE` onto the `[settings]` table (env wins per
+/// field), then validate. Like the other settings, an invalid runtime warns and
+/// falls back rather than stopping the start.
+fn resolve_runtime<I>(settings: &Settings, env_vars: I) -> RuntimeSettings
+where
+    I: Iterator<Item = (String, String)>,
+{
+    let mut runtime = settings.runtime.clone();
+    let mut nerdctl_path = settings.nerdctl_path.clone();
+    let mut namespace = settings.containerd_namespace.clone();
+    for (key, value) in env_vars {
+        match key.as_str() {
+            "FRESHDOCK_RUNTIME" => runtime = Some(value),
+            "FRESHDOCK_NERDCTL_PATH" => nerdctl_path = Some(value),
+            "FRESHDOCK_CONTAINERD_NAMESPACE" => namespace = Some(value),
+            _ => {}
+        }
+    }
+    let defaults = RuntimeSettings::default();
+    let runtime = match runtime.as_deref() {
+        None => defaults.runtime,
+        Some(raw) => raw.parse().unwrap_or_else(|()| {
+            warn!(
+                value = %raw,
+                "ignoring invalid runtime (expected docker or nerdctl); falling back to docker"
+            );
+            defaults.runtime
+        }),
+    };
+    let non_empty = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    RuntimeSettings {
+        runtime,
+        nerdctl_path: non_empty(nerdctl_path).unwrap_or(defaults.nerdctl_path),
+        containerd_namespace: non_empty(namespace).unwrap_or(defaults.containerd_namespace),
+    }
+}
+
+/// Settings a runtime cannot honour. nerdctl compose records no dependency
+/// labels, so compose-aware rollouts have nothing to order by: under nerdctl
+/// every container is updated on its own, as with `compose_aware = false`.
+fn apply_runtime_limits(settings: &mut ResolvedSettings, runtime: &RuntimeSettings) {
+    if runtime.runtime == Runtime::Nerdctl && settings.compose_aware {
+        info!(
+            "nerdctl compose records no service dependencies, so compose projects are \
+             updated one container at a time (compose_aware is off under nerdctl)"
+        );
+        settings.compose_aware = false;
+    }
 }
 
 /// Validated [`Settings`], ready for the commands. `Copy` so it threads cheaply
@@ -398,6 +511,7 @@ pub struct LoadedConfig {
     pub credentials: Arc<CredentialStore>,
     pub notifications: NotificationConfig,
     pub settings: ResolvedSettings,
+    pub runtime: RuntimeSettings,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -417,7 +531,7 @@ pub enum ConfigError {
 }
 
 /// Env names freshdock reads on their own (no `<NAME>` component).
-const PLAIN_ENV_NAMES: [&str; 11] = [
+const PLAIN_ENV_NAMES: [&str; 14] = [
     "CONFIG",
     "INTERVAL",
     "TICK",
@@ -429,6 +543,9 @@ const PLAIN_ENV_NAMES: [&str; 11] = [
     "COMPOSE_AWARE",
     "ONE_SHOT_TIMEOUT",
     "LIVE_REQUIRED",
+    "RUNTIME",
+    "NERDCTL_PATH",
+    "CONTAINERD_NAMESPACE",
 ];
 
 /// Tails of `FRESHDOCK_REGISTRY_<NAME>_*`.
@@ -595,13 +712,16 @@ impl Config {
         // cheap).
         let notifications =
             build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
-        let settings = resolve_settings(std::mem::take(&mut config.settings), std::env::vars());
+        let runtime = resolve_runtime(&config.settings, std::env::vars());
+        let mut settings = resolve_settings(std::mem::take(&mut config.settings), std::env::vars());
+        apply_runtime_limits(&mut settings, &runtime);
         let credentials = Arc::new(build_store(config, std::env::vars()));
         log_credentials_loaded(&credentials);
         Ok(LoadedConfig {
             credentials,
             notifications,
             settings,
+            runtime,
         })
     }
 
@@ -641,7 +761,10 @@ the same way:\n  FRESHDOCK_DEFAULT_MODE               live|nightly|weekly|monthl
 FRESHDOCK_CLEANUP                    true/false/1/0\n  FRESHDOCK_PRUNE_DANGLING             true/false/1/0\n  \
 FRESHDOCK_WATCH_ALL                  true/false/1/0 (watch every container unless it opts out)\n  \
 FRESHDOCK_COMPOSE_AWARE              true/false/1/0 (roll a compose project out as one unit; on by default)\n  \
-FRESHDOCK_ONE_SHOT_TIMEOUT           seconds a compose one-shot may run before a rollout gives up (default 600)\n\
+FRESHDOCK_ONE_SHOT_TIMEOUT           seconds a compose one-shot may run before a rollout gives up (default 600)\n  \
+FRESHDOCK_RUNTIME                    docker|nerdctl (default docker; nerdctl drives containerd, rootful only)\n  \
+FRESHDOCK_NERDCTL_PATH               the nerdctl binary (default: nerdctl on PATH)\n  \
+FRESHDOCK_CONTAINERD_NAMESPACE       containerd namespace for nerdctl (default: default)\n\
 Run flags have env forms too, the flag winning: FRESHDOCK_INTERVAL, FRESHDOCK_TICK, FRESHDOCK_STOP_TIMEOUT \
 (see `freshdock run --help`).\nNO_COLOR (any non-empty value) disables colored output.\nFRESHDOCK_CONFIG \
 sets the config file path.";
@@ -2108,6 +2231,95 @@ mod tests {
         let cfg = Config::from_toml("[settings]\ncompose_aware = false\n").unwrap();
         let resolved = resolve_settings(cfg.settings, env(&[("FRESHDOCK_COMPOSE_AWARE", "true")]));
         assert!(resolved.compose_aware, "env can also turn it back on");
+    }
+
+    #[test]
+    fn runtime_defaults_to_docker() {
+        assert_eq!(
+            resolve_runtime(&Config::default().settings, env(&[])),
+            RuntimeSettings::default()
+        );
+        assert_eq!(RuntimeSettings::default().runtime, Runtime::Docker);
+    }
+
+    #[test]
+    fn runtime_settings_come_from_the_file() {
+        let cfg = Config::from_toml(
+            "[settings]\nruntime = \"nerdctl\"\nnerdctl_path = \"/usr/local/bin/nerdctl\"\n\
+             containerd_namespace = \"apps\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_runtime(&cfg.settings, env(&[])),
+            RuntimeSettings {
+                runtime: Runtime::Nerdctl,
+                nerdctl_path: "/usr/local/bin/nerdctl".to_owned(),
+                containerd_namespace: "apps".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn env_runtime_settings_override_the_file() {
+        let cfg = Config::from_toml("[settings]\nruntime = \"docker\"\n").unwrap();
+        let resolved = resolve_runtime(
+            &cfg.settings,
+            env(&[
+                ("FRESHDOCK_RUNTIME", "NerdCtl"),
+                ("FRESHDOCK_NERDCTL_PATH", "/opt/nerdctl"),
+                ("FRESHDOCK_CONTAINERD_NAMESPACE", "freshdock-test"),
+            ]),
+        );
+        assert_eq!(
+            resolved.runtime,
+            Runtime::Nerdctl,
+            "matching is case-insensitive"
+        );
+        assert_eq!(resolved.nerdctl_path, "/opt/nerdctl");
+        assert_eq!(resolved.containerd_namespace, "freshdock-test");
+    }
+
+    #[test]
+    fn an_invalid_runtime_falls_back_to_docker_and_blank_paths_to_defaults() {
+        let cfg = Config::from_toml("[settings]\nruntime = \"containerd\"\n").unwrap();
+        let resolved = resolve_runtime(
+            &cfg.settings,
+            env(&[
+                ("FRESHDOCK_NERDCTL_PATH", "  "),
+                ("FRESHDOCK_CONTAINERD_NAMESPACE", ""),
+            ]),
+        );
+        assert_eq!(resolved, RuntimeSettings::default());
+    }
+
+    #[test]
+    fn nerdctl_turns_compose_aware_off() {
+        let nerdctl = RuntimeSettings {
+            runtime: Runtime::Nerdctl,
+            ..RuntimeSettings::default()
+        };
+        let mut settings = ResolvedSettings::default();
+        apply_runtime_limits(&mut settings, &nerdctl);
+        assert!(!settings.compose_aware);
+
+        let mut settings = ResolvedSettings::default();
+        apply_runtime_limits(&mut settings, &RuntimeSettings::default());
+        assert!(
+            settings.compose_aware,
+            "docker keeps compose-aware rollouts"
+        );
+    }
+
+    #[test]
+    fn runtime_env_names_are_recognised() {
+        assert!(
+            unrecognised_env_names(env(&[
+                ("FRESHDOCK_RUNTIME", "nerdctl"),
+                ("FRESHDOCK_NERDCTL_PATH", "/x"),
+                ("FRESHDOCK_CONTAINERD_NAMESPACE", "y"),
+            ]))
+            .is_empty()
+        );
     }
 
     #[test]

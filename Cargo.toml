@@ -17,7 +17,7 @@ exclude = [".github/", "docs/", "examples/", "RELEASE.md", "freshdock.toml.examp
 
 [dependencies]
 bollard = "0.21"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "process"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2", "charset", "query"] }
 # Parse shoutrrr-style notify URLs (issue #54); percent-encoding decodes userinfo.
 # Both already in-tree via reqwest, so no new version for cargo-deny.
