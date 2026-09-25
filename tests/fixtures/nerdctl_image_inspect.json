@@ -1,0 +1,63 @@
+[
+  {
+    "Id": "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea",
+    "RepoTags": [
+      "nginx:1.27-alpine"
+    ],
+    "RepoDigests": [
+      "nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"
+    ],
+    "Parent": "",
+    "Comment": "buildkit.dockerfile.v0",
+    "Created": "2025-04-16T14:50:31Z",
+    "DockerVersion": "",
+    "Author": "",
+    "Config": {
+      "AttachStdin": false,
+      "ExposedPorts": {
+        "80/tcp": {}
+      },
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "NGINX_VERSION=1.27.5",
+        "PKG_RELEASE=1",
+        "DYNPKG_RELEASE=1",
+        "NJS_VERSION=0.8.10",
+        "NJS_RELEASE=1"
+      ],
+      "Cmd": [
+        "nginx",
+        "-g",
+        "daemon off;"
+      ],
+      "Image": "docker.io/library/nginx:1.27-alpine",
+      "WorkingDir": "/",
+      "Entrypoint": [
+        "/docker-entrypoint.sh"
+      ],
+      "Labels": {
+        "maintainer": "NGINX Docker Maintainers <docker-maint@nginx.com>"
+      }
+    },
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Size": 52600832,
+    "VirtualSize": 52600832,
+    "RootFS": {
+      "Type": "layers",
+      "Layers": [
+        "sha256:08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350",
+        "sha256:d71eae0084c1aa823dd8fb2ecf8604d5c0f4911226c042bb1f8297e819f4b192",
+        "sha256:c56f134d380585340a68d0db2f2c170641a1c0ff72ccf2438cf2f693df756a85",
+        "sha256:e244aa659f612a80c40dd8645812301e3def6b15ec67b9e486ed2201172b51d1",
+        "sha256:b8d7d1d2263425d6044e059b2810017d062d659b9b755241f3747eda77726250",
+        "sha256:811a4dbbf4a5309e4390cf655c12db92e1a4304fb9d9731f83e7b02e95a617c6",
+        "sha256:947e805a4ac71f68e6703550c0b36c2aa2e554c4fa670ca2da6a25c6d7dccb66",
+        "sha256:0d853d50b128aa460b47e7121849463a14b18d4fd976caf5014744aae24d28aa"
+      ]
+    },
+    "Metadata": {
+      "LastTagTime": "0001-01-01T00:00:00Z"
+    }
+  }
+]
