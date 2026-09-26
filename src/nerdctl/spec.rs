@@ -28,7 +28,7 @@ const RUNTIME_LABEL_PREFIXES: [&str; 3] = ["nerdctl/", "containerd.io/", "io.con
 /// `nerdctl/*` labels freshdock understands: either reproduced from another
 /// source, or bookkeeping nerdctl writes for every container. Any other
 /// `nerdctl/*` label is a setting freshdock doesn't know how to reproduce.
-const KNOWN_NERDCTL_LABELS: [&str; 20] = [
+const KNOWN_NERDCTL_LABELS: [&str; 23] = [
     "nerdctl/anonymous-volumes",
     "nerdctl/auto-remove",
     "nerdctl/dns",
@@ -49,6 +49,9 @@ const KNOWN_NERDCTL_LABELS: [&str; 20] = [
     "nerdctl/stop-timeout",
     "nerdctl/user",
     "nerdctl/ports",
+    "nerdctl/privileged",
+    "nerdctl/domainname",
+    "nerdctl/mac-address",
 ];
 
 const STOP_SIGNAL_LABEL: &str = "io.containerd.image.config.stop-signal";
@@ -71,6 +74,7 @@ pub struct NerdctlSpec {
     pub dns_options: Vec<String>,
     pub dns_search: Vec<String>,
     pub extra_hosts: Vec<String>,
+    pub mac_address: Option<String>,
     /// Every other flag, already rendered (`["--memory", "268435456", …]`).
     pub flags: Vec<String>,
     /// `--entrypoint` value: the container's `Path`.
@@ -165,13 +169,43 @@ impl NativeInspect {
 pub struct OciSpec {
     pub process: Option<OciProcess>,
     pub annotations: Option<HashMap<String, String>>,
+    pub linux: Option<OciLinux>,
+    pub mounts: Option<Vec<OciMount>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OciProcess {
     pub cwd: Option<String>,
     pub terminal: Option<bool>,
+    pub apparmor_profile: Option<String>,
+    pub no_new_privileges: Option<bool>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OciMount {
+    pub destination: Option<String>,
+}
+
+/// Where `--init` puts its init process, which then runs the real command
+/// after `--`.
+const INIT_PATH: &str = "/sbin/tini";
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OciLinux {
+    /// Present unless the container runs unconfined.
+    pub seccomp: Option<Value>,
+    pub namespaces: Option<Vec<OciNamespace>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OciNamespace {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
+/// The AppArmor profile nerdctl applies unless told otherwise.
+const DEFAULT_APPARMOR_PROFILE: &str = "nerdctl-default";
 
 /// `network-config.json` in the container's state directory.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -217,6 +251,25 @@ impl NerdctlSpec {
 
         spec.entrypoint = compat.path.clone().filter(|p| !p.is_empty());
         spec.args = compat.args.clone().unwrap_or_default();
+        // `--init` mounts tini at INIT_PATH and runs `tini -- <command>`; the
+        // command freshdock must reproduce is what follows the `--`.
+        let init_mounted = native
+            .spec
+            .as_ref()
+            .and_then(|s| s.mounts.as_ref())
+            .is_some_and(|m| {
+                m.iter()
+                    .any(|m| m.destination.as_deref() == Some(INIT_PATH))
+            });
+        if init_mounted
+            && spec.entrypoint.as_deref() == Some(INIT_PATH)
+            && spec.args.first().map(String::as_str) == Some("--")
+            && spec.args.len() >= 2
+        {
+            spec.flags.push("--init".to_owned());
+            spec.entrypoint = Some(spec.args[1].clone());
+            spec.args.drain(..2);
+        }
         spec.hostname = spec
             .labels
             .get("nerdctl/hostname")
@@ -229,7 +282,9 @@ impl NerdctlSpec {
             .unwrap_or_default();
         spec.ports = ports(&compat, network_config.as_ref());
 
-        let process = native.spec.and_then(|s| s.process).unwrap_or_default();
+        let oci = native.spec.unwrap_or_default();
+        spec.security_and_namespaces(&oci);
+        let process = oci.process.unwrap_or_default();
         if process.terminal == Some(true) {
             spec.flags.push("--tty".to_owned());
         }
@@ -303,6 +358,9 @@ impl NerdctlSpec {
         for domain in &self.dns_search {
             push(&mut args, "--dns-search", domain.clone());
         }
+        if let Some(mac) = &self.mac_address {
+            push(&mut args, "--mac-address", mac.clone());
+        }
         for host in &self.extra_hosts {
             push(&mut args, "--add-host", host.clone());
         }
@@ -344,6 +402,55 @@ impl NerdctlSpec {
         self.dns_options.clear();
         self.dns_search.clear();
         self.extra_hosts.clear();
+        self.mac_address = None;
+    }
+
+    /// Settings the compatible inspect leaves blank but the OCI runtime spec
+    /// shows: `--security-opt`, and host pid/cgroup namespaces (a namespace
+    /// nerdctl normally creates is missing). `--privileged` implies the
+    /// unconfined profiles and host devices itself, so it adds none of these.
+    fn security_and_namespaces(&mut self, oci: &OciSpec) {
+        let privileged = self.labels.contains_key("nerdctl/privileged");
+        if let Some(process) = &oci.process {
+            if !privileged {
+                match process.apparmor_profile.as_deref() {
+                    Some(DEFAULT_APPARMOR_PROFILE) => {}
+                    Some(p) if !p.is_empty() => {
+                        push(&mut self.flags, "--security-opt", format!("apparmor={p}"))
+                    }
+                    _ => push(&mut self.flags, "--security-opt", "apparmor=unconfined"),
+                }
+            }
+            if process.no_new_privileges == Some(true) {
+                push(&mut self.flags, "--security-opt", "no-new-privileges");
+            }
+        }
+        if let Some(linux) = &oci.linux {
+            if linux.seccomp.is_none() && !privileged {
+                push(&mut self.flags, "--security-opt", "seccomp=unconfined");
+            }
+            if let Some(namespaces) = &linux.namespaces {
+                let has = |t: &str| namespaces.iter().any(|n| n.kind.as_deref() == Some(t));
+                if !has("pid") {
+                    push(&mut self.flags, "--pid", "host");
+                }
+                if !has("cgroup") {
+                    push(&mut self.flags, "--cgroupns", "host");
+                }
+            }
+        }
+        if let Some(domain) = self
+            .labels
+            .get("nerdctl/domainname")
+            .filter(|d| !d.is_empty())
+        {
+            push(&mut self.flags, "--domainname", domain.clone());
+        }
+        self.mac_address = self
+            .labels
+            .get("nerdctl/mac-address")
+            .filter(|m| !m.is_empty())
+            .cloned();
     }
 
     fn healthcheck(&mut self) {
@@ -528,10 +635,16 @@ impl NerdctlSpec {
             }
         }
         if let Some(Value::Object(log)) = take("LogConfig") {
-            if let Some(driver) = log.get("driver").and_then(Value::as_str)
-                && driver != "json-file"
-            {
-                push(&mut self.flags, "--log-driver", driver.to_owned());
+            match log.get("driver").and_then(Value::as_str).unwrap_or("") {
+                // `--log-driver none` leaves the driver empty and says so in
+                // the log URI instead.
+                "" => {
+                    if self.labels.get("nerdctl/log-uri").map(String::as_str) == Some("none") {
+                        push(&mut self.flags, "--log-driver", "none");
+                    }
+                }
+                "json-file" => {}
+                driver => push(&mut self.flags, "--log-driver", driver.to_owned()),
             }
             if let Some(Value::Object(opts)) = log.get("opts") {
                 let mut opts: Vec<_> = opts.iter().collect();
@@ -566,6 +679,28 @@ impl NerdctlSpec {
                     _ => self.extra_hosts.extend(values),
                 }
             }
+        }
+        if let Some(Value::Object(annotations)) = take("Annotations") {
+            let mut annotations: Vec<_> = annotations.iter().collect();
+            annotations.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in annotations {
+                match value_string(v) {
+                    Some(v) => push(&mut self.flags, "--annotation", format!("{k}={v}")),
+                    None => self.unsupported.push(format!("annotation {k} = {v}")),
+                }
+            }
+        }
+        // As the user wrote it (`128m`), which `nerdctl/ipc` keeps; the byte
+        // count in `HostConfig.ShmSize` is the fallback.
+        let shm_label = self
+            .labels
+            .get("nerdctl/ipc")
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|ipc| ipc.get("shmSize").and_then(value_string))
+            .filter(|s| !s.is_empty());
+        if let Some(size) = shm_label {
+            take("ShmSize");
+            push(&mut self.flags, "--shm-size", size);
         }
         if let Some(Value::Object(sysctls)) = take("Sysctls") {
             let mut sysctls: Vec<_> = sysctls.iter().collect();

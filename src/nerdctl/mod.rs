@@ -7,6 +7,7 @@
 //! must run as root, next to the containerd nerdctl uses.
 
 pub mod auth;
+pub mod compare;
 pub mod inspect;
 pub mod runner;
 pub mod spec;
@@ -285,6 +286,32 @@ impl<R: CommandRunner> Nerdctl<R> {
         Some(format!("{}@{digest}", crate::probe::strip_tag(reference)))
     }
 
+    /// Where the trial container's runtime spec and labels differ from the
+    /// original's (see [`compare`]).
+    async fn compare_with_trial(
+        &self,
+        original: &str,
+        trial: &str,
+    ) -> Result<Vec<String>, DockerError> {
+        let a = self.inspect_native_raw(original).await?;
+        let b = self.inspect_native_raw(trial).await?;
+        let id = |v: &serde_json::Value| {
+            v.get("ID")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        Ok(compare::differences(&a, &id(&a), &b, &id(&b)))
+    }
+
+    async fn inspect_native_raw(&self, name_or_id: &str) -> Result<serde_json::Value, DockerError> {
+        let stdout = self.call(&["inspect", "--mode=native", name_or_id]).await?;
+        parse_array::<serde_json::Value>("inspect --mode=native", &stdout)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| DockerError::NotFound(format!("no such container: {name_or_id}")))
+    }
+
     async fn inspect_native(&self, name_or_id: &str) -> Result<NativeInspect, DockerError> {
         let stdout = self.call(&["inspect", "--mode=native", name_or_id]).await?;
         parse_array::<NativeInspect>("inspect --mode=native", &stdout)?
@@ -403,10 +430,20 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
                 spec.name
             )));
         }
+        let compared = self.compare_with_trial(&spec.name, &trial).await;
         if let Err(e) = self.call(&["rm", "--force", &trial]).await {
             warn!(container = %trial, error = %e, "could not remove the trial container; remove it by hand");
         }
-        Ok(())
+        let differences = compared?;
+        if differences.is_empty() {
+            return Ok(());
+        }
+        Err(DockerError::Unsupported(format!(
+            "{} has settings nerdctl does not report, so freshdock can't carry them over and \
+             it was not updated. The rebuilt container would differ at: {}",
+            spec.name,
+            differences.join("; ")
+        )))
     }
 
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
@@ -940,7 +977,11 @@ mod tests {
         let n = nerdctl(
             inspectable("fd-full", "full")
                 .on("create --name fd-full-freshdock-check-* *", ok("trialid\n"))
-                .on("rm --force fd-full-freshdock-check-*", ok("")),
+                .on("rm --force fd-full-freshdock-check-*", ok(""))
+                .on(
+                    "inspect --mode=native fd-full-freshdock-check-*",
+                    ok(fixture("nerdctl_full_native.json")),
+                ),
         );
         let spec = n.inspect("fd-full").await.unwrap();
         assert_eq!(spec.name, "fd-full");
@@ -990,6 +1031,33 @@ mod tests {
         assert!(
             !n.runner.calls().iter().any(|c| c.starts_with("rm")),
             "a failed create leaves nothing to remove"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_refuses_when_the_trial_differs_from_the_original() {
+        let mut trial: Vec<serde_json::Value> =
+            serde_json::from_str(&fixture("nerdctl_full_native.json")).unwrap();
+        trial[0]["Spec"]["process"]["noNewPrivileges"] = serde_json::Value::Bool(true);
+        let n = nerdctl(
+            inspectable("fd-full", "full")
+                .on("create --name fd-full-freshdock-check-* *", ok("trialid\n"))
+                .on("rm --force fd-full-freshdock-check-*", ok(""))
+                .on(
+                    "inspect --mode=native fd-full-freshdock-check-*",
+                    ok(serde_json::to_string(&trial).unwrap()),
+                ),
+        );
+        let spec = n.inspect("fd-full").await.unwrap();
+        let err = n.preflight_recreate(&spec).await.unwrap_err();
+        assert!(matches!(err, DockerError::Unsupported(_)), "{err}");
+        assert!(err.to_string().contains("noNewPrivileges"), "{err}");
+        assert!(
+            n.runner
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("rm --force fd-full-freshdock-check-")),
+            "the trial is removed either way"
         );
     }
 
@@ -1225,7 +1293,11 @@ mod tests {
         let n = nerdctl(
             inspectable("fd-full", "full")
                 .on("create --name fd-full-freshdock-check-* *", ok("trialid\n"))
-                .on("rm --force fd-full-freshdock-check-*", ok("")),
+                .on("rm --force fd-full-freshdock-check-*", ok(""))
+                .on(
+                    "inspect --mode=native fd-full-freshdock-check-*",
+                    ok(fixture("nerdctl_full_native.json")),
+                ),
         );
         let mut spec = n.inspect("fd-full").await.unwrap();
         match &mut spec.body {
