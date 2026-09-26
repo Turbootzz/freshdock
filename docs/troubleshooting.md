@@ -16,6 +16,8 @@ reference page with the full story.
 - [A sidecar on `network_mode: container:X` lost its network](#a-sidecar-on-network_mode-containerx-lost-its-network)
 - [My app updated but its database migration didn't run](#my-app-updated-but-its-database-migration-didnt-run)
 - [A compose rollout aborted](#a-compose-rollout-aborted)
+- [nerdctl: `could not reach containerd`](#nerdctl-could-not-reach-containerd)
+- [nerdctl: an update was refused](#nerdctl-an-update-was-refused)
 - [Where are the logs?](#where-are-the-logs)
 
 ---
@@ -269,6 +271,48 @@ wait for the next scheduled cycle. Nothing is rolled back automatically: the com
 already ran and may have applied part of its work, so restoring the previous
 container object would change nothing about your database while throwing the
 evidence away. See [when a one-shot fails](compose.md#when-a-one-shot-fails).
+
+## nerdctl: `could not reach containerd`
+
+```
+WARN freshdock::nerdctl: freshdock is not running as root; rootful nerdctl needs root, and rootless nerdctl is not supported yet uid=1000
+Error: container runtime error: nerdctl could not reach containerd. freshdock supports rootful nerdctl only: run it as root, on the host where containerd runs
+```
+
+freshdock ran `nerdctl version` and nerdctl reported no containerd. With rootful
+nerdctl that almost always means freshdock is not running as root: the containerd
+socket is readable by root only. Run it as root (the systemd unit in
+[Deployment](deployment.md#with-nerdctl-containerd) does). Rootless nerdctl, where
+each user has their own containerd, is not supported yet.
+
+`could not run nerdctl: No such file or directory` means the binary is not on the
+service's `PATH`; set `FRESHDOCK_NERDCTL_PATH`. A connected start logs:
+
+```
+INFO freshdock::nerdctl: connected to containerd through nerdctl nerdctl=v2.3.4 containerd=v2.3.2 namespace=default
+```
+
+If that line names the wrong namespace, and `check` lists none of your containers,
+set `FRESHDOCK_CONTAINERD_NAMESPACE` to the one you use with `nerdctl --namespace`.
+
+## nerdctl: an update was refused
+
+```
+Error: not supported: web has settings freshdock can't reproduce with nerdctl, so it was not updated: label nerdctl/ip
+Error: not supported: web has settings nerdctl does not report, so freshdock can't carry them over and it was not updated. The rebuilt container would differ at: Spec.process.user.additionalGids ...
+```
+
+On nerdctl, freshdock rebuilds a container's `nerdctl create` flags from what
+nerdctl reports, then tries them on a throwaway copy before stopping anything. If
+the copy would differ from the original, the update is refused and the container
+keeps running untouched; the message names what could not be carried over. The
+first form names a setting freshdock knows it can't reproduce, the second a field
+where the throwaway copy came out different.
+
+Common causes: a static `--ip`, an explicit `--group-add`, `--userns-remap`, or a
+container created with different nerdctl global flags. Recreate the container by
+hand without that setting, or keep it in `watch` mode so freshdock only reports
+updates. See [Deployment: with nerdctl](deployment.md#what-is-different-on-nerdctl).
 
 ## Where are the logs?
 

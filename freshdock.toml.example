@@ -28,6 +28,10 @@
 #                            # per-container override: freshdock.cleanup label
 # prune_dangling   = false   # daemon-wide dangling-image prune after each success
 #                            # (no per-container label)
+# runtime          = "docker" # docker | nerdctl (containerd through the nerdctl CLI,
+#                            # rootful only; turns compose_aware off)
+# nerdctl_path     = "nerdctl" # the nerdctl binary, when runtime = "nerdctl"
+# containerd_namespace = "default" # the containerd namespace nerdctl works in
 
 # ── Registry credentials (private images) ────────────────────────────────────
 # <name> is an alias (dockerhub, ghcr, quay, lscr) or a literal host.

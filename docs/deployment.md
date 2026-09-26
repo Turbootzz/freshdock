@@ -141,6 +141,73 @@ the process isn't allowed to use it:
 
 Access to the Docker socket is effectively root on the host, so grant it with care.
 
+## With nerdctl (containerd)
+
+freshdock can manage containers you run with [nerdctl](https://github.com/containerd/nerdctl)
+on containerd. It does every operation by running the `nerdctl` command, so nerdctl
+keeps doing the networking, naming and port setup it does for `nerdctl run`.
+
+Requirements:
+
+- nerdctl 2.3 or newer, **rootful** (one containerd running as root). Rootless
+  nerdctl is not supported yet.
+- freshdock runs **as root on the same host**, as a host binary or systemd service.
+  It needs the containerd socket, nerdctl's state under `/var/lib/nerdctl`, and the
+  CNI setup, so running it in a container is not supported.
+- `runtime = "nerdctl"` in `[settings]`, or `FRESHDOCK_RUNTIME=nerdctl`.
+
+```ini
+# /etc/systemd/system/freshdock.service
+[Unit]
+Description=freshdock container auto-updater (nerdctl)
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/freshdock run
+Restart=on-failure
+Environment=RUST_LOG=info
+Environment=FRESHDOCK_RUNTIME=nerdctl
+# Only if nerdctl is not on the service's PATH:
+# Environment=FRESHDOCK_NERDCTL_PATH=/usr/local/bin/nerdctl
+# Only if your containers are not in nerdctl's default namespace:
+# Environment=FRESHDOCK_CONTAINERD_NAMESPACE=default
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Labels, modes, schedules, hooks and notifications work as on Docker. At startup
+freshdock checks the nerdctl version and that nerdctl can reach containerd, and
+logs both.
+
+### What is different on nerdctl
+
+- **Compose projects are updated one container at a time.** nerdctl compose does
+  not record the `depends_on` graph on its containers, so `compose_aware` is
+  turned off. Keep services you don't want updated on their own (a database, a
+  migration) in `watch` mode.
+- **Settings are rebuilt, then checked, before anything stops.** nerdctl cannot
+  recreate a container from its inspect output, so freshdock rebuilds the
+  `nerdctl create` flags from what nerdctl reports. Before stopping the container,
+  it creates a throwaway copy from those flags (never started), compares its
+  runtime settings with the original's, and removes it. If they differ, the update
+  is refused and the log names the differing fields. The container keeps running
+  untouched.
+- **Some settings are always refused**: a static IP (`--ip`), an explicit
+  `--group-add` (nerdctl reports it together with the groups it derives from the
+  image), `--userns-remap`, and anything nerdctl does not report. A container
+  created with different nerdctl global flags (for example another
+  `--snapshotter`) is refused too. Recreate such a container by hand, or keep it in
+  `watch` mode.
+- **Update detection compares digests only.** containerd records a container's image
+  by name, not by id. If the image was pulled again under the same tag without
+  recreating the container, `check` can report it as up to date.
+- **Registry credentials** from freshdock's configuration are passed to
+  `nerdctl pull` through a temporary, owner-only `DOCKER_CONFIG`. Without them,
+  nerdctl's own login (`nerdctl login`) is used. See
+  [Registry authentication](registry-auth.md).
+
 ## Compatibility
 
 | Platform | Status |
@@ -149,6 +216,7 @@ Access to the Docker socket is effectively root on the host, so grant it with ca
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
 | Podman 4+ | Supported via the Docker-compatible socket (discovery below). |
+| containerd with nerdctl 2.3+ (rootful) | Supported with `runtime = "nerdctl"`, as a host binary running as root. Compose projects are updated one container at a time. See [below](#with-nerdctl-containerd). Rootless nerdctl is not supported yet. |
 | Docker Compose | A multi-service project is updated as one unit, in `depends_on` order. See [Compose projects](compose.md). |
 | Compose-based UIs (Dockge, Komodo, and similar) | Supported; compose files are never read or edited. |
 | Kubernetes / Swarm | Out of scope; use platform-native mechanisms. |

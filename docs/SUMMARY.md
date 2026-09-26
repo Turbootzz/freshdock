@@ -31,3 +31,4 @@
 - [Network-namespace dependents](manual-tests/network-dependents.md)
 - [Compose rollouts](manual-tests/compose-rollout.md)
 - [SMTP notifications](manual-tests/smtp.md)
+- [nerdctl runtime](manual-tests/nerdctl.md)

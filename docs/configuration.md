@@ -151,6 +151,9 @@ by `_`.
 | `FRESHDOCK_WATCH_ALL` | `[settings] watch_all` | `true`/`false`/`1`/`0`, case-insensitive. Treats every running container as enabled unless it opts out. See [watching every container](#watching-every-container). |
 | `FRESHDOCK_COMPOSE_AWARE` | `[settings] compose_aware` | `true`/`false`/`1`/`0`, case-insensitive. On by default. Rolls a Compose project out as one unit. See [Compose projects](compose.md). |
 | `FRESHDOCK_ONE_SHOT_TIMEOUT` | `[settings] one_shot_timeout` | Whole number of seconds a compose one-shot may run before the rollout gives up. Default `600`. An invalid value warns and the file value applies. |
+| `FRESHDOCK_RUNTIME` | `[settings] runtime` | `docker` (default) or `nerdctl`, case-insensitive. An invalid value warns and `docker` applies. See [nerdctl](deployment.md#with-nerdctl-containerd). |
+| `FRESHDOCK_NERDCTL_PATH` | `[settings] nerdctl_path` | The nerdctl binary. Default: `nerdctl` on `PATH`. Only read when the runtime is `nerdctl`. |
+| `FRESHDOCK_CONTAINERD_NAMESPACE` | `[settings] containerd_namespace` | The containerd namespace nerdctl works in. Default `default`, as for nerdctl itself. |
 | `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |
 | `FRESHDOCK_PRUNE_DANGLING` | `[settings] prune_dangling` | Same boolean forms as `FRESHDOCK_CLEANUP`. |
 | `FRESHDOCK_INTERVAL`, `FRESHDOCK_TICK`, `FRESHDOCK_STOP_TIMEOUT` | the `run` flags of the same name | The flag wins over the env var. An invalid value is a startup error (it *is* the flag). See the [CLI reference](cli-reference.md#freshdock-run). |
@@ -208,6 +211,9 @@ compose_aware    = true    # roll a Compose project out as one unit
 one_shot_timeout = 600     # seconds a compose one-shot may run before the rollout gives up
 cleanup          = false   # remove the replaced image after a healthy update
 prune_dangling   = false   # daemon-wide dangling-image prune after each update (no per-container label)
+runtime          = "docker" # or "nerdctl": containerd through the nerdctl CLI (rootful only)
+nerdctl_path     = "nerdctl" # the nerdctl binary, when runtime = "nerdctl"
+containerd_namespace = "default" # the containerd namespace nerdctl works in
 ```
 
 | Key | Env var | Type | Default | Notes |
@@ -218,6 +224,9 @@ prune_dangling   = false   # daemon-wide dangling-image prune after each update 
 | `one_shot_timeout` | `FRESHDOCK_ONE_SHOT_TIMEOUT` | integer (seconds) | `600` | How long a compose one-shot may run before the rollout aborts. Raise it for slow migrations. |
 | `cleanup` | `FRESHDOCK_CLEANUP` | bool | `false` | Default for `freshdock.cleanup`. Best-effort; a shared image in use elsewhere is kept, and a cleanup failure never fails the update. |
 | `prune_dangling` | `FRESHDOCK_PRUNE_DANGLING` | bool | `false` | Daemon-wide; prunes untagged images after a success. Best-effort. No per-container label. |
+| `runtime` | `FRESHDOCK_RUNTIME` | `docker` or `nerdctl` | `docker` | `docker` talks to the Docker API (Docker, or Podman's compatible socket). `nerdctl` drives containerd through the nerdctl CLI and turns `compose_aware` off. See [nerdctl](deployment.md#with-nerdctl-containerd). |
+| `nerdctl_path` | `FRESHDOCK_NERDCTL_PATH` | string (path) | `nerdctl` | The nerdctl binary, looked up on `PATH` unless a path is given. |
+| `containerd_namespace` | `FRESHDOCK_CONTAINERD_NAMESPACE` | string | `default` | The containerd namespace to manage. freshdock sees only containers in this namespace. |
 
 ### `[registry.<name>]`
 
