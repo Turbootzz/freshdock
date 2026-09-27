@@ -42,7 +42,7 @@ fn captures_identity_and_image_from_inspect() {
 #[test]
 fn create_body_carries_env_cmd_entrypoint_and_image_override() {
     let spec = load_spec();
-    let body = spec.to_create_body(NEW_IMAGE);
+    let body = spec.to_create_body(NEW_IMAGE).unwrap();
 
     assert_eq!(
         body.image.as_deref(),
@@ -82,7 +82,7 @@ fn create_body_carries_env_cmd_entrypoint_and_image_override() {
 #[test]
 fn create_body_preserves_healthcheck_intervals_in_nanoseconds() {
     let spec = load_spec();
-    let body = spec.to_create_body(NEW_IMAGE);
+    let body = spec.to_create_body(NEW_IMAGE).unwrap();
     let hc = body.healthcheck.expect("healthcheck must round-trip");
 
     assert_eq!(
@@ -103,7 +103,7 @@ fn create_body_preserves_healthcheck_intervals_in_nanoseconds() {
 #[test]
 fn create_body_preserves_host_config_essentials() {
     let spec = load_spec();
-    let body = spec.to_create_body(NEW_IMAGE);
+    let body = spec.to_create_body(NEW_IMAGE).unwrap();
     let host = body.host_config.expect("host_config must round-trip");
 
     let binds = host.binds.expect("binds must round-trip");
@@ -139,7 +139,7 @@ fn create_body_preserves_host_config_essentials() {
 #[test]
 fn create_body_carries_network_endpoint_with_alias_and_static_ip() {
     let spec = load_spec();
-    let body = spec.to_create_body(NEW_IMAGE);
+    let body = spec.to_create_body(NEW_IMAGE).unwrap();
     let net_cfg = body
         .networking_config
         .expect("networking_config must round-trip");
@@ -189,31 +189,31 @@ fn unset_fields_in_inspect_stay_none_in_spec_and_create_body() {
     let spec = ContainerSpec::from_inspect(inspect).expect("minimal spec should build");
 
     assert!(
-        spec.docker().config.healthcheck.is_none(),
+        spec.docker().unwrap().config.healthcheck.is_none(),
         "no healthcheck in source must not synthesize one in spec"
     );
     assert!(
-        spec.docker().host_config.is_none(),
+        spec.docker().unwrap().host_config.is_none(),
         "no HostConfig must stay None"
     );
     assert!(
-        spec.docker().network_endpoints.is_none(),
+        spec.docker().unwrap().network_endpoints.is_none(),
         "no NetworkSettings.Networks must stay None"
     );
     assert!(
-        spec.docker().config.env.is_none(),
+        spec.docker().unwrap().config.env.is_none(),
         "no env must stay None, not Some(vec![])"
     );
     assert!(
-        spec.docker().config.entrypoint.is_none(),
+        spec.docker().unwrap().config.entrypoint.is_none(),
         "no entrypoint must stay None"
     );
     assert!(
-        spec.docker().config.stop_signal.is_none(),
+        spec.docker().unwrap().config.stop_signal.is_none(),
         "no stop_signal must stay None"
     );
 
-    let body = spec.to_create_body(NEW_IMAGE);
+    let body = spec.to_create_body(NEW_IMAGE).unwrap();
     assert!(body.healthcheck.is_none());
     assert!(body.host_config.is_none());
     assert!(body.networking_config.is_none());
@@ -249,7 +249,7 @@ fn weird_spec_captures_non_hub_image_ref_unchanged() {
 
 #[test]
 fn weird_spec_preserves_user_and_env() {
-    let body = load_weird_spec().to_create_body(NEW_IMAGE);
+    let body = load_weird_spec().to_create_body(NEW_IMAGE).unwrap();
 
     assert_eq!(
         body.user.as_deref(),
@@ -274,6 +274,7 @@ fn weird_spec_preserves_user_and_env() {
 fn weird_spec_preserves_binds_and_tmpfs() {
     let host = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip");
 
@@ -295,6 +296,7 @@ fn weird_spec_preserves_binds_and_tmpfs() {
 fn weird_spec_preserves_port_bindings() {
     let host = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip");
 
@@ -320,6 +322,7 @@ fn weird_spec_preserves_port_bindings() {
 fn weird_spec_preserves_cap_add_drop() {
     let host = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip");
 
@@ -339,6 +342,7 @@ fn weird_spec_preserves_cap_add_drop() {
 fn weird_spec_preserves_sysctls() {
     let sysctls = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip")
         .sysctls
@@ -360,6 +364,7 @@ fn weird_spec_preserves_sysctls() {
 fn weird_spec_preserves_memory_and_nano_cpus() {
     let host = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip");
 
@@ -377,6 +382,7 @@ fn weird_spec_preserves_memory_and_nano_cpus() {
 fn weird_spec_preserves_restart_policy() {
     let policy = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .host_config
         .expect("host_config must round-trip")
         .restart_policy
@@ -395,7 +401,7 @@ fn weird_spec_preserves_restart_policy() {
 
 #[test]
 fn weird_spec_preserves_stop_signal_and_timeout() {
-    let body = load_weird_spec().to_create_body(NEW_IMAGE);
+    let body = load_weird_spec().to_create_body(NEW_IMAGE).unwrap();
     assert_eq!(body.stop_signal.as_deref(), Some("SIGUSR1"));
     assert_eq!(body.stop_timeout, Some(45));
 }
@@ -404,6 +410,7 @@ fn weird_spec_preserves_stop_signal_and_timeout() {
 fn weird_spec_preserves_multi_network_endpoints_with_aliases() {
     let endpoints = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .networking_config
         .expect("networking_config must round-trip")
         .endpoints_config
@@ -443,6 +450,7 @@ fn weird_spec_preserves_multi_network_endpoints_with_aliases() {
 fn weird_spec_preserves_freshdock_and_user_labels_together() {
     let labels = load_weird_spec()
         .to_create_body(NEW_IMAGE)
+        .unwrap()
         .labels
         .expect("labels must round-trip");
 

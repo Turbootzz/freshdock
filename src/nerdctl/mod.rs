@@ -34,7 +34,7 @@ use self::auth::PullAuth;
 use self::inspect::{
     ContainerInspect, ImageInspect, Version, classify_error, error_message, parse_array,
 };
-use self::private::PrivateDir;
+use self::private::{PrivateDir, unique_suffix};
 use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError};
 use self::spec::{CreateInspect, NativeInspect, NerdctlSpec, NetworkConfig};
 
@@ -72,6 +72,9 @@ impl Nerdctl<ProcessRunner> {
         );
         warn_unless_root();
         nerdctl.check_version().await?;
+        if let Err(e) = nerdctl.sweep().await {
+            warn!(error = %e, "could not check for containers an interrupted update left behind");
+        }
         Ok(nerdctl)
     }
 }
@@ -252,7 +255,22 @@ impl<R: CommandRunner> Nerdctl<R> {
             .labels
             .as_ref()?
             .get("nerdctl/state-dir")?;
-        let path = std::path::Path::new(state_dir).join("network-config.json");
+        // nerdctl sets this label itself and refuses a user-supplied one, but
+        // freshdock reads the file as root: only follow a path that is this
+        // container's own state directory.
+        let id = compat.id.as_deref().unwrap_or("");
+        let dir = std::path::Path::new(state_dir);
+        if id.is_empty()
+            || !dir.is_absolute()
+            || dir.file_name().and_then(|n| n.to_str()) != Some(id)
+            || dir
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            warn!(state_dir = %state_dir, "ignoring a nerdctl state directory that isn't the container's own");
+            return None;
+        }
+        let path = dir.join("network-config.json");
         match std::fs::read_to_string(&path) {
             Ok(body) => serde_json::from_str(&body)
                 .inspect_err(|e| warn!(path = %path.display(), error = %e, "unreadable nerdctl network config"))
@@ -390,20 +408,68 @@ impl<R: CommandRunner> Nerdctl<R> {
         if holder.id.is_none() || holder.id == native.id {
             return Ok(None);
         }
-        let temporary = format!("{created}-freshdock-aside-{}", unique_suffix());
+        let temporary = format!("{created}{ASIDE_MARKER}{}", unique_suffix());
         debug!(archive = %target, holder = %created, %temporary, "stepping the name holder aside to remove a renamed archive");
         self.call(&["rename", created, &temporary]).await?;
         Ok(Some((created.to_owned(), temporary)))
     }
+
+    /// Put right what an interrupted freshdock can leave behind, before doing
+    /// anything else: a container still stepped aside (see
+    /// [`step_aside_name_holder`](Self::step_aside_name_holder)) gets its name
+    /// back, and a trial container from preflight is removed. Only acts where
+    /// it is safe: a stepped-aside container is renamed only while nothing else
+    /// holds its name, and a trial only while it has never started.
+    pub async fn sweep(&self) -> Result<(), DockerError> {
+        let listing = self
+            .call(&["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
+            .await?;
+        for line in listing.lines() {
+            let (name, status) = line.split_once('\t').unwrap_or((line, ""));
+            let name = name.trim();
+            if let Some((original, _)) = name.rsplit_once(ASIDE_MARKER) {
+                match self.inspect_container(original).await {
+                    Err(e) if e.is_not_found() => {
+                        match self.call(&["rename", name, original]).await {
+                            Ok(_) => {
+                                info!(container = %original, from = %name, "restored the name of a container an interrupted update had stepped aside")
+                            }
+                            Err(e) => {
+                                warn!(container = %name, error = %e, "could not restore the name of a stepped-aside container; rename it by hand")
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        warn!(container = %name, taken_by = %original, "a stepped-aside container's name is taken by another container; resolve it by hand")
+                    }
+                    Err(e) => {
+                        warn!(container = %name, error = %e, "could not check a stepped-aside container")
+                    }
+                }
+            } else if name.contains(CHECK_MARKER) {
+                if !status.trim().starts_with("Created") {
+                    warn!(container = %name, %status, "not removing a preflight trial container that has run; remove it by hand");
+                    continue;
+                }
+                match self.call(&["rm", "--force", name]).await {
+                    Ok(_) => {
+                        info!(container = %name, "removed a trial container an interrupted update left behind")
+                    }
+                    Err(e) => {
+                        warn!(container = %name, error = %e, "could not remove a leftover trial container; remove it by hand")
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-/// A suffix for throwaway container names: unique enough on one host.
-fn unique_suffix() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("{}-{nanos}", std::process::id())
-}
+/// Marks a container renamed out of the way by `step_aside_name_holder`.
+const ASIDE_MARKER: &str = "-freshdock-aside-";
+
+/// Marks a preflight trial container.
+const CHECK_MARKER: &str = "-freshdock-check-";
 
 /// The update half of the backend. Every step is one nerdctl command, so
 /// nerdctl keeps doing the networking, naming and port setup it does for
@@ -453,9 +519,9 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
     /// the published ports, which `nerdctl create` already reserves and which
     /// the running original still holds.
     async fn preflight_recreate(&self, spec: &ContainerSpec) -> Result<(), DockerError> {
-        let nerdctl = spec.nerdctl();
+        let nerdctl = spec.nerdctl()?;
         refuse_unsupported(&spec.name, nerdctl)?;
-        let trial = format!("{}-freshdock-check-{}", spec.name, unique_suffix());
+        let trial = format!("{}{CHECK_MARKER}{}", spec.name, unique_suffix());
         let without_ports = NerdctlSpec {
             ports: Vec::new(),
             ..nerdctl.clone()
@@ -515,9 +581,13 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             args.extend(["--time", time]);
         }
         args.push(name);
-        // The stop itself may take the whole grace period.
-        let grace = Duration::from_secs(timeout_s.unwrap_or(10).max(0) as u64);
-        self.call_with(&args, &[], grace + CALL_TIMEOUT).await?;
+        // The stop itself may take the whole grace period. A negative one
+        // means "wait as long as it takes", so give nerdctl the same.
+        let limit = match timeout_s {
+            Some(t) if t < 0 => HOOK_FALLBACK_TIMEOUT,
+            t => Duration::from_secs(t.unwrap_or(10) as u64) + CALL_TIMEOUT,
+        };
+        self.call_with(&args, &[], limit).await?;
         Ok(())
     }
 
@@ -537,7 +607,7 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
         spec: &ContainerSpec,
         image: &str,
     ) -> Result<String, DockerError> {
-        let nerdctl = spec.nerdctl();
+        let nerdctl = spec.nerdctl()?;
         // Preflight already refused these for the updated container; a
         // network-namespace dependent's repair has no preflight of its own.
         refuse_unsupported(name, nerdctl)?;
@@ -1020,7 +1090,7 @@ mod tests {
         assert_eq!(spec.name, "fd-full");
         assert_eq!(spec.image_ref, IMAGE);
         assert_eq!(spec.image_id.as_deref(), Some(IMAGE_ID));
-        assert!(spec.nerdctl().unsupported.is_empty());
+        assert!(spec.nerdctl().unwrap().unsupported.is_empty());
         assert_eq!(spec.stop_signal(), Some("SIGQUIT"));
         assert_eq!(spec.stop_timeout(), Some(25));
         n.preflight_recreate(&spec).await.unwrap();
@@ -1138,6 +1208,87 @@ mod tests {
         );
     }
 
+    const SWEEP_LIST: &str = "ps -a --format {{.Names}}\t{{.Status}}";
+
+    #[tokio::test]
+    async fn the_sweep_restores_a_stepped_aside_name_and_removes_a_leaked_trial() {
+        let n = nerdctl(
+            FakeRunner::default()
+                .on(
+                    SWEEP_LIST,
+                    ok("web-freshdock-aside-1-2-0\tUp 2 hours\n\
+                        db-freshdock-check-1-2-1\tCreated\n\
+                        plain\tUp 3 hours\n"),
+                )
+                .on("inspect web", fail(NOT_FOUND))
+                .on("rename web-freshdock-aside-1-2-0 web", ok(""))
+                .on("rm --force db-freshdock-check-1-2-1", ok("")),
+        );
+        n.sweep().await.unwrap();
+        let calls = n.runner.calls();
+        assert!(
+            calls.contains(&"rename web-freshdock-aside-1-2-0 web".to_owned()),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&"rm --force db-freshdock-check-1-2-1".to_owned()),
+            "{calls:?}"
+        );
+        assert_eq!(calls.len(), 4, "plain is left alone: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_leaves_what_it_cannot_safely_fix() {
+        let n = nerdctl(
+            FakeRunner::default()
+                .on(
+                    SWEEP_LIST,
+                    ok("web-freshdock-aside-1-2-0\tUp 2 hours\n\
+                        db-freshdock-check-1-2-1\tUp 5 seconds\n"),
+                )
+                // Something else has taken the name meanwhile.
+                .on("inspect web", ok(inspect_json("other", "web"))),
+        );
+        n.sweep().await.unwrap();
+        let calls = n.runner.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("rename") || c.starts_with("rm")),
+            "{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_state_dir_that_is_not_the_containers_own_is_not_read() {
+        let n = nerdctl(FakeRunner::default());
+        let compat = |id: &str, dir: &str| -> CreateInspect {
+            serde_json::from_value(serde_json::json!({
+                "Id": id,
+                "Config": {"Labels": {"nerdctl/state-dir": dir}}
+            }))
+            .unwrap()
+        };
+        let id = "a".repeat(64);
+        for dir in [
+            "/etc".to_owned(),
+            format!("relative/{id}"),
+            format!("/var/lib/nerdctl/x/containers/ns/{id}/../../../../../etc"),
+            format!("/var/lib/nerdctl/x/containers/ns/{}", "b".repeat(64)),
+        ] {
+            assert!(
+                n.network_config(&compat(&id, &dir)).await.is_none(),
+                "{dir}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_negative_stop_timeout_is_passed_through() {
+        let n = nerdctl(FakeRunner::default().on("stop --time -1 web", ok("")));
+        n.stop("web", None, Some(-1)).await.unwrap();
+    }
+
     fn native_json(id: &str, created: &str, current: &str) -> String {
         format!(
             r#"[{{"ID":"{id}","Labels":{{"nerdctl/name":"{current}"}},"Spec":{{"annotations":{{"nerdctl/name":"{created}"}}}}}}]"#
@@ -1226,6 +1377,7 @@ mod tests {
         assert_eq!(spec.image_id, None, "an unresolvable tag leaves no id");
         let expected = spec
             .nerdctl()
+            .unwrap()
             .create_args("fd-cmd", "alpine:3.20", Some("*"))
             .join(" ");
         let n = nerdctl(FakeRunner::default().on(&expected, ok("abc123\n")));
@@ -1387,6 +1539,7 @@ mod tests {
         assert!(!trial.contains("--publish"), "{trial}");
         assert!(
             spec.nerdctl()
+                .unwrap()
                 .create_args("fd-full", IMAGE, None)
                 .contains(&"--publish".to_owned()),
             "the real create keeps them"

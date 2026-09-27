@@ -1070,7 +1070,7 @@ mod tests {
             }
             // Record what the daemon would actually be sent, not what the spec
             // holds — the two differ exactly where a bug would live.
-            let body = spec.to_create_body(image);
+            let body = spec.to_create_body(image)?;
             self.created.lock().unwrap().push(CreatedContainer {
                 container: name.to_owned(),
                 image: body.image.clone().unwrap_or_default(),

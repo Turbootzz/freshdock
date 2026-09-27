@@ -173,38 +173,38 @@ impl Default for RuntimeSettings {
 /// `FRESHDOCK_CONTAINERD_NAMESPACE` onto the `[settings]` table (env wins per
 /// field), then validate. Like the other settings, an invalid runtime warns and
 /// falls back rather than stopping the start.
-fn resolve_runtime<I>(settings: &Settings, env_vars: I) -> RuntimeSettings
+fn resolve_runtime<I>(settings: &Settings, env_vars: I) -> Result<RuntimeSettings, ConfigError>
 where
     I: Iterator<Item = (String, String)>,
 {
-    let mut runtime = settings.runtime.clone();
+    let mut runtime = settings.runtime.clone().map(|v| (v, "[settings] runtime"));
     let mut nerdctl_path = settings.nerdctl_path.clone();
     let mut namespace = settings.containerd_namespace.clone();
     for (key, value) in env_vars {
         match key.as_str() {
-            "FRESHDOCK_RUNTIME" => runtime = Some(value),
+            "FRESHDOCK_RUNTIME" => runtime = Some((value, "FRESHDOCK_RUNTIME")),
             "FRESHDOCK_NERDCTL_PATH" => nerdctl_path = Some(value),
             "FRESHDOCK_CONTAINERD_NAMESPACE" => namespace = Some(value),
             _ => {}
         }
     }
     let defaults = RuntimeSettings::default();
-    let runtime = match runtime.as_deref() {
+    // Unlike the other settings, a bad runtime is an error, not a fallback:
+    // a typo would otherwise quietly point freshdock at the wrong kind of
+    // daemon.
+    let runtime = match runtime {
         None => defaults.runtime,
-        Some(raw) => raw.parse().unwrap_or_else(|()| {
-            warn!(
-                value = %raw,
-                "ignoring invalid runtime (expected docker or nerdctl); falling back to docker"
-            );
-            defaults.runtime
-        }),
+        Some((raw, origin)) => raw.parse().map_err(|()| ConfigError::InvalidRuntime {
+            value: raw.clone(),
+            origin,
+        })?,
     };
     let non_empty = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
-    RuntimeSettings {
+    Ok(RuntimeSettings {
         runtime,
         nerdctl_path: non_empty(nerdctl_path).unwrap_or(defaults.nerdctl_path),
         containerd_namespace: non_empty(namespace).unwrap_or(defaults.containerd_namespace),
-    }
+    })
 }
 
 /// Settings a runtime cannot honour. nerdctl compose records no dependency
@@ -528,6 +528,8 @@ pub enum ConfigError {
         line: Option<usize>,
         message: String,
     },
+    #[error("invalid runtime {value:?} in {origin}: expected docker or nerdctl")]
+    InvalidRuntime { value: String, origin: &'static str },
 }
 
 /// Env names freshdock reads on their own (no `<NAME>` component).
@@ -712,7 +714,7 @@ impl Config {
         // cheap).
         let notifications =
             build_notifications(std::mem::take(&mut config.notifications), std::env::vars());
-        let runtime = resolve_runtime(&config.settings, std::env::vars());
+        let runtime = resolve_runtime(&config.settings, std::env::vars())?;
         let mut settings = resolve_settings(std::mem::take(&mut config.settings), std::env::vars());
         apply_runtime_limits(&mut settings, &runtime);
         let credentials = Arc::new(build_store(config, std::env::vars()));
@@ -2236,7 +2238,7 @@ mod tests {
     #[test]
     fn runtime_defaults_to_docker() {
         assert_eq!(
-            resolve_runtime(&Config::default().settings, env(&[])),
+            resolve_runtime(&Config::default().settings, env(&[])).unwrap(),
             RuntimeSettings::default()
         );
         assert_eq!(RuntimeSettings::default().runtime, Runtime::Docker);
@@ -2250,7 +2252,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_runtime(&cfg.settings, env(&[])),
+            resolve_runtime(&cfg.settings, env(&[])).unwrap(),
             RuntimeSettings {
                 runtime: Runtime::Nerdctl,
                 nerdctl_path: "/usr/local/bin/nerdctl".to_owned(),
@@ -2269,7 +2271,8 @@ mod tests {
                 ("FRESHDOCK_NERDCTL_PATH", "/opt/nerdctl"),
                 ("FRESHDOCK_CONTAINERD_NAMESPACE", "freshdock-test"),
             ]),
-        );
+        )
+        .unwrap();
         assert_eq!(
             resolved.runtime,
             Runtime::Nerdctl,
@@ -2280,15 +2283,34 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_runtime_falls_back_to_docker_and_blank_paths_to_defaults() {
+    fn an_invalid_runtime_is_an_error_naming_its_source() {
         let cfg = Config::from_toml("[settings]\nruntime = \"containerd\"\n").unwrap();
+        let err = resolve_runtime(&cfg.settings, env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "invalid runtime \"containerd\" in [settings] runtime: expected docker or nerdctl"
+        );
+        let err = resolve_runtime(
+            &Config::default().settings,
+            env(&[("FRESHDOCK_RUNTIME", "nerdcl")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"nerdcl\" in FRESHDOCK_RUNTIME"), "{err}");
+    }
+
+    #[test]
+    fn blank_nerdctl_settings_fall_back_to_the_defaults() {
         let resolved = resolve_runtime(
-            &cfg.settings,
+            &Config::default().settings,
             env(&[
                 ("FRESHDOCK_NERDCTL_PATH", "  "),
                 ("FRESHDOCK_CONTAINERD_NAMESPACE", ""),
             ]),
-        );
+        )
+        .unwrap();
         assert_eq!(resolved, RuntimeSettings::default());
     }
 

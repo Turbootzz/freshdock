@@ -12,6 +12,9 @@ use crate::nerdctl::spec::NerdctlSpec;
 pub enum SpecError {
     #[error("inspect response is missing the {0} field")]
     Missing(&'static str),
+    /// A spec reached a backend other than the one that built it.
+    #[error("a {0} container spec was handed to the {1} backend")]
+    WrongRuntime(&'static str, &'static str),
 }
 
 /// Everything needed to re-create a container, captured by one inspect.
@@ -54,32 +57,22 @@ pub struct DockerSpec {
 }
 
 impl ContainerSpec {
-    /// The Docker-API settings.
-    ///
-    /// # Panics
-    ///
-    /// On a spec another backend produced. A process drives one runtime, so a
-    /// spec only ever reaches the backend whose `inspect` built it.
-    pub fn docker(&self) -> &DockerSpec {
+    /// The Docker-API settings. An error on a spec another backend produced;
+    /// a process drives one runtime, so in practice a spec only ever reaches
+    /// the backend whose `inspect` built it.
+    pub fn docker(&self) -> Result<&DockerSpec, SpecError> {
         match &self.body {
-            SpecBody::Docker(d) => d,
-            SpecBody::Nerdctl(_) => panic!("a nerdctl container spec reached the Docker backend"),
+            SpecBody::Docker(d) => Ok(d),
+            SpecBody::Nerdctl(_) => Err(SpecError::WrongRuntime("nerdctl", "Docker")),
         }
     }
 
-    pub fn docker_mut(&mut self) -> &mut DockerSpec {
-        match &mut self.body {
-            SpecBody::Docker(d) => d,
-            SpecBody::Nerdctl(_) => panic!("a nerdctl container spec reached the Docker backend"),
-        }
-    }
-
-    /// The nerdctl settings. Panics on a Docker spec, as [`docker`](Self::docker)
-    /// does the other way round.
-    pub fn nerdctl(&self) -> &NerdctlSpec {
+    /// The nerdctl settings. An error on a Docker spec, as
+    /// [`docker`](Self::docker) is the other way round.
+    pub fn nerdctl(&self) -> Result<&NerdctlSpec, SpecError> {
         match &self.body {
-            SpecBody::Nerdctl(n) => n,
-            SpecBody::Docker(_) => panic!("a Docker container spec reached the nerdctl backend"),
+            SpecBody::Nerdctl(n) => Ok(n),
+            SpecBody::Docker(_) => Err(SpecError::WrongRuntime("Docker", "nerdctl")),
         }
     }
 
@@ -177,10 +170,10 @@ impl ContainerSpec {
         })
     }
 
-    pub fn to_create_body(&self, new_image: &str) -> ContainerCreateBody {
-        let docker = self.docker();
+    pub fn to_create_body(&self, new_image: &str) -> Result<ContainerCreateBody, SpecError> {
+        let docker = self.docker()?;
         let cfg = &docker.config;
-        ContainerCreateBody {
+        Ok(ContainerCreateBody {
             hostname: cfg.hostname.clone(),
             domainname: cfg.domainname.clone(),
             user: cfg.user.clone(),
@@ -209,7 +202,7 @@ impl ContainerSpec {
             networking_config: docker.network_endpoints.clone().map(|e| NetworkingConfig {
                 endpoints_config: Some(e),
             }),
-        }
+        })
     }
 
     pub fn to_create_options(&self) -> CreateContainerOptions {
@@ -306,21 +299,24 @@ mod tests {
     #[test]
     fn daemon_assigned_hostname_is_dropped() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("41b589f2924c"))).unwrap();
-        assert_eq!(spec.docker().config.hostname, None);
-        assert_eq!(spec.to_create_body("nginx:alpine").hostname, None);
+        assert_eq!(spec.docker().unwrap().config.hostname, None);
+        assert_eq!(spec.to_create_body("nginx:alpine").unwrap().hostname, None);
     }
 
     #[test]
     fn explicit_hostname_round_trips() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("web"))).unwrap();
-        assert_eq!(spec.docker().config.hostname.as_deref(), Some("web"));
+        assert_eq!(
+            spec.docker().unwrap().config.hostname.as_deref(),
+            Some("web")
+        );
     }
 
     #[test]
     fn id_shaped_hostname_of_another_container_is_kept() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("deadbeef1234"))).unwrap();
         assert_eq!(
-            spec.docker().config.hostname.as_deref(),
+            spec.docker().unwrap().config.hostname.as_deref(),
             Some("deadbeef1234")
         );
     }

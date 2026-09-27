@@ -227,10 +227,13 @@ pub fn error_message(stderr: &str) -> String {
 /// tell "not found" and "conflict" apart from everything else.
 pub fn classify_error(message: String) -> DockerError {
     let lower = message.to_ascii_lowercase();
+    // nerdctl's own wording for a missing container or image only. A bare
+    // "not found" is also what an exec of a missing binary ("executable file
+    // not found in $PATH") or a registry ("manifest ... not found") says, and
+    // neither means the container or image is gone.
     if lower.contains("no such object")
         || lower.contains("no such container")
         || lower.contains("no such image")
-        || lower.contains("not found")
     {
         DockerError::NotFound(message)
     } else if lower.contains("conflict") || lower.contains("already used") {
@@ -435,6 +438,19 @@ mod tests {
         );
         assert_eq!(error_message("plain failure\n\n"), "plain failure");
         assert_eq!(error_message(""), "");
+    }
+
+    #[test]
+    fn other_not_found_errors_are_not_a_missing_object() {
+        for message in [
+            "OCI runtime exec failed: exec failed: unable to start container process: exec: \"sh\": executable file not found in $PATH",
+            "failed to resolve reference \"docker.io/library/nope:1\": docker.io/library/nope:1: not found",
+            "unknown logging driver \"\": not found",
+        ] {
+            let e = classify_error(message.to_owned());
+            assert!(!e.is_not_found(), "{message}");
+            assert!(matches!(e, DockerError::Runtime(_)), "{message}");
+        }
     }
 
     #[test]

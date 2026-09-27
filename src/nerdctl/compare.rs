@@ -80,16 +80,9 @@ fn normalize(native: &Value, id: &str) -> Value {
                 }
             }
         }
-        if let Some(Value::Array(mounts)) = s.get_mut("mounts") {
-            for m in mounts.iter_mut().filter_map(Value::as_object_mut) {
-                if m.get("source")
-                    .and_then(Value::as_str)
-                    .is_some_and(|src| src.contains("/var/lib/nerdctl/"))
-                {
-                    m.insert("source".to_owned(), Value::from("NERDCTL-STATE"));
-                }
-            }
-        }
+        // Mount sources in nerdctl's state (resolv.conf, hosts, hostname) are
+        // per-container paths, but they differ only by the container id, which
+        // `replace_ids` below turns into a placeholder whatever the data root.
     }
     let mut labels = native.get("Labels").cloned().unwrap_or(Value::Null);
     if let Value::Object(l) = &mut labels {
@@ -146,10 +139,31 @@ fn diff(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
                 diff(&format!("{path}[{i}]"), va, vb, out);
             }
         }
-        _ => push(
-            out,
-            format!("{path} would change from {} to {}", brief(a), brief(b)),
-        ),
+        _ => {
+            // Environment values are often secrets, and this message reaches
+            // logs and notifications: name the variables, never their values.
+            let env = path.trim_start_matches('.').starts_with("Spec.process.env");
+            let show = |v: &Value| if env { redacted(v) } else { brief(v) };
+            push(
+                out,
+                format!("{path} would change from {} to {}", show(a), show(b)),
+            )
+        }
+    }
+}
+
+/// `KEY=VALUE` strings (alone or in an array) with the values replaced.
+fn redacted(v: &Value) -> String {
+    let key = |s: &str| format!("{}=<redacted>", s.split('=').next().unwrap_or(""));
+    match v {
+        Value::String(s) => format!("\"{}\"", key(s)),
+        Value::Array(items) => brief(&Value::Array(
+            items
+                .iter()
+                .map(|i| Value::String(i.as_str().map_or_else(|| "<redacted>".to_owned(), key)))
+                .collect(),
+        )),
+        _ => "<redacted>".to_owned(),
     }
 }
 
@@ -284,6 +298,37 @@ mod tests {
         assert_eq!(
             differences(&original, ID_A, &trial, ID_B),
             ["Labels.nerdctl/domainname is missing"]
+        );
+    }
+
+    #[test]
+    fn environment_values_never_appear_in_the_differences() {
+        let env = |vars: &[&str]| json!({"Spec": {"process": {"env": vars}}});
+        let original = native(ID_A, env(&["PATH=/bin", "API_KEY=sk-live-secret"]));
+        let changed = native(ID_B, env(&["PATH=/bin", "API_KEY=sk-other-secret"]));
+        let shorter = native(ID_B, env(&["PATH=/bin"]));
+        for trial in [&changed, &shorter] {
+            let d = differences(&original, ID_A, trial, ID_B).join("; ");
+            assert!(d.contains("API_KEY=<redacted>"), "{d}");
+            assert!(!d.contains("sk-"), "{d}");
+        }
+    }
+
+    #[test]
+    fn state_paths_match_under_any_data_root() {
+        let mounts = |id: &str| {
+            json!({"Spec": {"mounts": [
+                {"destination": "/etc/resolv.conf", "source": format!("/srv/nerdctl-data/abc/containers/ns/{id}/resolv.conf")}
+            ]}})
+        };
+        assert!(
+            differences(
+                &native(ID_A, mounts(ID_A)),
+                ID_A,
+                &native(ID_B, mounts(ID_B)),
+                ID_B
+            )
+            .is_empty()
         );
     }
 

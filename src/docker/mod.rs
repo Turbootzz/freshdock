@@ -229,7 +229,7 @@ impl Docker {
         spec: &ContainerSpec,
         new_image: &str,
     ) -> Result<String, DockerError> {
-        let body = spec.to_create_body(new_image);
+        let body = spec.to_create_body(new_image)?;
         let opts = bollard::query_parameters::CreateContainerOptionsBuilder::new()
             .name(name)
             .build();
@@ -600,7 +600,7 @@ impl DockerOps for Docker {
     /// (Docker 25.0) onwards.
     async fn preflight_recreate(&self, spec: &ContainerSpec) -> Result<(), DockerError> {
         let networks = spec
-            .docker()
+            .docker()?
             .network_endpoints
             .as_ref()
             .map_or(0, |e| e.len());

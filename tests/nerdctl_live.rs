@@ -198,7 +198,7 @@ async fn a_richly_configured_container_round_trips() {
         "run", "-d", "--name", &name,
         "--label", "freshdock.enable=true", "--label", "app=demo",
         "--network", &net,
-        "-p", "127.0.0.1:18190:80",
+        "-p", "127.0.0.1:18190:80", "-p", "[::1]:18191:81",
         "-v", &volume, "-v", "/etc/hostname:/host-hostname:ro", "--tmpfs", "/scratch",
         "-e", "FOO=bar", "-e", "SPACED=a b c", "--workdir", "/usr/share/nginx",
         "--restart", "unless-stopped",
@@ -380,4 +380,35 @@ async fn a_setting_that_cannot_be_reproduced_is_refused_before_the_stop() {
         "untouched"
     );
     assert!(running(&name));
+}
+
+#[tokio::test]
+#[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
+async fn connecting_repairs_what_an_interrupted_update_left() {
+    let Some(_) = backend().await else { return };
+    let p = prefix("sw");
+    let _teardown = Teardown {
+        prefix: p.clone(),
+        networks: vec![],
+    };
+    // A service left stepped aside, as if freshdock died between the renames.
+    let service = format!("{p}-svc");
+    let aside = format!("{service}-freshdock-aside-1-2-0");
+    must(&["run", "-d", "--name", &aside, ALPINE, "sleep", "100000"]);
+    let service_id = id_of(&aside).unwrap();
+    // A trial container left by an interrupted preflight: created, never started.
+    let trial = format!("{p}-db-freshdock-check-1-2-1");
+    must(&["create", "--name", &trial, ALPINE, "true"]);
+
+    // Connecting runs the sweep.
+    let _n = backend().await.unwrap();
+
+    assert_eq!(
+        id_of(&service).as_deref(),
+        Some(service_id.as_str()),
+        "the service has its name back"
+    );
+    assert!(running(&service));
+    assert!(inspect(&aside).is_none());
+    assert!(inspect(&trial).is_none(), "the trial container is gone");
 }

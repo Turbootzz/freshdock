@@ -151,7 +151,7 @@ by `_`.
 | `FRESHDOCK_WATCH_ALL` | `[settings] watch_all` | `true`/`false`/`1`/`0`, case-insensitive. Treats every running container as enabled unless it opts out. See [watching every container](#watching-every-container). |
 | `FRESHDOCK_COMPOSE_AWARE` | `[settings] compose_aware` | `true`/`false`/`1`/`0`, case-insensitive. On by default. Rolls a Compose project out as one unit. See [Compose projects](compose.md). |
 | `FRESHDOCK_ONE_SHOT_TIMEOUT` | `[settings] one_shot_timeout` | Whole number of seconds a compose one-shot may run before the rollout gives up. Default `600`. An invalid value warns and the file value applies. |
-| `FRESHDOCK_RUNTIME` | `[settings] runtime` | `docker` (default) or `nerdctl`, case-insensitive. An invalid value warns and `docker` applies. See [nerdctl](deployment.md#with-nerdctl-containerd). |
+| `FRESHDOCK_RUNTIME` | `[settings] runtime` | `docker` (default) or `nerdctl`, case-insensitive. An invalid value stops freshdock at startup, naming the setting. See [nerdctl](deployment.md#with-nerdctl-containerd). |
 | `FRESHDOCK_NERDCTL_PATH` | `[settings] nerdctl_path` | The nerdctl binary. Default: `nerdctl` on `PATH`. Only read when the runtime is `nerdctl`. |
 | `FRESHDOCK_CONTAINERD_NAMESPACE` | `[settings] containerd_namespace` | The containerd namespace nerdctl works in. Default `default`, as for nerdctl itself. |
 | `FRESHDOCK_CLEANUP` | `[settings] cleanup` | `true`/`false`/`1`/`0`, case-insensitive. An invalid value warns and the file value applies. |

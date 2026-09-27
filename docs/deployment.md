@@ -196,10 +196,26 @@ logs both.
   untouched.
 - **Some settings are always refused**: a static IP (`--ip`), an explicit
   `--group-add` (nerdctl reports it together with the groups it derives from the
-  image), `--userns-remap`, and anything nerdctl does not report. A container
+  image), `--userns-remap`, an environment variable whose value spans several
+  lines or ends in whitespace, and anything nerdctl does not report. A container
   created with different nerdctl global flags (for example another
   `--snapshotter`) is refused too. Recreate such a container by hand, or keep it in
   `watch` mode.
+- **Secrets stay off the command line.** Anything in nerdctl's arguments is
+  readable by every local user, so a container's environment variables are passed
+  through an owner-only `--env-file` that exists only for the `nerdctl create`.
+  nerdctl is also started with only the environment it needs (`PATH`, `HOME`,
+  proxy, containerd, nerdctl and CNI variables), because it copies its caller's
+  environment into every container it creates; freshdock's own
+  `FRESHDOCK_REGISTRY_*` and `FRESHDOCK_NOTIFY_*` secrets never reach it.
+- **An interrupted update is cleaned up at the next start.** To remove a renamed
+  archive, freshdock briefly renames the updated container to
+  `<name>-freshdock-aside-...` (a nerdctl limitation), and preflight creates a
+  `<name>-freshdock-check-...` trial container. If freshdock stops in between, the
+  next start gives the container its name back and removes the trial, and logs
+  both.
+- **A misspelled `runtime`** (say `nerdcl`) stops freshdock at startup rather than
+  falling back to Docker.
 - **Update detection compares digests only.** containerd records a container's image
   by name, not by id. If the image was pulled again under the same tag without
   recreating the container, `check` can report it as up to date.

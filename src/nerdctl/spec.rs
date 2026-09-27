@@ -862,6 +862,7 @@ fn ports(compat: &CreateInspect, network_config: Option<&NetworkConfig>) -> Vec<
                 let container_port = m.container_port?;
                 let protocol = m.protocol.as_deref().unwrap_or("tcp");
                 let host_ip = m.host_ip.as_deref().unwrap_or("0.0.0.0");
+                let host_ip = publish_ip(host_ip);
                 Some(format!("{host_ip}:{host_port}:{container_port}/{protocol}"))
             })
             .collect();
@@ -880,12 +881,23 @@ fn ports(compat: &CreateInspect, network_config: Option<&NetworkConfig>) -> Vec<
                     .as_deref()
                     .filter(|ip| !ip.is_empty())
                     .unwrap_or("0.0.0.0");
+                let host_ip = publish_ip(host_ip);
                 Some(format!("{host_ip}:{host_port}:{container}"))
             })
         })
         .collect();
     ports.sort();
     ports
+}
+
+/// A host IP as `--publish` takes it: IPv6 in brackets, or its colons would be
+/// read as the separators (`[::1]:8080:80`, not `::1:8080:80`).
+fn publish_ip(ip: &str) -> String {
+    if ip.contains(':') && !ip.starts_with('[') {
+        format!("[{ip}]")
+    } else {
+        ip.to_owned()
+    }
 }
 
 fn push(args: &mut Vec<String>, flag: &str, value: impl Into<String>) {
@@ -1182,6 +1194,32 @@ mod tests {
     #[test]
     fn no_variables_means_no_env_file() {
         assert_eq!(with_env(&["HOSTNAME=abc"]).env_file(), None);
+    }
+
+    #[test]
+    fn ipv6_host_ips_are_bracketed() {
+        // As nerdctl 2.3.4 records `-p [::1]:18097:80` and `-p [::]:18098:80/udp`.
+        let config: NetworkConfig = serde_json::from_str(
+            r#"{"portMappings":[
+                {"HostPort":18097,"ContainerPort":80,"Protocol":"tcp","HostIP":"::1"},
+                {"HostPort":18098,"ContainerPort":80,"Protocol":"udp","HostIP":"::"},
+                {"HostPort":18099,"ContainerPort":80,"Protocol":"tcp","HostIP":"127.0.0.1"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ports(&CreateInspect::default(), Some(&config)),
+            [
+                "[::1]:18097:80/tcp",
+                "[::]:18098:80/udp",
+                "127.0.0.1:18099:80/tcp"
+            ]
+        );
+        let running: CreateInspect = serde_json::from_str(
+            r#"{"NetworkSettings":{"Ports":{"80/tcp":[{"HostIp":"::1","HostPort":"18097"}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(ports(&running, None), ["[::1]:18097:80/tcp"]);
     }
 
     #[test]

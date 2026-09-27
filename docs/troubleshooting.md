@@ -309,7 +309,8 @@ keeps running untouched; the message names what could not be carried over. The
 first form names a setting freshdock knows it can't reproduce, the second a field
 where the throwaway copy came out different.
 
-Common causes: a static `--ip`, an explicit `--group-add`, `--userns-remap`, or a
+Common causes: a static `--ip`, an explicit `--group-add`, `--userns-remap`, an
+environment variable with a multi-line value or trailing whitespace, or a
 container created with different nerdctl global flags. Recreate the container by
 hand without that setting, or keep it in `watch` mode so freshdock only reports
 updates. See [Deployment: with nerdctl](deployment.md#what-is-different-on-nerdctl).
