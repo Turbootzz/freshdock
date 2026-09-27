@@ -89,12 +89,35 @@ fn remove_stale_dirs_in(tmp: &Path) -> usize {
             .and_then(|(_, suffix)| suffix_pid(suffix));
         if let Some(pid) = pid
             && !process_alive(pid)
+            && owned_by_us(&entry.path())
             && std::fs::remove_dir_all(entry.path()).is_ok()
         {
             removed += 1;
         }
     }
     removed
+}
+
+/// Does `path` belong to the user freshdock runs as? Its own private
+/// directories always do; anything else in the temp directory, even under a
+/// matching name, is another user's and left alone. When this can't be told,
+/// the answer is no.
+#[cfg(unix)]
+fn owned_by_us(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // /proc/self is owned by the process's effective uid.
+    match (
+        std::fs::metadata("/proc/self"),
+        std::fs::symlink_metadata(path),
+    ) {
+        (Ok(me), Ok(it)) => it.uid() == me.uid(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn owned_by_us(_path: &Path) -> bool {
+    false
 }
 
 /// Is the process that made a marked name still running? Then whatever it
@@ -210,6 +233,19 @@ mod tests {
         assert_eq!(remove_stale_dirs_in(tmp.path()), 1);
         assert!(!dead.exists());
         assert!(live.exists() && other.exists() && unrelated.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_our_own_directories_count_as_ours() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = PrivateDir::new("ownertest").unwrap();
+        assert!(owned_by_us(tmp.path()));
+        // `/` belongs to root; unless this test runs as root, it isn't ours.
+        if std::fs::metadata("/proc/self").unwrap().uid() != 0 {
+            assert!(!owned_by_us(Path::new("/")));
+        }
+        assert!(!owned_by_us(Path::new("/definitely/not/here")));
     }
 
     #[cfg(target_os = "linux")]

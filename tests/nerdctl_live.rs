@@ -509,11 +509,15 @@ async fn siblings_on_a_tag_that_moves_are_both_updated() {
         &format!("{p}-registry"),
         "-p",
         "127.0.0.1:15000:5000",
+        // So the old manifest can be deleted, as registries do with old digests.
+        "-e",
+        "REGISTRY_STORAGE_DELETE_ENABLED=true",
         "docker.io/library/registry:2",
     ]);
     publish(ALPINE, tag);
     must(&["pull", "--quiet", tag]);
     let old = image_id(tag);
+    let old_digest = image_digest(tag);
 
     let (a, b) = (format!("{p}-a"), format!("{p}-b"));
     for c in [&a, &b] {
@@ -545,6 +549,34 @@ async fn siblings_on_a_tag_that_moves_are_both_updated() {
 
     // Upstream publishes a new image under the same tag; updating A pulls it.
     publish("docker.io/library/busybox:1.36", tag);
+    // The registry forgets the old image, as registries that clean up
+    // untagged digests do. From here on B's old image exists only locally, so
+    // nothing below may fetch it: a create that quietly pulled would fail.
+    let manifest =
+        format!("http://127.0.0.1:15000/v2/freshdock-live/shared/manifests/{old_digest}");
+    let deleted = Command::new("curl")
+        .args(["-fsS", "-X", "DELETE", &manifest])
+        .status()
+        .expect("curl");
+    assert!(deleted.success(), "the registry deletes the old manifest");
+    let gone = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-I",
+            &manifest,
+        ])
+        .output()
+        .expect("curl");
+    assert_eq!(
+        String::from_utf8_lossy(&gone.stdout),
+        "404",
+        "the old image is no longer served"
+    );
+
     let outcome = recreate(&n, &a).await.expect("recreate a");
     assert!(
         matches!(outcome, RecreateOutcome::Recreated { .. }),
@@ -574,6 +606,24 @@ async fn siblings_on_a_tag_that_moves_are_both_updated() {
         Some(new.as_str()),
         "B is on the new image"
     );
+
+    // With both siblings moved on, the record kept for the old image goes.
+    n.release_unneeded_images().await;
+    let records = must(&["images", "--format", "{{.Repository}}:{{.Tag}} {{.Digest}}"]);
+    assert!(
+        !records.lines().any(|l| l.contains(&old_digest)),
+        "no record of the old image is left: {records}"
+    );
+}
+
+/// The manifest digest a tag points at, as the registry serves it.
+fn image_digest(reference: &str) -> String {
+    let out = must(&["image", "inspect", reference]);
+    let repo_digest = serde_json::from_str::<Vec<Value>>(&out).unwrap()[0]["RepoDigests"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    repo_digest.rsplit_once('@').unwrap().1.to_owned()
 }
 
 /// Removes the test registry's images from both namespaces.

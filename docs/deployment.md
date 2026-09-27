@@ -172,6 +172,9 @@ Environment=FRESHDOCK_RUNTIME=nerdctl
 # Environment=FRESHDOCK_NERDCTL_PATH=/usr/local/bin/nerdctl
 # Only if your containers are not in nerdctl's default namespace:
 # Environment=FRESHDOCK_CONTAINERD_NAMESPACE=default
+# Do not add PrivatePIDs=: the cleanup of an interrupted update tells a live
+# freshdock from a dead one by process id, so `run` and `recreate` must share
+# the host's pid namespace.
 
 [Install]
 WantedBy=multi-user.target
@@ -225,9 +228,17 @@ logs both.
   runs when it first lists it, before pulling anything. When containers share a
   tag, updating one moves the tag, and the others are still recognised as behind
   it and updated in turn. What freshdock cannot know is a tag that moved before it
-  first saw the container (say, a `nerdctl pull` by hand while freshdock was not
-  running): `check` then reports such a container as up to date until upstream
-  publishes again.
+  first saw the container: a `nerdctl pull` by hand while freshdock was not
+  running, or freshdock restarted after updating one container on a tag but
+  before the others. `check` then reports such a container as up to date until
+  upstream publishes again.
+- **Containers are only ever created from local images** (`--pull=never`), so
+  only `nerdctl pull` reaches the network, with freshdock's credentials and
+  proxy settings. To keep the image a not-yet-updated sibling still runs usable
+  after the pull moves the tag, freshdock first names it by its digest
+  (`<repository>@sha256:...`) and removes that name again once no container runs
+  the image. If freshdock is stopped in between, such a name can remain; remove it
+  with `nerdctl rmi <repository>@sha256:...`.
 - **Registry credentials** from freshdock's configuration are passed to
   `nerdctl pull` through a temporary, owner-only `DOCKER_CONFIG`. Without them,
   nerdctl's own login (`nerdctl login`) is used. See

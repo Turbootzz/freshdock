@@ -75,7 +75,7 @@ pub async fn run(
         Runtime::Nerdctl => {
             let nerdctl = Nerdctl::connect(&runtime, credentials).await?;
             nerdctl.sweep_or_warn().await;
-            run_with(
+            let result = run_with(
                 &nerdctl,
                 &name,
                 &health,
@@ -83,7 +83,10 @@ pub async fn run(
                 settings,
                 current_unix_timestamp,
             )
-            .await
+            .await;
+            // The daemon does this on every pass; a one-off run has only now.
+            nerdctl.release_unneeded_images().await;
+            result
         }
     }
 }

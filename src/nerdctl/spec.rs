@@ -399,6 +399,10 @@ impl NerdctlSpec {
             push(&mut args, "--add-host", host.clone());
         }
         args.extend(self.flags.iter().cloned());
+        // Local images only. A create that fetched a missing image would reach
+        // the network without the proxy settings or registry credentials the
+        // pull gets, and could quietly bring back an image nobody asked for.
+        args.push("--pull=never".to_owned());
         if let Some(entrypoint) = &self.entrypoint {
             push(&mut args, "--entrypoint", entrypoint.clone());
         }
@@ -1153,6 +1157,18 @@ mod tests {
             NativeInspect::default(),
             None,
         )
+    }
+
+    #[test]
+    fn every_create_is_local_only() {
+        for spec in [
+            spec_from("full", true),
+            spec_from("cmd", false),
+            NerdctlSpec::default(),
+        ] {
+            let args = spec.create_args("c", "img:1", None);
+            assert!(args.contains(&"--pull=never".to_owned()), "{args:?}");
+        }
     }
 
     #[test]
