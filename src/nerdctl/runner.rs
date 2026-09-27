@@ -4,6 +4,7 @@
 //! [`CommandRunner`], so unit tests can replay captured output with a fake
 //! instead of needing nerdctl and containerd.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -47,7 +48,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Variables nerdctl may need, passed through by exact name.
-const INHERITED_NAMES: [&str; 17] = [
+const INHERITED_NAMES: [&str; 11] = [
     "PATH",
     "HOME",
     "USER",
@@ -59,6 +60,15 @@ const INHERITED_NAMES: [&str; 17] = [
     "DOCKER_CONFIG",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+];
+
+/// Variable name prefixes nerdctl, containerd and CNI configure themselves with.
+const INHERITED_PREFIXES: [&str; 4] = ["CONTAINERD_", "NERDCTL_", "CNI_", "NETCONFPATH"];
+
+/// Proxy settings. Only a pull needs them, and a proxy URL often carries
+/// `user:password@`, so they are handed to `nerdctl pull` alone (see
+/// [`proxy_env`]): any other call could store them in a container's hooks.
+const PROXY_NAMES: [&str; 6] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -67,14 +77,28 @@ const INHERITED_NAMES: [&str; 17] = [
     "no_proxy",
 ];
 
-/// Variable name prefixes nerdctl, containerd and CNI configure themselves with.
-const INHERITED_PREFIXES: [&str; 4] = ["CONTAINERD_", "NERDCTL_", "CNI_", "NETCONFPATH"];
-
-/// The part of freshdock's environment nerdctl gets: what it needs to find
-/// its tools, its config, containerd and the network, and nothing else.
-pub(crate) fn inherited_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+/// The part of freshdock's environment every nerdctl call gets: what it needs
+/// to find its tools, its config and containerd, and nothing else. `vars_os`,
+/// so a variable that isn't valid UTF-8 is passed through (or skipped) rather
+/// than panicking.
+pub(crate) fn inherited_env(
+    vars: impl Iterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
     vars.filter(|(k, _)| {
-        INHERITED_NAMES.contains(&k.as_str()) || INHERITED_PREFIXES.iter().any(|p| k.starts_with(p))
+        k.to_str().is_some_and(|k| {
+            INHERITED_NAMES.contains(&k) || INHERITED_PREFIXES.iter().any(|p| k.starts_with(p))
+        })
+    })
+    .collect()
+}
+
+/// The proxy settings from `vars`, for the one call that needs the network:
+/// `nerdctl pull`. Values that aren't valid UTF-8 are skipped.
+pub(crate) fn proxy_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(String, String)> {
+    vars.filter_map(|(k, v)| {
+        let k = k.into_string().ok()?;
+        PROXY_NAMES.contains(&k.as_str()).then_some(())?;
+        Some((k, v.into_string().ok()?))
     })
     .collect()
 }
@@ -107,7 +131,7 @@ impl CommandRunner for ProcessRunner {
             // FRESHDOCK_REGISTRY_* / FRESHDOCK_NOTIFY_* secrets would be
             // stored with the container.
             .env_clear()
-            .envs(inherited_env(std::env::vars()))
+            .envs(inherited_env(std::env::vars_os()))
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -190,22 +214,54 @@ mod tests {
             ("AWS_SECRET_ACCESS_KEY", "x"),
             ("SUDO_USER", "someone"),
         ]
-        .map(|(k, v)| (k.to_owned(), v.to_owned()));
-        let kept: Vec<String> = inherited_env(vars.into_iter())
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let kept: Vec<String> = inherited_env(vars.clone().into_iter())
             .into_iter()
-            .map(|(k, _)| k)
+            .map(|(k, _)| k.into_string().unwrap())
             .collect();
         assert_eq!(
             kept,
             [
                 "PATH",
                 "HOME",
-                "HTTPS_PROXY",
                 "CONTAINERD_ADDRESS",
                 "NERDCTL_TOML",
                 "CNI_PATH"
             ]
         );
+        assert_eq!(
+            proxy_env(vars.into_iter()),
+            [("HTTPS_PROXY".to_owned(), "http://proxy:3128".to_owned())],
+            "proxy settings are kept apart, for pulls only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_variable_neither_panics_nor_leaks() {
+        use std::os::unix::ffi::OsStringExt;
+        let vars = [
+            (
+                OsString::from("PATH"),
+                OsString::from_vec(b"/usr/\xffbin".to_vec()),
+            ),
+            (
+                OsString::from_vec(b"WEIRD_\xff".to_vec()),
+                OsString::from("x"),
+            ),
+            (
+                OsString::from("HTTP_PROXY"),
+                OsString::from_vec(b"http://\xff".to_vec()),
+            ),
+        ];
+        let kept = inherited_env(vars.clone().into_iter());
+        assert_eq!(
+            kept.len(),
+            1,
+            "PATH passes through as it is; the odd name doesn't"
+        );
+        assert_eq!(kept[0].0, "PATH");
+        assert!(proxy_env(vars.into_iter()).is_empty());
     }
 
     #[tokio::test]
@@ -221,7 +277,7 @@ mod tests {
             let shell_own = ["PWD", "SHLVL", "_", "OLDPWD"].contains(&name);
             assert!(
                 shell_own
-                    || !inherited_env(std::iter::once((name.to_owned(), String::new()))).is_empty(),
+                    || !inherited_env(std::iter::once((name.into(), OsString::new()))).is_empty(),
                 "{name} reached the child"
             );
         }

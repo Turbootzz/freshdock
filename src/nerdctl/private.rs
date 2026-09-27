@@ -67,6 +67,36 @@ fn suffix_pid(suffix: &str) -> Option<u32> {
     parts[0].parse().ok()
 }
 
+/// Remove the private directories a killed freshdock left in the temp
+/// directory (a normal exit removes its own). Only those whose process is
+/// gone; returns how many were removed.
+pub fn remove_stale_dirs() -> usize {
+    remove_stale_dirs_in(&std::env::temp_dir())
+}
+
+fn remove_stale_dirs_in(tmp: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let pid = name
+            .strip_prefix("freshdock-")
+            .and_then(|rest| rest.split_once('-'))
+            .filter(|(purpose, _)| purpose.bytes().all(|b| b.is_ascii_lowercase()))
+            .and_then(|(_, suffix)| suffix_pid(suffix));
+        if let Some(pid) = pid
+            && !process_alive(pid)
+            && std::fs::remove_dir_all(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Is the process that made a marked name still running? Then whatever it
 /// named may be in use by it right now. Where this can't be told (no
 /// `/proc`), assume it is, so nothing is touched.
@@ -162,6 +192,24 @@ mod tests {
         ] {
             assert_eq!(split_marked(name, M), None, "{name}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_dead_process_private_dirs_are_removed() {
+        let tmp = PrivateDir::new("sweeptest").unwrap();
+        let mk = |name: &str| {
+            let p = tmp.path().join(name);
+            std::fs::create_dir(&p).unwrap();
+            p
+        };
+        let dead = mk("freshdock-env-999999999-1-0");
+        let live = mk(&format!("freshdock-pull-{}-1-0", std::process::id()));
+        let other = mk("freshdock-env-notasuffix");
+        let unrelated = mk("something-else-999999999-1-0");
+        assert_eq!(remove_stale_dirs_in(tmp.path()), 1);
+        assert!(!dead.exists());
+        assert!(live.exists() && other.exists() && unrelated.exists());
     }
 
     #[cfg(target_os = "linux")]

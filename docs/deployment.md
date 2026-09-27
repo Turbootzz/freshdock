@@ -205,22 +205,29 @@ logs both.
   readable by every local user, so a container's environment variables are passed
   through an owner-only `--env-file` that exists only for the `nerdctl create`.
   nerdctl is also started with only the environment it needs (`PATH`, `HOME`,
-  proxy, containerd, nerdctl and CNI variables), because it copies its caller's
+  containerd, nerdctl and CNI variables), because it copies its caller's
   environment into every container it creates; freshdock's own
-  `FRESHDOCK_REGISTRY_*` and `FRESHDOCK_NOTIFY_*` secrets never reach it.
+  `FRESHDOCK_REGISTRY_*` and `FRESHDOCK_NOTIFY_*` secrets never reach it. Proxy
+  settings (`HTTP_PROXY` and the like, which can carry a password) go to
+  `nerdctl pull` alone, the one call that needs the network.
 - **An interrupted update is cleaned up by the next `run` or `recreate`.** To
   remove a renamed archive, freshdock briefly renames the updated container to
   `<name>-freshdock-aside-...` (a nerdctl limitation), and preflight creates a
   `<name>-freshdock-check-...` trial container. If freshdock is killed in between,
-  the next `run` or `recreate` gives the container its name back and removes the
-  trial, and logs both. Only what an exited freshdock left is touched, never what
-  a still-running one (another daemon, a `recreate` in progress) is using, and
-  `check` never cleans up at all.
+  the next `run` or `recreate` gives the container its name back, removes the
+  trial and any leftover private temp directory, and logs it. Only what an exited
+  freshdock left is touched, never what a still-running one (another daemon, a
+  `recreate` in progress) is using, and `check` never cleans up at all.
 - **A misspelled `runtime`** (say `nerdcl`) stops freshdock at startup rather than
   falling back to Docker.
-- **Update detection compares digests only.** containerd records a container's image
-  by name, not by id. If the image was pulled again under the same tag without
-  recreating the container, `check` can report it as up to date.
+- **The running image is remembered from first sight.** containerd records a
+  container's image by name only, so freshdock notes which image each container
+  runs when it first lists it, before pulling anything. When containers share a
+  tag, updating one moves the tag, and the others are still recognised as behind
+  it and updated in turn. What freshdock cannot know is a tag that moved before it
+  first saw the container (say, a `nerdctl pull` by hand while freshdock was not
+  running): `check` then reports such a container as up to date until upstream
+  publishes again.
 - **Registry credentials** from freshdock's configuration are passed to
   `nerdctl pull` through a temporary, owner-only `DOCKER_CONFIG`. Without them,
   nerdctl's own login (`nerdctl login`) is used. See

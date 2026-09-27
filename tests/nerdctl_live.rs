@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use freshdock::config::{CredentialStore, Runtime, RuntimeSettings};
+use freshdock::docker::check::DockerCheck;
 use freshdock::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use freshdock::health::{HealthConfig, TokioClock};
 use freshdock::labels::LifecycleHooks;
@@ -443,4 +444,156 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
         inspect(&busy_trial).is_some(),
         "a running freshdock's trial is left alone"
     );
+}
+
+/// A second namespace to publish from. Namespaces have separate image stores,
+/// so the registry's tag can move while the test namespace's stays put, as
+/// when upstream publishes a new image.
+const STAGING_NS: &str = "freshdock-live-staging";
+
+fn staging(args: &[&str]) -> Result<String, String> {
+    let out = Command::new(nerdctl_bin())
+        .args(["--namespace", STAGING_NS])
+        .args(args)
+        .output()
+        .map_err(|e| format!("could not run nerdctl: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// Publish `source` as `tag` from the staging namespace, retrying while a
+/// freshly started registry comes up.
+fn publish(source: &str, tag: &str) {
+    for args in [vec!["pull", "--quiet", source], vec!["tag", source, tag]] {
+        staging(&args).unwrap_or_else(|e| panic!("staging nerdctl {}: {e}", args.join(" ")));
+    }
+    let mut last = String::new();
+    for _ in 0..20 {
+        match staging(&["push", tag]) {
+            Ok(_) => return,
+            Err(e) => last = e,
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!("push {tag}: {last}");
+}
+
+fn image_id(reference: &str) -> String {
+    let out = must(&["image", "inspect", reference]);
+    serde_json::from_str::<Vec<Value>>(&out).unwrap()[0]["Id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+#[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
+async fn siblings_on_a_tag_that_moves_are_both_updated() {
+    let Some(n) = backend().await else { return };
+    let p = prefix("tag");
+    let tag = "127.0.0.1:15000/freshdock-live/shared:v";
+    // Declared first so it drops last: the images can only go once the
+    // containers using them have.
+    let _images = ImageTeardown(tag);
+    let _teardown = Teardown {
+        prefix: p.clone(),
+        networks: vec![],
+    };
+    must(&[
+        "run",
+        "-d",
+        "--name",
+        &format!("{p}-registry"),
+        "-p",
+        "127.0.0.1:15000:5000",
+        "docker.io/library/registry:2",
+    ]);
+    publish(ALPINE, tag);
+    must(&["pull", "--quiet", tag]);
+    let old = image_id(tag);
+
+    let (a, b) = (format!("{p}-a"), format!("{p}-b"));
+    for c in [&a, &b] {
+        must(&[
+            "run",
+            "-d",
+            "--name",
+            c,
+            "--label",
+            "freshdock.enable=true",
+            tag,
+            "sleep",
+            "100000",
+        ]);
+    }
+    // freshdock lists them before anything is pulled, as a scheduler pass does.
+    let image_of = |listed: &[freshdock::docker::container::ContainerInfo], name: &str| {
+        listed
+            .iter()
+            .find(|c| {
+                c.names
+                    .as_ref()
+                    .is_some_and(|n| n.iter().any(|x| x == name))
+            })
+            .and_then(|c| c.image_id.clone())
+    };
+    let first = n.list_running().await.unwrap();
+    assert_eq!(image_of(&first, &b).as_deref(), Some(old.as_str()));
+
+    // Upstream publishes a new image under the same tag; updating A pulls it.
+    publish("docker.io/library/busybox:1.36", tag);
+    let outcome = recreate(&n, &a).await.expect("recreate a");
+    assert!(
+        matches!(outcome, RecreateOutcome::Recreated { .. }),
+        "{outcome:?}"
+    );
+    let new = image_id(tag);
+    assert_ne!(new, old, "A's pull moved the tag");
+
+    // B still runs the old image, so it is behind its tag...
+    let listed = n.list_running().await.unwrap();
+    assert_eq!(
+        image_of(&listed, &b).as_deref(),
+        Some(old.as_str()),
+        "B is seen behind its tag"
+    );
+    assert_eq!(image_of(&listed, &a).as_deref(), Some(new.as_str()));
+    // ...and its update goes through: the trial is built from the image B
+    // runs, not the new one, so nothing looks like a lost setting.
+    let outcome = recreate(&n, &b).await.expect("recreate b is not refused");
+    assert!(
+        matches!(outcome, RecreateOutcome::Recreated { .. }),
+        "{outcome:?}"
+    );
+    let listed = n.list_running().await.unwrap();
+    assert_eq!(
+        image_of(&listed, &b).as_deref(),
+        Some(new.as_str()),
+        "B is on the new image"
+    );
+}
+
+/// Removes the test registry's images from both namespaces.
+struct ImageTeardown(&'static str);
+
+impl Drop for ImageTeardown {
+    fn drop(&mut self) {
+        let repo = self.0.rsplit_once(':').map_or(self.0, |(r, _)| r);
+        for run in [nerdctl as fn(&[&str]) -> Result<String, String>, staging] {
+            let out = run(&["images", "--format", "{{.Repository}}:{{.Tag}}@{{.Digest}}"])
+                .unwrap_or_default();
+            for line in out.lines().filter(|l| l.starts_with(repo)) {
+                let (name, digest) = line.split_once('@').unwrap_or((line, ""));
+                let target = if name.ends_with(":<none>") {
+                    format!("{repo}@{digest}")
+                } else {
+                    name.to_owned()
+                };
+                let _ = run(&["rmi", "--force", &target]);
+            }
+        }
+    }
 }

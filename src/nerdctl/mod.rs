@@ -13,6 +13,7 @@ pub mod private;
 pub mod runner;
 pub mod spec;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,8 +35,8 @@ use self::auth::PullAuth;
 use self::inspect::{
     ContainerInspect, ImageInspect, Version, classify_error, error_message, parse_array,
 };
-use self::private::{PrivateDir, process_alive, split_marked, unique_suffix};
-use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError};
+use self::private::{PrivateDir, process_alive, remove_stale_dirs, split_marked, unique_suffix};
+use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError, proxy_env};
 use self::spec::{CreateInspect, NativeInspect, NerdctlSpec, NetworkConfig};
 
 /// The oldest nerdctl freshdock is tested against.
@@ -56,6 +57,22 @@ pub struct Nerdctl<R = ProcessRunner> {
     runner: R,
     namespace: String,
     credentials: Arc<CredentialStore>,
+    /// The image each container ran when freshdock first saw it, by container
+    /// id. containerd records a container's image by name only, so once a
+    /// pull moves the tag there is no other way to tell which image a sibling
+    /// on the same tag still runs. See [`Seen`].
+    seen: std::sync::Mutex<HashMap<String, Seen>>,
+}
+
+/// One image, as nerdctl can be asked for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Seen {
+    /// The config digest `image inspect` reports as `Id`: what the update
+    /// check compares against the tag's (see `probe::behind_tag`).
+    id: Option<String>,
+    /// A digest-pinned reference (`docker.io/library/nginx@sha256:...`), the
+    /// handle `nerdctl create` and `rmi` accept for one specific image.
+    pinned: Option<String>,
 }
 
 impl Nerdctl<ProcessRunner> {
@@ -82,6 +99,7 @@ impl<R: CommandRunner> Nerdctl<R> {
             runner,
             namespace,
             credentials,
+            seen: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -202,12 +220,27 @@ impl<R: CommandRunner> DockerCheck for Nerdctl<R> {
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .collect();
-        Ok(self
+        let mut listed: Vec<ContainerInfo> = self
             .inspect_containers(&ids)
             .await?
             .iter()
             .map(ContainerInspect::to_info)
-            .collect())
+            .collect();
+        // Record each container's image before anything in this pass can pull
+        // and move a tag: a sibling left behind by its neighbour's update then
+        // still shows as behind its tag.
+        for info in &mut listed {
+            if let (Some(id), Some(image)) = (info.id.clone(), info.image.clone()) {
+                info.image_id = self.image_of(&id, &image).await.id;
+            }
+        }
+        let live: std::collections::HashSet<&str> =
+            listed.iter().filter_map(|c| c.id.as_deref()).collect();
+        self.seen
+            .lock()
+            .unwrap()
+            .retain(|id, _| live.contains(id.as_str()));
+        Ok(listed)
     }
 
     async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
@@ -219,17 +252,21 @@ impl<R: CommandRunner> DockerCheck for Nerdctl<R> {
             .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
     }
 
-    /// `image_id` is `None`: containerd records a container's image by
-    /// reference only (see [`ContainerInspect::to_info`]).
+    /// `image_id` is the image the container ran when freshdock first saw it
+    /// (see [`Nerdctl::seen`]).
     async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
         let container = self.inspect_container(id).await?;
         let reference = container
             .image_ref()
             .ok_or(DockerError::Spec(SpecError::Missing("Config.Image")))?
             .to_owned();
+        let image_id = match container.id.as_deref() {
+            Some(cid) => self.image_of(cid, &reference).await.id,
+            None => None,
+        };
         Ok(ContainerImage {
             reference,
-            image_id: None,
+            image_id,
         })
     }
 }
@@ -279,28 +316,38 @@ impl<R: CommandRunner> Nerdctl<R> {
         }
     }
 
-    /// The image the tag points at now, as a digest-pinned reference
-    /// (`docker.io/library/nginx@sha256:…`). That is the handle nerdctl takes
-    /// for a specific image: `nerdctl create` and `rmi` both refuse the
-    /// config-digest id `image inspect` reports. containerd records a
-    /// container's image by reference only, so this is resolved from the tag,
-    /// before the pull moves it: the superseded image for cleanup, and the
-    /// exact image a network-namespace dependent is repaired onto.
-    async fn pinned_image(&self, reference: &str) -> Option<String> {
-        if reference.contains('@') {
-            return Some(reference.to_owned());
-        }
+    /// The image `reference` points at now.
+    async fn identify(&self, reference: &str) -> Seen {
         let img = match self.inspect_image(reference).await {
             Ok(img) => img,
             Err(e) => {
-                debug!(image = %reference, error = %e, "could not resolve the image digest");
-                return None;
+                debug!(image = %reference, error = %e, "could not resolve the image");
+                return Seen::default();
             }
         };
-        let digest = crate::probe::local_manifest_digests(reference, &img.repo_digests)
-            .into_iter()
-            .next()?;
-        Some(format!("{}@{digest}", crate::probe::strip_tag(reference)))
+        let pinned = if reference.contains('@') {
+            Some(reference.to_owned())
+        } else {
+            crate::probe::local_manifest_digests(reference, &img.repo_digests)
+                .into_iter()
+                .next()
+                .map(|digest| format!("{}@{digest}", crate::probe::strip_tag(reference)))
+        };
+        Seen { id: img.id, pinned }
+    }
+
+    /// The image container `id` runs: what it was first seen with, or, on
+    /// first sight, what its tag points at now (recorded from then on).
+    async fn image_of(&self, id: &str, reference: &str) -> Seen {
+        if let Some(seen) = self.seen.lock().unwrap().get(id) {
+            return seen.clone();
+        }
+        let seen = self.identify(reference).await;
+        self.seen
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), seen.clone());
+        seen
     }
 
     /// `nerdctl create` from a spec, returning the new container's id. The
@@ -421,7 +468,8 @@ impl<R: CommandRunner> Nerdctl<R> {
 
     /// Put right what a killed freshdock can leave behind: a container still
     /// stepped aside (see [`step_aside_name_holder`](Self::step_aside_name_holder))
-    /// gets its name back, and a preflight trial container is removed.
+    /// gets its name back, a preflight trial container is removed, and so are
+    /// private temp directories.
     ///
     /// Run it only where freshdock is about to change containers itself
     /// (`run`, `recreate`), never from the read-only `check`. And it leaves
@@ -432,6 +480,13 @@ impl<R: CommandRunner> Nerdctl<R> {
     /// renamed only while nothing else holds its name, and a trial only while
     /// it has never started.
     pub async fn sweep(&self) -> Result<(), DockerError> {
+        let dirs = remove_stale_dirs();
+        if dirs > 0 {
+            info!(
+                count = dirs,
+                "removed private temp directories a killed freshdock left behind"
+            );
+        }
         let listing = self
             .call(&["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
             .await?;
@@ -517,7 +572,13 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             .image_ref()
             .ok_or(DockerError::Spec(SpecError::Missing("Config.Image")))?
             .to_owned();
-        let image_id = self.pinned_image(&image_ref).await;
+        // The image it ran when first seen, which a sibling's pull may since have
+        // moved the tag away from: cleanup removes that one, a dependent repair
+        // pins it, and preflight tries the flags against it.
+        let image_id = match listed.id.as_deref() {
+            Some(cid) => self.image_of(cid, &image_ref).await.pinned,
+            None => self.identify(&image_ref).await.pinned,
+        };
         let network_config = self.network_config(&compat).await;
         Ok(ContainerSpec {
             name: container_name,
@@ -545,7 +606,15 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             ports: Vec::new(),
             ..nerdctl.clone()
         };
-        if let Err(e) = self.create(&without_ports, &trial, &spec.image_ref).await {
+        // Compare like with like: the trial runs the image the original runs.
+        // That is the tag's image, unless a sibling's update has moved the tag
+        // since this container was first seen; then it is the pinned one.
+        let now = self.identify(&spec.image_ref).await.pinned;
+        let trial_image = match (&spec.image_id, &now) {
+            (Some(ran), Some(now)) if ran != now => ran.as_str(),
+            _ => spec.image_ref.as_str(),
+        };
+        if let Err(e) = self.create(&without_ports, &trial, trial_image).await {
             return Err(DockerError::Unsupported(format!(
                 "nerdctl rejected {}'s rebuilt settings, so it was not updated: {e}",
                 spec.name
@@ -576,10 +645,13 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             })?),
             None => None,
         };
-        let env: Vec<(String, String)> = auth
-            .iter()
-            .map(|a| ("DOCKER_CONFIG".to_owned(), a.dir().display().to_string()))
-            .collect();
+        // The pull is the one call that reaches the network, so it alone gets
+        // the proxy settings (see `runner::proxy_env`).
+        let mut env = proxy_env(std::env::vars_os());
+        env.extend(
+            auth.iter()
+                .map(|a| ("DOCKER_CONFIG".to_owned(), a.dir().display().to_string())),
+        );
         self.call_with(&["pull", "--quiet", &reference], &env, PULL_TIMEOUT)
             .await?;
         Ok(())
@@ -877,6 +949,7 @@ mod tests {
     #[derive(Default)]
     struct FakeRunner {
         script: Vec<(String, CmdOutput)>,
+        once: Mutex<Vec<(String, CmdOutput)>>,
         calls: Mutex<Vec<String>>,
         /// `config.json` as it was on disk during each call given a
         /// `DOCKER_CONFIG`.
@@ -888,6 +961,12 @@ mod tests {
     impl FakeRunner {
         fn on(mut self, args: &str, out: CmdOutput) -> Self {
             self.script.push((args.to_owned(), out));
+            self
+        }
+
+        /// A reply used for the first matching call only, ahead of `on`.
+        fn on_once(self, args: &str, out: CmdOutput) -> Self {
+            self.once.lock().unwrap().push((args.to_owned(), out));
             self
         }
 
@@ -918,6 +997,11 @@ mod tests {
                 self.env_files.lock().unwrap().push((path, contents));
             }
             self.calls.lock().unwrap().push(call.clone());
+            // One-shot replies first, in order, then the standing ones.
+            let mut once = self.once.lock().unwrap();
+            if let Some(i) = once.iter().position(|(want, _)| glob_match(want, &call)) {
+                return Ok(once.remove(i).1);
+            }
             let Some((_, out)) = self.script.iter().find(|(want, _)| glob_match(want, &call))
             else {
                 panic!("unexpected nerdctl call: {call}");
@@ -963,6 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn list_running_inspects_every_listed_container_in_one_call() {
         let runner = FakeRunner::default()
+            .on("image inspect *", ok(fixture("nerdctl_image_inspect.json")))
             .on("ps --no-trunc -q", ok(format!("{PLAIN_ID}\n{NETDEP_ID}\n")))
             .on(
                 &format!("inspect {PLAIN_ID} {NETDEP_ID}"),
@@ -976,12 +1061,22 @@ mod tests {
         let names: Vec<_> = listed.iter().map(crate::docker::container_name).collect();
         assert_eq!(names, ["fd-plain", "fd-netdep"]);
         assert!(listed.iter().all(|c| c.state == ListedState::Running));
-        assert_eq!(n.runner.calls().len(), 2);
+        let container_inspects = n
+            .runner
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("inspect "))
+            .count();
+        assert_eq!(
+            container_inspects, 1,
+            "one batched inspect for all containers"
+        );
     }
 
     #[tokio::test]
     async fn list_running_skips_a_container_that_disappeared() {
         let runner = FakeRunner::default()
+            .on("image inspect *", ok(fixture("nerdctl_image_inspect.json")))
             .on("ps --no-trunc -q", ok(format!("{PLAIN_ID}\ngone\n")))
             .on(&format!("inspect {PLAIN_ID} gone"), fail(NOT_FOUND))
             .on(
@@ -1030,18 +1125,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn container_image_reports_the_reference_and_no_id() {
-        let n = nerdctl(FakeRunner::default().on(
-            "inspect fd-plain",
-            ok(fixture("nerdctl_plain_inspect.json")),
-        ));
+    async fn container_image_reports_the_reference_and_the_image_first_seen() {
+        let n = nerdctl(
+            FakeRunner::default()
+                .on(
+                    "inspect fd-plain",
+                    ok(fixture("nerdctl_plain_inspect.json")),
+                )
+                .on(
+                    &format!("image inspect {IMAGE}"),
+                    ok(fixture("nerdctl_image_inspect.json")),
+                ),
+        );
         assert_eq!(
             n.container_image("fd-plain").await.unwrap(),
             ContainerImage {
-                reference: "docker.io/library/nginx:1.27-alpine".to_owned(),
-                image_id: None,
+                reference: IMAGE.to_owned(),
+                image_id: Some(
+                    "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea"
+                        .to_owned()
+                ),
             }
         );
+    }
+
+    const OLD_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NEW_DIGEST: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn image_json(id: &str, digest: &str) -> String {
+        format!(r#"[{{"Id":"{id}","RepoDigests":["nginx@{digest}"]}}]"#)
+    }
+
+    /// fd-plain, first listed while its tag points at the old image, which a
+    /// sibling's pull then moves to the new one.
+    fn tag_moves_after_first_listing() -> FakeRunner {
+        FakeRunner::default()
+            .on("ps --no-trunc -q", ok(format!("{PLAIN_ID}\n")))
+            .on(
+                &format!("inspect {PLAIN_ID}"),
+                ok(fixture("nerdctl_plain_inspect.json")),
+            )
+            .on(
+                "inspect fd-plain",
+                ok(fixture("nerdctl_plain_inspect.json")),
+            )
+            .on(
+                "inspect --mode=native fd-plain",
+                ok(fixture("nerdctl_plain_native.json")),
+            )
+            .on_once(
+                &format!("image inspect {IMAGE}"),
+                ok(image_json("sha256:old", OLD_DIGEST)),
+            )
+            .on(
+                &format!("image inspect {IMAGE}"),
+                ok(image_json("sha256:new", NEW_DIGEST)),
+            )
+    }
+
+    #[tokio::test]
+    async fn a_sibling_keeps_the_image_it_was_first_seen_running() {
+        let n = nerdctl(tag_moves_after_first_listing());
+        let first = n.list_running().await.unwrap();
+        assert_eq!(first[0].image_id.as_deref(), Some("sha256:old"));
+        // The tag now points at the new image; the container still runs the old.
+        let again = n.list_running().await.unwrap();
+        assert_eq!(
+            again[0].image_id.as_deref(),
+            Some("sha256:old"),
+            "so the update check still sees it behind its tag"
+        );
+        let spec = n.inspect("fd-plain").await.unwrap();
+        assert_eq!(
+            spec.image_id,
+            Some(format!("docker.io/library/nginx@{OLD_DIGEST}")),
+            "cleanup and dependent repair act on the old image, not the new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_tries_the_flags_on_the_image_the_container_runs() {
+        let runner = tag_moves_after_first_listing()
+            .on(
+                &format!("create --name fd-plain-freshdock-check-* docker.io/library/nginx@{OLD_DIGEST} *"),
+                ok("trialid\n"),
+            )
+            .on(
+                "inspect --mode=native fd-plain-freshdock-check-*",
+                ok(fixture("nerdctl_plain_native.json")),
+            )
+            .on("rm --force fd-plain-freshdock-check-*", ok(""));
+        let n = nerdctl(runner);
+        n.list_running().await.unwrap();
+        let spec = n.inspect("fd-plain").await.unwrap();
+        n.preflight_recreate(&spec).await.unwrap();
+        assert!(
+            n.runner
+                .calls()
+                .iter()
+                .any(|c| c.contains(&format!("nginx@{OLD_DIGEST}"))),
+            "the trial used the old image"
+        );
+    }
+
+    #[tokio::test]
+    async fn containers_no_longer_listed_are_forgotten() {
+        let n = nerdctl(
+            tag_moves_after_first_listing()
+                .on_once("ps --no-trunc -q", ok(format!("{PLAIN_ID}\n")))
+                .on_once("ps --no-trunc -q", ok("")),
+        );
+        n.list_running().await.unwrap();
+        assert_eq!(n.seen.lock().unwrap().len(), 1);
+        n.list_running().await.unwrap();
+        assert!(n.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1528,6 +1727,7 @@ mod tests {
                 "inspect fd-plain",
                 ok(fixture("nerdctl_plain_inspect.json")),
             )
+            .on("image inspect *", ok(fixture("nerdctl_image_inspect.json")))
             .on("ps --no-trunc -q", ok(format!("{PLAIN_ID}\n{NETDEP_ID}\n")))
             .on(
                 &format!("inspect {PLAIN_ID} {NETDEP_ID}"),

@@ -124,9 +124,9 @@ impl ContainerInspect {
 
     /// The listing row for this container.
     ///
-    /// `image_id` is always `None`: containerd records a container's image by
-    /// reference only, so once the tag moves there is no id to report. The
-    /// update check then compares by digest alone.
+    /// `image_id` is left `None` here: containerd records a container's image by
+    /// reference only, so the backend fills it in from the image it saw the
+    /// container run first (see `Nerdctl::list_running`).
     pub fn to_info(&self) -> ContainerInfo {
         let state = self.state.clone().unwrap_or_default();
         ContainerInfo {
