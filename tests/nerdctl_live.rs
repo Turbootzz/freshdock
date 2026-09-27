@@ -384,24 +384,45 @@ async fn a_setting_that_cannot_be_reproduced_is_refused_before_the_stop() {
 
 #[tokio::test]
 #[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
-async fn connecting_repairs_what_an_interrupted_update_left() {
+async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() {
     let Some(_) = backend().await else { return };
     let p = prefix("sw");
     let _teardown = Teardown {
         prefix: p.clone(),
         networks: vec![],
     };
-    // A service left stepped aside, as if freshdock died between the renames.
+    // Left by a freshdock that died (pid 999999999 can't exist): a service
+    // stepped aside between the renames, and a never-started trial container.
     let service = format!("{p}-svc");
-    let aside = format!("{service}-freshdock-aside-1-2-0");
+    let aside = format!("{service}-freshdock-aside-999999999-2-0");
     must(&["run", "-d", "--name", &aside, ALPINE, "sleep", "100000"]);
     let service_id = id_of(&aside).unwrap();
-    // A trial container left by an interrupted preflight: created, never started.
-    let trial = format!("{p}-db-freshdock-check-1-2-1");
+    let trial = format!("{p}-db-freshdock-check-999999999-2-1");
     must(&["create", "--name", &trial, ALPINE, "true"]);
+    // The same, but made by a process that is still running (this test): a
+    // daemon in the middle of an update.
+    let live = std::process::id();
+    let busy_aside = format!("{p}-busy-freshdock-aside-{live}-2-0");
+    must(&[
+        "run",
+        "-d",
+        "--name",
+        &busy_aside,
+        ALPINE,
+        "sleep",
+        "100000",
+    ]);
+    let busy_trial = format!("{p}-busy-freshdock-check-{live}-2-1");
+    must(&["create", "--name", &busy_trial, ALPINE, "true"]);
 
-    // Connecting runs the sweep.
-    let _n = backend().await.unwrap();
+    // Connecting alone (what `check` does) changes nothing.
+    let n = backend().await.unwrap();
+    assert!(
+        inspect(&aside).is_some() && inspect(&trial).is_some(),
+        "connect must not sweep"
+    );
+
+    n.sweep().await.expect("sweep");
 
     assert_eq!(
         id_of(&service).as_deref(),
@@ -410,5 +431,16 @@ async fn connecting_repairs_what_an_interrupted_update_left() {
     );
     assert!(running(&service));
     assert!(inspect(&aside).is_none());
-    assert!(inspect(&trial).is_none(), "the trial container is gone");
+    assert!(
+        inspect(&trial).is_none(),
+        "the dead process's trial is gone"
+    );
+    assert!(
+        inspect(&busy_aside).is_some(),
+        "a running freshdock's step-aside is left alone"
+    );
+    assert!(
+        inspect(&busy_trial).is_some(),
+        "a running freshdock's trial is left alone"
+    );
 }

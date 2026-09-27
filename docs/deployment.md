@@ -208,12 +208,14 @@ logs both.
   proxy, containerd, nerdctl and CNI variables), because it copies its caller's
   environment into every container it creates; freshdock's own
   `FRESHDOCK_REGISTRY_*` and `FRESHDOCK_NOTIFY_*` secrets never reach it.
-- **An interrupted update is cleaned up at the next start.** To remove a renamed
-  archive, freshdock briefly renames the updated container to
+- **An interrupted update is cleaned up by the next `run` or `recreate`.** To
+  remove a renamed archive, freshdock briefly renames the updated container to
   `<name>-freshdock-aside-...` (a nerdctl limitation), and preflight creates a
-  `<name>-freshdock-check-...` trial container. If freshdock stops in between, the
-  next start gives the container its name back and removes the trial, and logs
-  both.
+  `<name>-freshdock-check-...` trial container. If freshdock is killed in between,
+  the next `run` or `recreate` gives the container its name back and removes the
+  trial, and logs both. Only what an exited freshdock left is touched, never what
+  a still-running one (another daemon, a `recreate` in progress) is using, and
+  `check` never cleans up at all.
 - **A misspelled `runtime`** (say `nerdcl`) stops freshdock at startup rather than
   falling back to Docker.
 - **Update detection compares digests only.** containerd records a container's image

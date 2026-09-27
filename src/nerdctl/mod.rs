@@ -34,7 +34,7 @@ use self::auth::PullAuth;
 use self::inspect::{
     ContainerInspect, ImageInspect, Version, classify_error, error_message, parse_array,
 };
-use self::private::{PrivateDir, unique_suffix};
+use self::private::{PrivateDir, process_alive, split_marked, unique_suffix};
 use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError};
 use self::spec::{CreateInspect, NativeInspect, NerdctlSpec, NetworkConfig};
 
@@ -72,9 +72,6 @@ impl Nerdctl<ProcessRunner> {
         );
         warn_unless_root();
         nerdctl.check_version().await?;
-        if let Err(e) = nerdctl.sweep().await {
-            warn!(error = %e, "could not check for containers an interrupted update left behind");
-        }
         Ok(nerdctl)
     }
 }
@@ -414,12 +411,26 @@ impl<R: CommandRunner> Nerdctl<R> {
         Ok(Some((created.to_owned(), temporary)))
     }
 
-    /// Put right what an interrupted freshdock can leave behind, before doing
-    /// anything else: a container still stepped aside (see
-    /// [`step_aside_name_holder`](Self::step_aside_name_holder)) gets its name
-    /// back, and a trial container from preflight is removed. Only acts where
-    /// it is safe: a stepped-aside container is renamed only while nothing else
-    /// holds its name, and a trial only while it has never started.
+    /// [`sweep`](Self::sweep), with a failure logged rather than returned: it
+    /// is housekeeping, and must never stop freshdock from starting.
+    pub async fn sweep_or_warn(&self) {
+        if let Err(e) = self.sweep().await {
+            warn!(error = %e, "could not check for containers an interrupted update left behind");
+        }
+    }
+
+    /// Put right what a killed freshdock can leave behind: a container still
+    /// stepped aside (see [`step_aside_name_holder`](Self::step_aside_name_holder))
+    /// gets its name back, and a preflight trial container is removed.
+    ///
+    /// Run it only where freshdock is about to change containers itself
+    /// (`run`, `recreate`), never from the read-only `check`. And it leaves
+    /// alone anything whose name was made by a process that is still running:
+    /// that process may be mid-update, and "fixing" its stepped-aside
+    /// container would break the archive removal it is in the middle of. It
+    /// only acts where it is safe besides: a stepped-aside container is
+    /// renamed only while nothing else holds its name, and a trial only while
+    /// it has never started.
     pub async fn sweep(&self) -> Result<(), DockerError> {
         let listing = self
             .call(&["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
@@ -427,7 +438,11 @@ impl<R: CommandRunner> Nerdctl<R> {
         for line in listing.lines() {
             let (name, status) = line.split_once('\t').unwrap_or((line, ""));
             let name = name.trim();
-            if let Some((original, _)) = name.rsplit_once(ASIDE_MARKER) {
+            if let Some((original, pid)) = split_marked(name, ASIDE_MARKER) {
+                if process_alive(pid) {
+                    debug!(container = %name, pid, "stepped aside by a running freshdock; leaving it");
+                    continue;
+                }
                 match self.inspect_container(original).await {
                     Err(e) if e.is_not_found() => {
                         match self.call(&["rename", name, original]).await {
@@ -446,7 +461,11 @@ impl<R: CommandRunner> Nerdctl<R> {
                         warn!(container = %name, error = %e, "could not check a stepped-aside container")
                     }
                 }
-            } else if name.contains(CHECK_MARKER) {
+            } else if let Some((_, pid)) = split_marked(name, CHECK_MARKER) {
+                if process_alive(pid) {
+                    debug!(container = %name, pid, "trial container of a running freshdock; leaving it");
+                    continue;
+                }
                 if !status.trim().starts_with("Created") {
                     warn!(container = %name, %status, "not removing a preflight trial container that has run; remove it by hand");
                     continue;
@@ -1216,25 +1235,54 @@ mod tests {
             FakeRunner::default()
                 .on(
                     SWEEP_LIST,
-                    ok("web-freshdock-aside-1-2-0\tUp 2 hours\n\
-                        db-freshdock-check-1-2-1\tCreated\n\
+                    ok("web-freshdock-aside-999999999-2-0\tUp 2 hours\n\
+                        db-freshdock-check-999999999-2-1\tCreated\n\
                         plain\tUp 3 hours\n"),
                 )
                 .on("inspect web", fail(NOT_FOUND))
-                .on("rename web-freshdock-aside-1-2-0 web", ok(""))
-                .on("rm --force db-freshdock-check-1-2-1", ok("")),
+                .on("rename web-freshdock-aside-999999999-2-0 web", ok(""))
+                .on("rm --force db-freshdock-check-999999999-2-1", ok("")),
         );
         n.sweep().await.unwrap();
         let calls = n.runner.calls();
         assert!(
-            calls.contains(&"rename web-freshdock-aside-1-2-0 web".to_owned()),
+            calls.contains(&"rename web-freshdock-aside-999999999-2-0 web".to_owned()),
             "{calls:?}"
         );
         assert!(
-            calls.contains(&"rm --force db-freshdock-check-1-2-1".to_owned()),
+            calls.contains(&"rm --force db-freshdock-check-999999999-2-1".to_owned()),
             "{calls:?}"
         );
         assert_eq!(calls.len(), 4, "plain is left alone: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_leaves_a_running_freshdocks_markers_alone() {
+        // This test's own pid: a live process, as a daemon mid-update would be.
+        let pid = std::process::id();
+        let aside = format!("web-freshdock-aside-{pid}-2-0");
+        let trial = format!("db-freshdock-check-{pid}-2-1");
+        let n = nerdctl(FakeRunner::default().on(
+            SWEEP_LIST,
+            ok(format!("{aside}\tUp 2 hours\n{trial}\tCreated\n")),
+        ));
+        n.sweep().await.unwrap();
+        assert_eq!(
+            n.runner.calls(),
+            [SWEEP_LIST],
+            "nothing is inspected, renamed or removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_ignores_names_that_only_contain_a_marker() {
+        let n = nerdctl(FakeRunner::default().on(
+            SWEEP_LIST,
+            ok("my-freshdock-check-list\tCreated\n\
+                web-freshdock-aside-backup\tUp 1 hour\n"),
+        ));
+        n.sweep().await.unwrap();
+        assert_eq!(n.runner.calls(), [SWEEP_LIST]);
     }
 
     #[tokio::test]
@@ -1243,8 +1291,8 @@ mod tests {
             FakeRunner::default()
                 .on(
                     SWEEP_LIST,
-                    ok("web-freshdock-aside-1-2-0\tUp 2 hours\n\
-                        db-freshdock-check-1-2-1\tUp 5 seconds\n"),
+                    ok("web-freshdock-aside-999999999-2-0\tUp 2 hours\n\
+                        db-freshdock-check-999999999-2-1\tUp 5 seconds\n"),
                 )
                 // Something else has taken the name meanwhile.
                 .on("inspect web", ok(inspect_json("other", "web"))),

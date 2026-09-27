@@ -61,6 +61,7 @@ pub async fn run(
         }
         Runtime::Nerdctl => {
             let nerdctl = Nerdctl::connect(&runtime, credentials.clone()).await?;
+            nerdctl.sweep_or_warn().await;
             serve(
                 &nerdctl,
                 client,

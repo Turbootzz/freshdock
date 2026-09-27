@@ -42,6 +42,39 @@ impl Drop for PrivateDir {
     }
 }
 
+/// Split `<base><marker><suffix>` where `<suffix>` is exactly what
+/// [`unique_suffix`] makes (`<pid>-<nanos>-<n>`, all digits). Returns the base
+/// and the pid of the process that made the name. Anything else, including a
+/// name that merely contains the marker, is `None`.
+pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, u32)> {
+    let (base, suffix) = name.rsplit_once(marker)?;
+    if base.is_empty() {
+        return None;
+    }
+    Some((base, suffix_pid(suffix)?))
+}
+
+/// The pid in a [`unique_suffix`], or `None` if `suffix` isn't one.
+fn suffix_pid(suffix: &str) -> Option<u32> {
+    let parts: Vec<&str> = suffix.split('-').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    parts[0].parse().ok()
+}
+
+/// Is the process that made a marked name still running? Then whatever it
+/// named may be in use by it right now. Where this can't be told (no
+/// `/proc`), assume it is, so nothing is touched.
+pub fn process_alive(pid: u32) -> bool {
+    let proc = Path::new("/proc");
+    !proc.is_dir() || proc.join(pid.to_string()).exists()
+}
+
 /// A suffix for temporary names: the process id, the time, and a counter, so
 /// two in one process never collide.
 pub fn unique_suffix() -> String {
@@ -107,5 +140,35 @@ mod tests {
     #[test]
     fn suffixes_never_repeat() {
         assert_ne!(unique_suffix(), unique_suffix());
+    }
+
+    #[test]
+    fn marked_names_split_only_on_the_exact_suffix() {
+        const M: &str = "-freshdock-check-";
+        let made = format!("web{M}{}", unique_suffix());
+        assert_eq!(split_marked(&made, M), Some(("web", std::process::id())));
+        assert_eq!(
+            split_marked("db-freshdock-check-12-34-5", M),
+            Some(("db", 12))
+        );
+        for name in [
+            "db-freshdock-check-12-34",     // too few parts
+            "db-freshdock-check-12-34-5-6", // too many
+            "db-freshdock-check-12-34-x",   // not digits
+            "db-freshdock-check-",          // no suffix
+            "-freshdock-check-12-34-5",     // no base
+            "my-freshdock-check-list",      // merely contains the marker
+            "db-freshdock-check-12--5",     // empty part
+        ] {
+            assert_eq!(split_marked(name, M), None, "{name}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_liveness_follows_proc() {
+        assert!(process_alive(std::process::id()));
+        // Far above any pid_max Linux allows (2^22).
+        assert!(!process_alive(999_999_999));
     }
 }
