@@ -46,6 +46,39 @@ pub trait CommandRunner: Send + Sync {
     ) -> Result<CmdOutput, RunError>;
 }
 
+/// Variables nerdctl may need, passed through by exact name.
+const INHERITED_NAMES: [&str; 17] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "DOCKER_CONFIG",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
+
+/// Variable name prefixes nerdctl, containerd and CNI configure themselves with.
+const INHERITED_PREFIXES: [&str; 4] = ["CONTAINERD_", "NERDCTL_", "CNI_", "NETCONFPATH"];
+
+/// The part of freshdock's environment nerdctl gets: what it needs to find
+/// its tools, its config, containerd and the network, and nothing else.
+pub(crate) fn inherited_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter(|(k, _)| {
+        INHERITED_NAMES.contains(&k.as_str()) || INHERITED_PREFIXES.iter().any(|p| k.starts_with(p))
+    })
+    .collect()
+}
+
 /// Runs the real nerdctl binary.
 #[derive(Debug, Clone)]
 pub struct ProcessRunner {
@@ -69,6 +102,12 @@ impl CommandRunner for ProcessRunner {
         let bin = self.bin.display().to_string();
         let child = tokio::process::Command::new(&self.bin)
             .args(args)
+            // Not freshdock's own environment: nerdctl copies its caller's
+            // environment into every container's OCI hooks, where freshdock's
+            // FRESHDOCK_REGISTRY_* / FRESHDOCK_NOTIFY_* secrets would be
+            // stored with the container.
+            .env_clear()
+            .envs(inherited_env(std::env::vars()))
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -135,6 +174,58 @@ mod tests {
             .unwrap();
         assert!(out.success());
         assert_eq!(out.stdout, "value");
+    }
+
+    #[test]
+    fn freshdock_secrets_are_not_inherited() {
+        let vars = [
+            ("PATH", "/usr/bin"),
+            ("HOME", "/root"),
+            ("HTTPS_PROXY", "http://proxy:3128"),
+            ("CONTAINERD_ADDRESS", "/run/containerd/containerd.sock"),
+            ("NERDCTL_TOML", "/etc/nerdctl/nerdctl.toml"),
+            ("CNI_PATH", "/opt/cni/bin"),
+            ("FRESHDOCK_REGISTRY_GHCR_TOKEN", "ghp_secret"),
+            ("FRESHDOCK_NOTIFY_OPS_PASSWORD", "hunter2"),
+            ("AWS_SECRET_ACCESS_KEY", "x"),
+            ("SUDO_USER", "someone"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let kept: Vec<String> = inherited_env(vars.into_iter())
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "PATH",
+                "HOME",
+                "HTTPS_PROXY",
+                "CONTAINERD_ADDRESS",
+                "NERDCTL_TOML",
+                "CNI_PATH"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_child_sees_only_the_allowlist_and_the_extra_env() {
+        let env = [("DOCKER_CONFIG".to_owned(), "/tmp/x".to_owned())];
+        let out = ProcessRunner::new("sh")
+            .run(&args(&["-c", "env"]), &env, SECOND)
+            .await
+            .unwrap();
+        for line in out.stdout.lines() {
+            let name = line.split('=').next().unwrap_or("");
+            // `sh` itself may add a few (PWD, SHLVL, _).
+            let shell_own = ["PWD", "SHLVL", "_", "OLDPWD"].contains(&name);
+            assert!(
+                shell_own
+                    || !inherited_env(std::iter::once((name.to_owned(), String::new()))).is_empty(),
+                "{name} reached the child"
+            );
+        }
+        assert!(out.stdout.contains("DOCKER_CONFIG=/tmp/x"));
     }
 
     #[tokio::test]

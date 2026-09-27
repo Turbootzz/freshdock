@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod compare;
 pub mod inspect;
+pub mod private;
 pub mod runner;
 pub mod spec;
 
@@ -33,6 +34,7 @@ use self::auth::PullAuth;
 use self::inspect::{
     ContainerInspect, ImageInspect, Version, classify_error, error_message, parse_array,
 };
+use self::private::PrivateDir;
 use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError};
 use self::spec::{CreateInspect, NativeInspect, NerdctlSpec, NetworkConfig};
 
@@ -286,6 +288,42 @@ impl<R: CommandRunner> Nerdctl<R> {
         Some(format!("{}@{digest}", crate::probe::strip_tag(reference)))
     }
 
+    /// `nerdctl create` from a spec, returning the new container's id. The
+    /// environment goes through an owner-only env file that exists only for
+    /// this call, never through the (world-readable) arguments.
+    async fn create(
+        &self,
+        spec: &NerdctlSpec,
+        name: &str,
+        image: &str,
+    ) -> Result<String, DockerError> {
+        let private = match spec.env_file() {
+            Some(body) => {
+                let dir = PrivateDir::new("env").map_err(|e| {
+                    DockerError::Runtime(format!("could not write the environment file: {e}"))
+                })?;
+                let path = dir.write("env", body.as_bytes()).map_err(|e| {
+                    DockerError::Runtime(format!("could not write the environment file: {e}"))
+                })?;
+                Some((dir, path))
+            }
+            None => None,
+        };
+        let env_file = private.as_ref().map(|(_, path)| path.display().to_string());
+        let args = spec.create_args(name, image, env_file.as_deref());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let stdout = self.call(&args).await?;
+        drop(private);
+        stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                DockerError::Runtime("nerdctl create printed no container id".to_owned())
+            })
+    }
+
     /// Where the trial container's runtime spec and labels differ from the
     /// original's (see [`compare`]).
     async fn compare_with_trial(
@@ -422,9 +460,7 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             ports: Vec::new(),
             ..nerdctl.clone()
         };
-        let args = without_ports.create_args(&trial, &spec.image_ref);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        if let Err(e) = self.call(&args).await {
+        if let Err(e) = self.create(&without_ports, &trial, &spec.image_ref).await {
             return Err(DockerError::Unsupported(format!(
                 "nerdctl rejected {}'s rebuilt settings, so it was not updated: {e}",
                 spec.name
@@ -505,17 +541,7 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
         // Preflight already refused these for the updated container; a
         // network-namespace dependent's repair has no preflight of its own.
         refuse_unsupported(name, nerdctl)?;
-        let args = nerdctl.create_args(name, image);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let stdout = self.call(&args).await?;
-        stdout
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                DockerError::Runtime("nerdctl create printed no container id".to_owned())
-            })
+        self.create(nerdctl, name, image).await
     }
 
     async fn start(&self, name_or_id: &str) -> Result<(), DockerError> {
@@ -766,6 +792,8 @@ mod tests {
         /// `config.json` as it was on disk during each call given a
         /// `DOCKER_CONFIG`.
         docker_configs: Mutex<Vec<String>>,
+        /// `(path, contents)` of each `--env-file`, read during the call.
+        env_files: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeRunner {
@@ -794,6 +822,11 @@ mod tests {
                     let config = std::fs::read_to_string(format!("{dir}/config.json")).unwrap();
                     self.docker_configs.lock().unwrap().push(config);
                 }
+            }
+            if let Some(i) = args.iter().position(|a| a == "--env-file") {
+                let path = args[i + 1].clone();
+                let contents = std::fs::read_to_string(&path).unwrap();
+                self.env_files.lock().unwrap().push((path, contents));
             }
             self.calls.lock().unwrap().push(call.clone());
             let Some((_, out)) = self.script.iter().find(|(want, _)| glob_match(want, &call))
@@ -1035,6 +1068,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_passes_the_environment_in_a_private_file_only() {
+        let mut compat: Vec<serde_json::Value> =
+            serde_json::from_str(&fixture("nerdctl_plain_inspect.json")).unwrap();
+        compat[0]["Config"]["Env"] = serde_json::json!(["PATH=/bin", "DB_PASSWORD=hunter2-secret"]);
+        let n = nerdctl(
+            FakeRunner::default()
+                .on(
+                    "inspect fd-plain",
+                    ok(serde_json::to_string(&compat).unwrap()),
+                )
+                .on(
+                    "inspect --mode=native fd-plain",
+                    ok(fixture("nerdctl_plain_native.json")),
+                )
+                .on(
+                    &format!("image inspect {IMAGE}"),
+                    ok(fixture("nerdctl_image_inspect.json")),
+                )
+                .on("create --name fd-plain --env-file * *", ok("newid\n")),
+        );
+        let spec = n.inspect("fd-plain").await.unwrap();
+        assert_eq!(
+            n.create_from_spec("fd-plain", &spec, IMAGE).await.unwrap(),
+            "newid"
+        );
+        let calls = n.runner.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("hunter2-secret")),
+            "no call carries the value: {calls:?}"
+        );
+        let files = n.runner.env_files.lock().unwrap().clone();
+        assert_eq!(files.len(), 1);
+        let (path, contents) = &files[0];
+        assert!(
+            contents.contains("DB_PASSWORD=hunter2-secret\n"),
+            "{contents}"
+        );
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "the env file is removed after the create"
+        );
+    }
+
+    #[tokio::test]
     async fn preflight_refuses_when_the_trial_differs_from_the_original() {
         let mut trial: Vec<serde_json::Value> =
             serde_json::from_str(&fixture("nerdctl_full_native.json")).unwrap();
@@ -1149,7 +1226,7 @@ mod tests {
         assert_eq!(spec.image_id, None, "an unresolvable tag leaves no id");
         let expected = spec
             .nerdctl()
-            .create_args("fd-cmd", "alpine:3.20")
+            .create_args("fd-cmd", "alpine:3.20", Some("*"))
             .join(" ");
         let n = nerdctl(FakeRunner::default().on(&expected, ok("abc123\n")));
         assert_eq!(
@@ -1310,7 +1387,7 @@ mod tests {
         assert!(!trial.contains("--publish"), "{trial}");
         assert!(
             spec.nerdctl()
-                .create_args("fd-full", IMAGE)
+                .create_args("fd-full", IMAGE, None)
                 .contains(&"--publish".to_owned()),
             "the real create keeps them"
         );

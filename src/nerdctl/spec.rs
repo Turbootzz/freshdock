@@ -77,6 +77,10 @@ pub struct NerdctlSpec {
     pub mac_address: Option<String>,
     /// Every other flag, already rendered (`["--memory", "268435456", …]`).
     pub flags: Vec<String>,
+    /// `KEY=VALUE` environment variables. Never passed as `--env`: arguments
+    /// are world-readable in `/proc`, and values are often secrets. They go
+    /// through an owner-only `--env-file` (see [`env_file`](Self::env_file)).
+    pub env: Vec<String>,
     /// `--entrypoint` value: the container's `Path`.
     pub entrypoint: Option<String>,
     /// Arguments after the image: the container's `Args`.
@@ -296,8 +300,21 @@ impl NerdctlSpec {
         }
         for var in config.env.unwrap_or_default() {
             // nerdctl sets HOSTNAME itself, from the hostname.
-            if !var.starts_with("HOSTNAME=") {
-                push(&mut spec.flags, "--env", var);
+            if var.starts_with("HOSTNAME=") {
+                continue;
+            }
+            // The env file (see `env`) holds one variable per line and nerdctl
+            // trims trailing whitespace from each, so such values can't be
+            // carried over. The name only: the value may be a secret.
+            let (key, value) = var.split_once('=').unwrap_or((&var, ""));
+            if value.contains(['\n', '\r']) {
+                spec.unsupported
+                    .push(format!("environment variable {key} has a multi-line value"));
+            } else if value.ends_with(char::is_whitespace) {
+                spec.unsupported
+                    .push(format!("environment variable {key} ends in whitespace"));
+            } else {
+                spec.env.push(var);
             }
         }
         let user_labels: Vec<(String, String)> = {
@@ -338,8 +355,25 @@ impl NerdctlSpec {
     }
 
     /// `nerdctl create` arguments for a container called `name` running `image`.
-    pub fn create_args(&self, name: &str, image: &str) -> Vec<String> {
+    /// The contents of the `--env-file` for [`env`](Self::env), or `None` when
+    /// there are no variables.
+    pub fn env_file(&self) -> Option<String> {
+        if self.env.is_empty() {
+            return None;
+        }
+        let mut body = self.env.join("\n");
+        body.push('\n');
+        Some(body)
+    }
+
+    /// `nerdctl create` arguments for a container called `name` running
+    /// `image`. `env_file` is where the caller wrote [`env_file`](Self::env_file);
+    /// no environment value is ever part of the arguments.
+    pub fn create_args(&self, name: &str, image: &str, env_file: Option<&str>) -> Vec<String> {
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
+        if let Some(path) = env_file {
+            push(&mut args, "--env-file", path);
+        }
         if let Some(hostname) = &self.hostname {
             push(&mut args, "--hostname", hostname.clone());
         }
@@ -935,7 +969,11 @@ mod tests {
     fn the_kitchen_sink_container_is_fully_reproducible() {
         let spec = spec_from("full", true);
         assert!(spec.unsupported.is_empty(), "{:?}", spec.unsupported);
-        let args = spec.create_args("fd-full", "docker.io/library/nginx:1.27-alpine");
+        let args = spec.create_args(
+            "fd-full",
+            "docker.io/library/nginx:1.27-alpine",
+            Some("/private/env"),
+        );
         assert_eq!(args[..3], ["create", "--name", "fd-full"]);
         let got = pairs(&args);
         for want in [
@@ -947,8 +985,6 @@ mod tests {
             "--add-host example.test:10.0.0.9",
             "--workdir /tmp",
             "--user 101:101",
-            "--env FOO=bar",
-            "--env EMPTY=",
             "--label freshdock.enable=true",
             "--label freshdock.mode=nightly",
             "--stop-signal SIGQUIT",
@@ -985,7 +1021,14 @@ mod tests {
                 "daemon off;"
             ]
         );
-        assert!(!got.iter().any(|a| a.starts_with("--env HOSTNAME=")));
+        assert!(got.contains(&"--env-file /private/env".to_owned()));
+        assert!(spec.env.contains(&"FOO=bar".to_owned()));
+        assert!(spec.env.contains(&"EMPTY=".to_owned()));
+        assert!(!spec.env.iter().any(|v| v.starts_with("HOSTNAME=")));
+        assert_eq!(
+            spec.env_file().unwrap(),
+            format!("{}\n", spec.env.join("\n"))
+        );
         assert!(
             !got.iter().any(|a| a.contains("nerdctl/")),
             "runtime labels are not passed"
@@ -1002,7 +1045,7 @@ mod tests {
     fn an_entrypoint_override_round_trips() {
         let spec = spec_from("cmd", false);
         assert!(spec.unsupported.is_empty(), "{:?}", spec.unsupported);
-        let args = spec.create_args("fd-cmd", "docker.io/library/alpine:3.20");
+        let args = spec.create_args("fd-cmd", "docker.io/library/alpine:3.20", None);
         assert_eq!(
             args[args.len() - 5..],
             [
@@ -1029,7 +1072,7 @@ mod tests {
         );
         spec.set_network_mode("container:newid".to_owned());
         spec.drop_own_network_identity();
-        let args = spec.create_args("fd-netdep", "sha256:abc");
+        let args = spec.create_args("fd-netdep", "sha256:abc", None);
         let got = pairs(&args);
         assert!(got.contains(&"--network container:newid".to_owned()));
         assert!(
@@ -1084,6 +1127,61 @@ mod tests {
             "{:?}",
             spec.flags
         );
+    }
+
+    fn with_env(env: &[&str]) -> NerdctlSpec {
+        NerdctlSpec::from_inspect(
+            CreateInspect {
+                config: Some(CreateConfig {
+                    env: Some(env.iter().map(|v| (*v).to_owned()).collect()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            NativeInspect::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn no_environment_value_is_ever_an_argument() {
+        let spec = with_env(&["DB_PASSWORD=hunter2-secret", "PLAIN=value", "EMPTY="]);
+        assert!(spec.unsupported.is_empty(), "{:?}", spec.unsupported);
+        for env_file in [None, Some("/private/env")] {
+            let args = spec.create_args("db", "postgres:16", env_file).join(" ");
+            assert!(!args.contains("hunter2-secret"), "{args}");
+            assert!(!args.contains("PLAIN=value"), "{args}");
+            assert!(!args.contains("--env "), "{args}");
+        }
+        assert_eq!(
+            spec.env_file().unwrap(),
+            "DB_PASSWORD=hunter2-secret\nPLAIN=value\nEMPTY=\n"
+        );
+    }
+
+    #[test]
+    fn values_an_env_file_would_change_are_refused_without_printing_them() {
+        let spec = with_env(&[
+            "OK=fine",
+            "CERT=line one\nline two",
+            "PADDED=value  ",
+            "CR=a\rb",
+        ]);
+        assert_eq!(
+            spec.unsupported,
+            [
+                "environment variable CERT has a multi-line value",
+                "environment variable PADDED ends in whitespace",
+                "environment variable CR has a multi-line value",
+            ]
+        );
+        assert_eq!(spec.env, ["OK=fine"]);
+        assert!(!spec.unsupported.join(" ").contains("line one"));
+    }
+
+    #[test]
+    fn no_variables_means_no_env_file() {
+        assert_eq!(with_env(&["HOSTNAME=abc"]).env_file(), None);
     }
 
     #[test]
