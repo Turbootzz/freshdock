@@ -12,6 +12,7 @@ pub mod inspect;
 pub mod kept;
 pub mod private;
 pub mod runner;
+pub mod source;
 pub mod spec;
 
 use std::collections::HashMap;
@@ -57,6 +58,10 @@ const HOOK_FALLBACK_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// namespace.
 pub struct Nerdctl<R = ProcessRunner> {
     runner: R,
+    /// Runs containerd's `ctr`, read-only, to learn where an image came from
+    /// (see [`source`]). `None` when it can't be run: every image then counts
+    /// as a local build, which freshdock reports but never updates.
+    ctr: Option<R>,
     namespace: String,
     credentials: Arc<CredentialStore>,
     /// The image each container ran when freshdock first saw it, by container
@@ -100,6 +105,9 @@ impl Nerdctl<ProcessRunner> {
         nerdctl.kept = KeptStore::persistent(&settings.containerd_namespace, DEFAULT_STATE_FILE);
         warn_unless_root();
         nerdctl.check_version().await?;
+        let ctr = source::ctr_path(std::path::Path::new(&settings.nerdctl_path));
+        nerdctl.ctr = Some(ProcessRunner::new(&ctr));
+        nerdctl.check_ctr(&ctr).await;
         Ok(nerdctl)
     }
 }
@@ -109,6 +117,7 @@ impl<R: CommandRunner> Nerdctl<R> {
         let kept = KeptStore::in_memory(&namespace);
         Self {
             runner,
+            ctr: None,
             namespace,
             credentials,
             seen: std::sync::Mutex::new(HashMap::new()),
@@ -188,6 +197,68 @@ impl<R: CommandRunner> Nerdctl<R> {
         Ok(())
     }
 
+    /// Make sure `ctr` reaches containerd, or give it up with a warning (see
+    /// [`ctr`](Self::ctr)).
+    async fn check_ctr(&mut self, path: &std::path::Path) {
+        match self.ctr_call(&["version"]).await {
+            Ok(_) => debug!(ctr = %path.display(), "ctr reaches containerd"),
+            Err(e) => {
+                warn!(
+                    ctr = %path.display(),
+                    error = %e,
+                    "cannot run containerd's ctr, so freshdock cannot tell pulled images from                      local builds; it will report containers but update none. Install ctr next                      to nerdctl or on PATH"
+                );
+                self.ctr = None;
+            }
+        }
+    }
+
+    /// Run `ctr --namespace <ns> <args>` and return its stdout.
+    async fn ctr_call(&self, args: &[&str]) -> Result<String, String> {
+        let ctr = self.ctr.as_ref().ok_or("ctr is not available")?;
+        let mut full = vec!["--namespace".to_owned(), self.namespace.clone()];
+        full.extend(args.iter().map(|a| (*a).to_owned()));
+        debug!(args = ?args, namespace = %self.namespace, "ctr");
+        let out = ctr
+            .run(&full, &[], CALL_TIMEOUT)
+            .await
+            .map_err(|e| e.to_string())?;
+        if out.success() {
+            Ok(out.stdout)
+        } else {
+            Err(error_message(&out.stderr))
+        }
+    }
+
+    /// Did containerd pull this image from the registry and repository a
+    /// `RepoDigests` entry names? False for a local build, and whenever
+    /// that can't be told (see [`source`]).
+    async fn pulled_from(&self, repo_digest: &str) -> bool {
+        let Some((host, path, digest)) = source::registry_of(repo_digest) else {
+            return false;
+        };
+        let filter = format!("digest=={digest}");
+        match self.ctr_call(&["content", "ls", &filter]).await {
+            Ok(listing) => source::sources(&listing, digest)
+                .iter()
+                .any(|(h, p)| *h == host && *p == path),
+            Err(e) => {
+                debug!(image = %repo_digest, error = %e, "could not read where the image came from");
+                false
+            }
+        }
+    }
+
+    /// `nerdctl image inspect`, as reported: every `RepoDigests` entry kept.
+    async fn image_record(&self, image: &str) -> Result<LocalImage, DockerError> {
+        let stdout = self.call(&["image", "inspect", image]).await?;
+        parse_array::<ImageInspect>("image inspect", &stdout)?
+            .into_iter()
+            .next()
+            .map(LocalImage::from)
+            .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
+    }
+
     async fn inspect_container(&self, name_or_id: &str) -> Result<ContainerInspect, DockerError> {
         let stdout = self.call(&["inspect", name_or_id]).await?;
         parse_array::<ContainerInspect>("inspect", &stdout)?
@@ -258,13 +329,22 @@ impl<R: CommandRunner> DockerCheck for Nerdctl<R> {
         Ok(listed)
     }
 
+    /// Only the `RepoDigests` entries of a registry containerd pulled the
+    /// image from, as Docker reports them: a local build has none, so the
+    /// update check never mistakes a registry image of the same name for its
+    /// upstream (see [`source`]).
     async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
-        let stdout = self.call(&["image", "inspect", image]).await?;
-        parse_array::<ImageInspect>("image inspect", &stdout)?
-            .into_iter()
-            .next()
-            .map(LocalImage::from)
-            .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
+        let mut img = self.image_record(image).await?;
+        let mut pulled = Vec::new();
+        for repo_digest in std::mem::take(&mut img.repo_digests) {
+            if self.pulled_from(&repo_digest).await {
+                pulled.push(repo_digest);
+            } else {
+                debug!(image = %image, %repo_digest, "not pulled from that registry; treating it as a local build");
+            }
+        }
+        img.repo_digests = pulled;
+        Ok(img)
     }
 
     /// `image_id` is the image the container ran when freshdock first saw it
@@ -333,7 +413,7 @@ impl<R: CommandRunner> Nerdctl<R> {
 
     /// The image `reference` points at now.
     async fn identify(&self, reference: &str) -> Seen {
-        let img = self.inspect_image(reference).await;
+        let img = self.image_record(reference).await;
         // A digest reference already names one image. (nerdctl 2.3 can't
         // `image inspect` it, so that is not required.)
         if reference.contains('@') {
@@ -1342,14 +1422,87 @@ mod tests {
         assert!(matches!(err, DockerError::Runtime(_)), "{err}");
     }
 
+    const NGINX_INDEX: &str =
+        "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
+
+    /// `ctr content ls` output for the fixture image's top-level blob.
+    fn content_listing(labels: &str) -> CmdOutput {
+        ok(format!(
+            "DIGEST\tSIZE\tAGE\tLABELS\n{NGINX_INDEX}\t10.23kB\t2 days\t{labels}\n"
+        ))
+    }
+
+    fn nginx_with_ctr(labels: &str) -> Nerdctl<FakeRunner> {
+        let mut n = nerdctl(FakeRunner::default().on(
+            "image inspect nginx:1.27-alpine",
+            ok(fixture("nerdctl_image_inspect.json")),
+        ));
+        n.ctr = Some(FakeRunner::default().on(
+            &format!("content ls digest=={NGINX_INDEX}"),
+            content_listing(labels),
+        ));
+        n
+    }
+
     #[tokio::test]
-    async fn inspect_image_reads_repo_digests() {
+    async fn inspect_image_reads_repo_digests_of_a_pulled_image() {
+        let n = nginx_with_ctr(
+            "containerd.io/distribution.source.docker.io=library/nginx,\
+             containerd.io/gc.ref.content.m.0=sha256:c64c",
+        );
+        let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
+        assert_eq!(img.repo_digests, [format!("nginx@{NGINX_INDEX}")]);
+    }
+
+    #[tokio::test]
+    async fn a_local_build_has_no_repo_digests() {
+        // nerdctl lists a digest for a built image too; containerd records no
+        // registry it came from.
+        let n = nginx_with_ctr("containerd.io/gc.ref.content.config=sha256:4399");
+        let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
+        assert!(img.repo_digests.is_empty(), "{:?}", img.repo_digests);
+        assert!(img.id.is_some(), "the image itself is still reported");
+    }
+
+    #[tokio::test]
+    async fn an_image_pulled_from_elsewhere_has_no_repo_digests_here() {
+        // Pulled under another name: it is not the registry image `nginx` is.
+        let n = nginx_with_ctr("containerd.io/distribution.source.ghcr.io=someone/nginx");
+        let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
+        assert!(img.repo_digests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_ctr_every_image_counts_as_a_local_build() {
         let n = nerdctl(FakeRunner::default().on(
             "image inspect nginx:1.27-alpine",
             ok(fixture("nerdctl_image_inspect.json")),
         ));
         let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
-        assert_eq!(img.repo_digests.len(), 1);
+        assert!(img.repo_digests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_ctr_that_cannot_reach_containerd_is_given_up() {
+        let mut n = nerdctl(FakeRunner::default());
+        n.ctr = Some(FakeRunner::default().on("version", fail("connection refused")));
+        n.check_ctr(std::path::Path::new("ctr")).await;
+        assert!(n.ctr.is_none());
+        let mut n = nerdctl(FakeRunner::default());
+        n.ctr = Some(FakeRunner::default().on("version", ok("Client: v2.3.2")));
+        n.check_ctr(std::path::Path::new("ctr")).await;
+        assert!(n.ctr.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_image_freshdock_remembers_keeps_every_digest() {
+        // `identify` names images for create and rmi, local builds included.
+        let n = nerdctl(FakeRunner::default().on(
+            "image inspect nginx:1.27-alpine",
+            ok(fixture("nerdctl_image_inspect.json")),
+        ));
+        let seen = n.identify("nginx:1.27-alpine").await;
+        assert_eq!(seen.pinned, Some(format!("nginx@{NGINX_INDEX}")));
     }
 
     #[tokio::test]

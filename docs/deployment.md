@@ -155,6 +155,9 @@ Requirements:
   It needs the containerd socket, nerdctl's state under `/var/lib/nerdctl`, and the
   CNI setup, so running it in a container is not supported.
 - `runtime = "nerdctl"` in `[settings]`, or `FRESHDOCK_RUNTIME=nerdctl`.
+- containerd's `ctr`, next to the nerdctl binary or on `PATH` (containerd and the
+  nerdctl-full bundle both install it). freshdock only reads with it. Without it,
+  freshdock warns at startup and reports containers but updates none (see below).
 
 ```ini
 # /etc/systemd/system/freshdock.service
@@ -186,6 +189,14 @@ logs both.
 
 ### What is different on nerdctl
 
+- **Locally built images are never updated, as on Docker.** nerdctl lists a
+  registry-style digest for every image, including ones you built, committed or
+  loaded, so freshdock asks containerd instead: it only compares an image with a
+  registry if containerd recorded pulling it from that registry and repository
+  (read with `ctr content ls`). A local build named like a registry image
+  (`myapp:latest`, `ghcr.io/you/app`) is therefore never replaced by the
+  registry's. An image you `nerdctl load`ed counts as local until you pull it
+  once.
 - **Compose projects are updated one container at a time.** nerdctl compose does
   not record the `depends_on` graph on its containers, so `compose_aware` is
   turned off. Keep services you don't want updated on their own (a database, a

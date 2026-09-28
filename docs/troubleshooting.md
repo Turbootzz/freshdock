@@ -295,6 +295,15 @@ INFO freshdock::nerdctl: connected to containerd through nerdctl nerdctl=v2.3.4 
 If that line names the wrong namespace, and `check` lists none of your containers,
 set `FRESHDOCK_CONTAINERD_NAMESPACE` to the one you use with `nerdctl --namespace`.
 
+```
+WARN freshdock::nerdctl: cannot run containerd's ctr, so freshdock cannot tell pulled images from local builds; it will report containers but update none. Install ctr next to nerdctl or on PATH
+```
+
+freshdock looks for `ctr` in the directory of `FRESHDOCK_NERDCTL_PATH`, then on
+`PATH`. If containerd listens somewhere other than
+`/run/containerd/containerd.sock` (an `address` in `nerdctl.toml`), set
+`CONTAINERD_ADDRESS` for the service so `ctr` finds it too.
+
 ## nerdctl: an update was refused
 
 ```

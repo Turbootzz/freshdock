@@ -11,7 +11,7 @@
 //!
 //! ```bash
 //! bin=$(cargo test --locked --test nerdctl_live --no-run --message-format=json \
-//!   | jq -r 'select(.executable != null) | .executable')
+//!   | jq -r 'select(.executable != null and .profile.test) | .executable')
 //! sudo FRESHDOCK_NERDCTL_LIVE=1 "$bin" --ignored --test-threads=1
 //! ```
 //!
@@ -455,6 +455,55 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
 /// A second namespace to publish from. Namespaces have separate image stores,
 /// so the registry's tag can move while the test namespace's stays put, as
 /// when upstream publishes a new image.
+/// Removes one image record when dropped.
+struct RemoveImage(String);
+
+impl Drop for RemoveImage {
+    fn drop(&mut self) {
+        let _ = nerdctl(&["rmi", "--force", &self.0]);
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
+async fn a_local_build_is_not_taken_for_its_registry_namesake() {
+    let Some(n) = backend().await else { return };
+    let p = prefix("local");
+    let _teardown = Teardown {
+        prefix: p.clone(),
+        networks: vec![],
+    };
+    // A local image under a name the registry also serves: Docker Hub's
+    // alpine repository. nerdctl still lists a digest for it.
+    let local = format!("docker.io/library/alpine:{p}");
+    let _image = RemoveImage(local.clone());
+    let source = format!("{p}-src");
+    must(&["run", "-d", "--name", &source, ALPINE, "sleep", "100000"]);
+    must(&["commit", &source, &local]);
+    let listed: Value = serde_json::from_str(&must(&["image", "inspect", &local])).unwrap();
+    assert!(
+        listed[0]["RepoDigests"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty()),
+        "nerdctl lists a digest for the local image: {listed}"
+    );
+
+    let img = n
+        .inspect_image(&local)
+        .await
+        .expect("inspect the local image");
+    assert!(
+        img.repo_digests.is_empty(),
+        "never compared with the registry: {:?}",
+        img.repo_digests
+    );
+    let pulled = n.inspect_image(ALPINE).await.expect("inspect alpine");
+    assert!(
+        !pulled.repo_digests.is_empty(),
+        "a pulled image keeps its digest"
+    );
+}
+
 const STAGING_NS: &str = "freshdock-live-staging";
 
 fn staging(args: &[&str]) -> Result<String, String> {
