@@ -234,11 +234,15 @@ logs both.
   upstream publishes again.
 - **Containers are only ever created from local images** (`--pull=never`), so
   only `nerdctl pull` reaches the network, with freshdock's credentials and
-  proxy settings. To keep the image a not-yet-updated sibling still runs usable
-  after the pull moves the tag, freshdock first names it by its digest
-  (`<repository>@sha256:...`) and removes that name again once no container runs
-  the image. If freshdock is stopped in between, such a name can remain; remove it
-  with `nerdctl rmi <repository>@sha256:...`.
+  proxy settings. When other containers run the same image as the one being
+  updated, freshdock first names that image by its digest
+  (`<repository>@sha256:...`), so the not-yet-updated siblings stay usable after
+  the pull moves the tag, and removes the name again once none of them runs it
+  (at once if the pull found nothing new). A lone container never gets such a
+  name. freshdock records the names it made in
+  `/var/lib/freshdock/nerdctl-kept-images` (root-only), so a restart, or a
+  one-off `freshdock recreate`, doesn't lose track of them: the daemon removes
+  them on a later pass. Names you made yourself are never touched.
 - **Registry credentials** from freshdock's configuration are passed to
   `nerdctl pull` through a temporary, owner-only `DOCKER_CONFIG`. Without them,
   nerdctl's own login (`nerdctl login`) is used. See

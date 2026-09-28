@@ -215,8 +215,14 @@ async fn a_richly_configured_container_round_trips() {
     let before_id = id_of(&name).unwrap();
     let before = native(&name);
     let before_ports = port_mappings(&name);
+    let records_before = digest_records();
 
     let outcome = recreate(&n, &name).await.expect("recreate");
+    assert_eq!(
+        digest_records(),
+        records_before,
+        "updating a lone container leaves no digest-named image record behind"
+    );
     assert!(
         matches!(outcome, RecreateOutcome::Recreated { .. }),
         "{outcome:?}"
@@ -533,6 +539,9 @@ async fn siblings_on_a_tag_that_moves_are_both_updated() {
             "100000",
         ]);
     }
+    // As `freshdock run` and `recreate` do, this process tidies up after
+    // itself; `check` never would.
+    n.sweep_or_warn().await;
     // freshdock lists them before anything is pulled, as a scheduler pass does.
     let image_of = |listed: &[freshdock::docker::container::ContainerInfo], name: &str| {
         listed
@@ -646,4 +655,13 @@ impl Drop for ImageTeardown {
             }
         }
     }
+}
+
+/// The digest-named image records (`repo@sha256:...`) in the test namespace.
+fn digest_records() -> std::collections::BTreeSet<String> {
+    must(&["images", "--format", "{{.Name}}"])
+        .lines()
+        .filter(|l| l.contains("@sha256:"))
+        .map(str::to_owned)
+        .collect()
 }
