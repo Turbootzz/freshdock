@@ -36,7 +36,7 @@ live-nerdctl:
     #!/usr/bin/env bash
     set -euo pipefail
     bin=$(cargo test --locked --test nerdctl_live --no-run --message-format=json \
-      | jq -r 'select(.executable != null) | .executable')
+      | jq -r 'select(.executable != null and .profile.test) | .executable')
     sudo FRESHDOCK_NERDCTL_LIVE=1 FRESHDOCK_NERDCTL_PATH="$(command -v nerdctl)" \
       "$bin" --ignored --nocapture --test-threads=1
 
