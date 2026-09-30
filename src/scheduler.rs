@@ -600,6 +600,12 @@ where
             debug!(container = %name, "scheduler: image pinned to a digest (no check)");
             Verdict::Pinned
         }
+        // No registry digest to compare against: the tick warns once for a
+        // labelled container, as for any unknown local digest.
+        ProbeOutcome::LocalBuild => {
+            debug!(container = %name, "scheduler: locally built image (no check)");
+            Verdict::UnknownDigest
+        }
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
             Verdict::Failed
@@ -1416,6 +1422,11 @@ mod tests {
         let reg = FakeRegistry::new(DIG_B);
         one_tick(&node, &reg).await;
         assert_eq!(node.creates(), 0, "an unknown local digest must not update");
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            0,
+            "nor is the registry asked about it"
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ reference page with the full story.
 - [My container doesn't appear in `check` at all](#my-container-doesnt-appear-in-check-at-all)
 - [`check` reports an update that never goes away](#check-reports-an-update-that-never-goes-away)
 - [A container is reported as `pinned (no check)`](#a-container-is-reported-as-pinned-no-check)
+- [A container is reported as `local build (no check)`](#a-container-is-reported-as-local-build-no-check)
 - [Updates fail with a read-only socket](#updates-fail-with-a-read-only-socket)
 - [A sidecar on `network_mode: container:X` lost its network](#a-sidecar-on-network_mode-containerx-lost-its-network)
 - [My app updated but its database migration didn't run](#my-app-updated-but-its-database-migration-didnt-run)
@@ -158,6 +159,19 @@ and any sidecar an earlier release repaired. Put it back on a tag with
 `docker compose up -d <service>`, or recreate it from its tag by hand.
 
 See [Configuration: pinned images](configuration.md#labels).
+
+## A container is reported as `local build (no check)`
+
+Its image has no digest from a registry: you built it (`docker build`,
+`nerdctl build`), committed it or loaded it from a file. There is nothing upstream
+to compare it with, so freshdock never updates it and doesn't ask the registry
+(which would deny a repository that doesn't exist, as if it needed credentials).
+Rebuild and recreate it yourself.
+
+An image that did come from a registry shows this if it was only ever loaded or
+retagged under another name: pull it once by its own name. On nerdctl, freshdock
+reads where an image came from with `ctr`; see
+[Deployment: nerdctl](deployment.md#with-nerdctl-containerd).
 
 ## Updates fail with a read-only socket
 

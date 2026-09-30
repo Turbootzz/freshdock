@@ -22,6 +22,7 @@ const AUTH_REQUIRED: &str = "auth required (set credentials)";
 const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
 const PINNED: &str = "pinned (no check)";
+const LOCAL_BUILD: &str = "local build (no check)";
 
 /// Run the read-only check: list opted-in containers, fetch latest
 /// digests for those on Docker Hub, and render a status table.
@@ -212,6 +213,7 @@ fn render_cells(
             let current = pinned_digest(image).map(short_digest).unwrap_or_else(dash);
             (current, PINNED.to_string(), dash())
         }
+        ProbeOutcome::LocalBuild => (dash(), LOCAL_BUILD.to_string(), dash()),
         ProbeOutcome::AuthRequired => (dash(), AUTH_REQUIRED.to_string(), dash()),
         ProbeOutcome::CredentialsRejected => (dash(), CREDENTIALS_REJECTED.to_string(), dash()),
         ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
@@ -387,7 +389,10 @@ mod tests {
         }
         async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
             self.inspect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.images.get(image).cloned().unwrap_or_default())
+            self.images
+                .get(image)
+                .cloned()
+                .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
         }
         async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
             if self.failing.contains(id) {
@@ -547,9 +552,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locally_built_image_with_no_repo_digests_renders_unknown() {
-        // Nothing to compare against: report `?`, never `yes` — recreating
-        // would replace a local build with an unrelated registry image.
+    async fn locally_built_image_is_reported_without_asking_the_registry() {
+        // Nothing to compare against: never `yes` — recreating would replace a
+        // local build with an unrelated registry image. Nor is the registry
+        // asked: it would deny a repository that doesn't exist, as needing
+        // credentials.
         let docker = FakeDocker::with_digests(
             vec![summary("app", "myapp:dev", &[("freshdock.enable", "true")])],
             &[("myapp:dev", &[])],
@@ -560,7 +567,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cells[0][3], "-", "no current digest is known");
-        assert_eq!(cells[0][5], "?");
+        assert_eq!(cells[0][4], LOCAL_BUILD);
+        assert_eq!(cells[0][5], "-");
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
