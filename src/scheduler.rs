@@ -75,12 +75,30 @@ struct ContainerState {
     next_fire: Option<DateTime<Local>>,
     /// Parsed effective cron, cached so it's parsed once.
     cron: Option<CronExpr>,
-    /// Upstream digest of the last `watch`-mode "update available" notification,
-    /// so the same available update isn't re-announced every poll (it would
-    /// otherwise notify every `poll_interval` until the user acts).
-    last_notified_digest: Option<String>,
+    /// What `watch` mode already announced, so an update that stays available
+    /// isn't re-announced every `poll_interval` until the user acts.
+    announced: Announced,
     /// The unknown-local-digest warning was logged; cleared once a digest is known.
     unknown_digest_warned: bool,
+}
+
+/// The upstream digests one `watch` container's available update was last
+/// announced for.
+#[derive(Debug, Default)]
+struct Announced {
+    /// Logged at INFO; later polls of the same digest log at debug.
+    logged: Option<String>,
+    /// Sent as an "update available" notification.
+    notified: Option<String>,
+}
+
+/// Record `latest` as announced; true the first time it is seen.
+fn first_announcement(last: &mut Option<String>, latest: &str) -> bool {
+    if last.as_deref() == Some(latest) {
+        return false;
+    }
+    *last = Some(latest.to_owned());
+    true
 }
 
 /// Resolve the effective cron for a policy: explicit `freshdock.schedule`
@@ -112,7 +130,7 @@ fn seed_state(policy: &Policy, name: &str, now: DateTime<Local>) -> ContainerSta
         last_checked: None,
         next_fire,
         cron,
-        last_notified_digest: None,
+        announced: Announced::default(),
         unknown_digest_warned: false,
     }
 }
@@ -330,7 +348,7 @@ async fn run_tick<D, R>(
             &target,
             dispatcher,
             failed.get(&name).cloned(),
-            &mut state.last_notified_digest,
+            &mut state.announced,
             settings,
         )
         .await;
@@ -521,7 +539,7 @@ async fn process_container<D, R>(
     target: &ProbeTarget,
     dispatcher: &Dispatcher,
     last_failed: Option<String>,
-    last_notified: &mut Option<String>,
+    announced: &mut Announced,
     settings: ResolvedSettings,
 ) -> Processed
 where
@@ -551,10 +569,14 @@ where
             }
             match policy.mode {
                 Mode::Watch => {
-                    info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
+                    if first_announcement(&mut announced.logged, &latest) {
+                        info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
+                    } else {
+                        debug!(container = %name, %latest, "scheduler: update still available (watch mode — not applied)");
+                    }
                     // Only notify once per distinct upstream digest, or a watched
                     // update would re-alert every poll until the user acts.
-                    if policy.notify && last_notified.as_deref() != Some(latest.as_str()) {
+                    if policy.notify && announced.notified.as_deref() != Some(latest.as_str()) {
                         dispatcher
                             .dispatch(&NotifyEvent::UpdateAvailable {
                                 container: name.to_string(),
@@ -562,7 +584,7 @@ where
                                 latest_digest: latest.clone(),
                             })
                             .await;
-                        *last_notified = Some(latest.clone());
+                        announced.notified = Some(latest.clone());
                     }
                     Verdict::Available
                 }
@@ -2419,6 +2441,18 @@ mod tests {
         let node = FakeNode::new(notifying_container("watch", true), DIG_A);
         let reg = FakeRegistry::new(DIG_A); // same digest → up to date
         one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[test]
+    fn an_available_update_is_announced_once_per_digest() {
+        let mut last = None;
+        assert!(first_announcement(&mut last, DIG_A), "first sight");
+        assert!(
+            !first_announcement(&mut last, DIG_A),
+            "the same update again"
+        );
+        assert!(first_announcement(&mut last, DIG_B), "upstream moved on");
+        assert!(!first_announcement(&mut last, DIG_B));
     }
 
     #[tokio::test]
