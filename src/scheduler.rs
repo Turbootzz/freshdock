@@ -340,7 +340,11 @@ async fn run_tick<D, R>(
         if unknown_digest && !state.unknown_digest_warned && !policy.auto_enabled {
             warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, or no RepoDigests entry for this reference); updates cannot be detected");
         }
-        state.unknown_digest_warned = unknown_digest;
+        if unknown_digest {
+            state.unknown_digest_warned = true;
+        } else if processed.verdicts.iter().any(|v| v.digest_known()) {
+            state.unknown_digest_warned = false;
+        }
         for verdict in processed.verdicts {
             summary.record(verdict);
         }
@@ -380,6 +384,16 @@ enum Verdict {
     Pinned,
     /// An inspect, the registry probe, or the recreate itself failed.
     Failed,
+}
+
+impl Verdict {
+    /// Did the probe compare a known local digest with upstream?
+    fn digest_known(self) -> bool {
+        match self {
+            Verdict::UpToDate | Verdict::Available | Verdict::Updated | Verdict::NotUpdated => true,
+            Verdict::UnknownDigest | Verdict::Pinned | Verdict::Failed => false,
+        }
+    }
 }
 
 /// Per-tick tally, so a run that changes nothing still leaves an `info` line.
@@ -2212,6 +2226,22 @@ mod tests {
         .await;
         assert!(!out.contains("no local digest"), "{out}");
         assert!(summary_line(&out).contains("unknown_digest=1"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_does_not_rearm_the_unknown_digest_warning() {
+        let node = FakeNode::with_digests(vec![live_labels_for("app", "built:1")], &[]);
+        let online = FakeRegistry::new(DIG_A);
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            let cfg = every_tick();
+            let settings = ResolvedSettings::default;
+            one_tick_cfg(&node, &online, &cfg, settings(), &mut st).await;
+            one_tick_cfg(&node, &FakeRegistry::offline(), &cfg, settings(), &mut st).await;
+            one_tick_cfg(&node, &online, &cfg, settings(), &mut st).await;
+        })
+        .await;
+        assert_eq!(out.matches("no local digest").count(), 1, "{out}");
     }
 
     #[tokio::test]
