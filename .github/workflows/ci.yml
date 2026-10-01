@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: taiki-e/install-action@v2.87.1
+      - uses: taiki-e/install-action@v2.87.21
         with:
           tool: cargo-deny@0.19.4
 
@@ -81,7 +81,7 @@ jobs:
       - name: Assert Docker daemon is up
         run: docker version
 
-      - uses: taiki-e/install-action@v2.87.1
+      - uses: taiki-e/install-action@v2.87.21
         with:
           tool: just
 
