@@ -28,6 +28,10 @@ pub async fn run(
     notifications: NotificationConfig,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "freshdock daemon starting"
+    );
     // Built before the Docker connect so a missing CA store fails the start.
     let client = crate::http::client()?;
     let docker = Docker::connect(credentials.clone()).await?;
