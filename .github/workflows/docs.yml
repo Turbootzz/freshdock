@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       # Pin mdbook so local `just docs` and CI render identically; bump deliberately.
-      - uses: taiki-e/install-action@v2.87.1
+      - uses: taiki-e/install-action@v2.87.21
         with:
           tool: mdbook@0.5.3
       - name: Lint docs typography (mirrors `just docs-lint`)
