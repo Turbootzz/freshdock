@@ -58,7 +58,7 @@ release-plz here runs `release-pr` **only**; it never tags, releases, or publish
 Release notes need no manual step: the `release` job generates the body from the
 merged PRs since the previous release (the `generate-notes` API, filtered by
 `.github/release.yml`) and writes it to the release. It **owns** the title and
-body — a description typed by hand is overwritten on the next run of the job, so
+body: a description typed by hand is overwritten on the next run of the job, so
 edit the release only after the workflow is done.
 
 One caveat, fixable after the fact: GitHub picks the previous *release* as the
