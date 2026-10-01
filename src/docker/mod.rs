@@ -565,6 +565,11 @@ impl DockerOps for Docker {
         multi_network_guard(&self.api_version, networks)
     }
 
+    async fn local_image_id(&self, reference: &str) -> Result<Option<String>, DockerError> {
+        debug!(%reference, "local image id");
+        Ok(self.inspect_local_image(reference).await?.id)
+    }
+
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
         self.pull_image(image_ref).await

@@ -580,7 +580,7 @@ fn dependent_body(owner: &str, labels: &[(&str, &str)]) -> ContainerCreateBody {
 }
 
 /// Recreating the owner destroys the namespace its dependents live in. The
-/// sidecar must come back attached to the new owner, on its same image id.
+/// sidecar must come back attached to the new owner, on its same image and tag.
 #[tokio::test]
 #[ignore = "needs-docker"]
 async fn a_network_namespace_dependent_is_reattached_to_the_new_owner() {
@@ -588,15 +588,24 @@ async fn a_network_namespace_dependent_is_reattached_to_the_new_owner() {
         return;
     };
     let prefix = format!("fd-live-dep-{}", now_nanos());
-    let _cleanup = Cleanup::new(&prefix);
+    let mut cleanup = Cleanup::new(&prefix);
     ensure_image(&docker, IMAGE)
         .await
         .expect("alpine available");
 
+    // A private tag: the owner's pull of `IMAGE` must not move the sidecar's.
+    let tag = format!("{prefix}:side");
+    tag_image_as(&docker, IMAGE, &tag)
+        .await
+        .expect("tag alpine");
+    cleanup.images.push(tag.clone());
+
     let owner = format!("{prefix}-owner");
     let side = format!("{prefix}-side");
     let old_owner_id = spawn_namespace_owner(&docker, &owner).await;
-    spawn(&docker, &side, dependent_body(&owner, &[])).await;
+    let mut body = dependent_body(&owner, &[]);
+    body.image = Some(tag.clone());
+    spawn(&docker, &side, body).await;
 
     assert_contains(
         &read_from_namespace(&docker, &side).await,
@@ -620,7 +629,12 @@ async fn a_network_namespace_dependent_is_reattached_to_the_new_owner() {
     assert_eq!(
         after.image,
         Some(image_before),
-        "a repair re-creates from the image id, so it can never smuggle in an upgrade"
+        "a repair must never smuggle in an upgrade"
+    );
+    assert_eq!(
+        after.config.and_then(|c| c.image),
+        Some(tag),
+        "the tag still names the running image, so the sidecar stays on it (#102)"
     );
     assert_contains(
         &read_from_namespace(&docker, &side).await,
@@ -630,6 +644,69 @@ async fn a_network_namespace_dependent_is_reattached_to_the_new_owner() {
     assert!(
         archives(&docker, &prefix).await.is_empty(),
         "neither the owner's nor the dependent's archive may survive"
+    );
+}
+
+/// A sidecar whose tag moved since it started is re-created from its image id,
+/// so the repair cannot upgrade it, and the operator is told it is now pinned.
+#[tokio::test]
+#[ignore = "needs-docker"]
+async fn a_dependent_whose_tag_moved_is_pinned_to_its_image_id() {
+    let Some(docker) = connect_or_skip().await else {
+        return;
+    };
+    let prefix = format!("fd-live-moved-{}", now_nanos());
+    let mut cleanup = Cleanup::new(&prefix);
+    ensure_image(&docker, IMAGE)
+        .await
+        .expect("alpine available");
+    // A private tag, so moving it touches nothing else.
+    let tag = format!("{prefix}:side");
+    tag_image_as(&docker, IMAGE, &tag)
+        .await
+        .expect("tag alpine");
+    cleanup.images.push(tag.clone());
+
+    let owner = format!("{prefix}-owner");
+    let side = format!("{prefix}-side");
+    spawn_namespace_owner(&docker, &owner).await;
+    let mut body = dependent_body(&owner, &[]);
+    body.image = Some(tag);
+    spawn(&docker, &side, body).await;
+    let running = inspect(&docker, &side).await.image.expect("sidecar image");
+
+    let moved = docker
+        .commit_container(
+            CommitContainerOptionsBuilder::default()
+                .container(&side)
+                .repo(&prefix)
+                .tag("side")
+                .build(),
+            ContainerConfig::default(),
+        )
+        .await
+        .expect("move the tag to a committed image")
+        .id;
+    cleanup.images.push(moved);
+
+    let output = recreate(&owner);
+    assert_contains(&output, &format!("recreated {owner}: healthy"), "update");
+    assert_contains(
+        &output,
+        "pinned until it is recreated from its tag",
+        "the pin is reported",
+    );
+
+    let after = inspect(&docker, &side).await;
+    assert_eq!(
+        after.image.as_deref(),
+        Some(running.as_str()),
+        "a repair must never smuggle in an upgrade"
+    );
+    assert_eq!(
+        after.config.and_then(|c| c.image).as_deref(),
+        Some(running.as_str()),
+        "with the tag moved, only the image id names the running bits"
     );
 }
 
