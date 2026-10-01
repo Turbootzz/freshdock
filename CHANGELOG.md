@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0](https://github.com/Turbootzz/freshdock/compare/v1.6.0...v1.7.0) - 2026-10-01
+
+### Added
+
+- *(scheduler)* log a summary per run and warn on unknown local digests ([#100](https://github.com/Turbootzz/freshdock/pull/100))
+
+### Fixed
+
+- *(recreate)* keep a repaired sidecar on its tag while it still resolves ([#103](https://github.com/Turbootzz/freshdock/pull/103))
+
 ## [1.6.0](https://github.com/Turbootzz/freshdock/compare/v1.5.0...v1.6.0) - 2026-09-06
 
 ### Added
