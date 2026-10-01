@@ -34,7 +34,7 @@ use crate::labels::{self, Mode, Policy};
 use crate::notify::{Dispatcher, NotifyEvent};
 use crate::probe::{self, ProbeOutcome, ProbeTarget};
 use crate::registry::Registry;
-use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
+use crate::rollout::{self, AbortReason, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
 /// Tunables for the scheduler loop.
@@ -79,6 +79,8 @@ struct ContainerState {
     /// so the same available update isn't re-announced every poll (it would
     /// otherwise notify every `poll_interval` until the user acts).
     last_notified_digest: Option<String>,
+    /// The unknown-local-digest warning was logged; cleared once a digest is known.
+    unknown_digest_warned: bool,
 }
 
 /// Resolve the effective cron for a policy: explicit `freshdock.schedule`
@@ -111,6 +113,7 @@ fn seed_state(policy: &Policy, name: &str, now: DateTime<Local>) -> ContainerSta
         next_fire,
         cron,
         last_notified_digest: None,
+        unknown_digest_warned: false,
     }
 }
 
@@ -224,6 +227,7 @@ async fn run_tick<D, R>(
     // Containers a compose rollout already updated this tick (issue #78).
     // Their schedule state is left alone: a re-probe next tick is cheap.
     let mut handled: HashSet<String> = HashSet::new();
+    let mut summary = RunSummary::default();
 
     for c in &containers {
         // Decline new work once shutdown is signalled; the previous container
@@ -231,6 +235,7 @@ async fn run_tick<D, R>(
         // stop" point. Return without pruning — the daemon is exiting, and a
         // partial pass would drop unvisited containers' schedule state.
         if *shutdown.borrow() {
+            summary.log();
             return;
         }
 
@@ -294,6 +299,7 @@ async fn run_tick<D, R>(
             Ok(t) => t,
             Err(e) => {
                 warn!(container = %name, error = %e, "scheduler: container inspect failed; skipping this tick");
+                summary.record(Verdict::Failed);
                 // Cron windows are scarce; a poll interval is not.
                 if matches!(policy.mode, Mode::Live | Mode::Watch) {
                     state.last_checked = Some(now);
@@ -329,6 +335,19 @@ async fn run_tick<D, R>(
         )
         .await;
 
+        let unknown_digest = processed.verdicts.contains(&Verdict::UnknownDigest);
+        // A watch_all bystander (a local build, say) is expected to have none.
+        if unknown_digest && !state.unknown_digest_warned && !policy.auto_enabled {
+            warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, or no RepoDigests entry for this reference); updates cannot be detected");
+        }
+        if unknown_digest {
+            state.unknown_digest_warned = true;
+        } else if processed.verdicts.iter().any(|v| v.digest_known()) {
+            state.unknown_digest_warned = false;
+        }
+        for verdict in processed.verdicts {
+            summary.record(verdict);
+        }
         match processed.outcome {
             Some(UpdateOutcome::Rejected { digest, containers }) => {
                 for c in containers {
@@ -348,14 +367,132 @@ async fn run_tick<D, R>(
     states.retain(|k, _| live.contains(k));
     warned.retain(|k| live.contains(k));
     failed.retain(|k, _| live.contains(k));
+    summary.log();
+}
+
+/// How one due container ended this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    UpToDate,
+    /// No local digest to compare against, so updates cannot be detected.
+    UnknownDigest,
+    /// `watch` mode: reported, not applied.
+    Available,
+    Updated,
+    /// An update was due but did not land: rolled back or deferred.
+    NotUpdated,
+    Pinned,
+    /// An inspect, the registry probe, or the recreate itself failed.
+    Failed,
+}
+
+impl Verdict {
+    /// Did the probe compare a known local digest with upstream?
+    fn digest_known(self) -> bool {
+        match self {
+            Verdict::UpToDate | Verdict::Available | Verdict::Updated | Verdict::NotUpdated => true,
+            Verdict::UnknownDigest | Verdict::Pinned | Verdict::Failed => false,
+        }
+    }
+}
+
+/// Per-tick tally, so a run that changes nothing still leaves an `info` line.
+#[derive(Default)]
+struct RunSummary {
+    checked: usize,
+    up_to_date: usize,
+    unknown_digest: usize,
+    available: usize,
+    updated: usize,
+    not_updated: usize,
+    pinned: usize,
+    failed: usize,
+}
+
+impl RunSummary {
+    fn record(&mut self, verdict: Verdict) {
+        let count = match verdict {
+            Verdict::UpToDate => &mut self.up_to_date,
+            Verdict::UnknownDigest => &mut self.unknown_digest,
+            Verdict::Available => &mut self.available,
+            Verdict::Updated => &mut self.updated,
+            Verdict::NotUpdated => &mut self.not_updated,
+            Verdict::Pinned => &mut self.pinned,
+            Verdict::Failed => &mut self.failed,
+        };
+        *count += 1;
+        self.checked += 1;
+    }
+
+    /// Silent when nothing was due, so the bare tick doesn't log every minute.
+    fn log(&self) {
+        if self.checked == 0 {
+            return;
+        }
+        info!(
+            checked = self.checked,
+            up_to_date = self.up_to_date,
+            unknown_digest = self.unknown_digest,
+            available = self.available,
+            updated = self.updated,
+            not_updated = self.not_updated,
+            pinned = self.pinned,
+            failed = self.failed,
+            "scheduler: run summary"
+        );
+    }
 }
 
 /// What one processed container leaves for the tick to record.
-#[derive(Default)]
 struct Processed {
     /// Every container an applied update touched, so the tick skips them later.
     handled: Vec<String>,
     outcome: Option<UpdateOutcome>,
+    /// One per container covered; a compose rollout covers several.
+    verdicts: Vec<Verdict>,
+}
+
+impl Processed {
+    /// A probe that applied nothing.
+    fn probed(verdict: Verdict) -> Self {
+        Self {
+            handled: Vec::new(),
+            outcome: None,
+            verdicts: vec![verdict],
+        }
+    }
+}
+
+/// One verdict per image target of a rollout; a restarted dependent is none.
+fn rollout_verdicts(report: &RolloutReport) -> Vec<Verdict> {
+    let failed_at = match &report.aborted {
+        Some(AbortReason::StepFailed { container, .. }) => Some(container.as_str()),
+        Some(
+            AbortReason::RolledBack { .. }
+            | AbortReason::OneShotFailed { .. }
+            | AbortReason::OneShotTimedOut { .. }
+            | AbortReason::Deferred { .. },
+        )
+        | None => None,
+    };
+    let mut verdicts: Vec<Verdict> = report
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            RolloutStep::Updated { .. } | RolloutStep::OneShotCompleted { .. } => {
+                Some(Verdict::Updated)
+            }
+            RolloutStep::Restarted { .. } => None,
+        })
+        .collect();
+    verdicts.extend(report.not_completed.iter().map(|c| {
+        if failed_at == Some(c.as_str()) {
+            Verdict::Failed
+        } else {
+            Verdict::NotUpdated
+        }
+    }));
+    verdicts
 }
 
 /// The verdict to remember for the containers whose image was swapped or tried.
@@ -391,7 +528,7 @@ where
     D: DockerCheck + DockerOps + HealthProbe + Sync,
     R: Registry + Sync,
 {
-    match probe::probe_image(docker, registry, &target.image).await {
+    let verdict = match probe::probe_image(docker, registry, &target.image).await {
         ProbeOutcome::Fetched {
             local,
             latest,
@@ -404,11 +541,11 @@ where
             ) {
                 None => {
                     debug!(container = %name, %latest, "scheduler: local digest unknown; not updating");
-                    return Processed::default();
+                    return Processed::probed(Verdict::UnknownDigest);
                 }
                 Some(false) => {
                     debug!(container = %name, "scheduler: up to date");
-                    return Processed::default();
+                    return Processed::probed(Verdict::UpToDate);
                 }
                 Some(true) => {}
             }
@@ -427,12 +564,13 @@ where
                             .await;
                         *last_notified = Some(latest.clone());
                     }
+                    Verdict::Available
                 }
                 Mode::Live | Mode::Nightly | Mode::Weekly | Mode::Monthly => {
                     // Retrying the same digest would roll back forever.
                     if last_failed.as_deref() == Some(latest.as_str()) {
                         info!(container = %name, %latest, "scheduler: this digest already failed the health gate; waiting for upstream to move");
-                        return Processed::default();
+                        return Processed::probed(Verdict::NotUpdated);
                     }
                     // Meaningful only once the tag carries upstream's digest.
                     let current_image = (local.update_available(&latest) == Some(false))
@@ -454,26 +592,32 @@ where
                     )
                     .await;
                 }
-                Mode::Off => {}
+                // `run_tick` never processes an `off` container.
+                Mode::Off => Verdict::NotUpdated,
             }
         }
         ProbeOutcome::Pinned => {
             debug!(container = %name, "scheduler: image pinned to a digest (no check)");
+            Verdict::Pinned
         }
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
+            Verdict::Failed
         }
         ProbeOutcome::CredentialsRejected => {
             warn!(container = %name, "scheduler: configured registry credentials rejected and anonymous denied; check/rotate token — not updating");
+            Verdict::Failed
         }
         ProbeOutcome::NetworkUnavailable => {
             warn!(container = %name, "scheduler: registry network unavailable; will retry next tick");
+            Verdict::Failed
         }
         ProbeOutcome::Error(msg) => {
             warn!(container = %name, %msg, "scheduler: digest probe failed; continuing");
+            Verdict::Failed
         }
-    }
-    Processed::default()
+    };
+    Processed::probed(verdict)
 }
 
 /// Run the health-gated recreate, log its outcome, and (when the container opts
@@ -538,10 +682,11 @@ where
         return Processed {
             handled: report_rollout(&report, policy, image, dispatcher).await,
             outcome,
+            verdicts: rollout_verdicts(&report),
         };
     }
 
-    let outcome = match recreate_with_health(
+    let (outcome, verdict) = match recreate_with_health(
         docker,
         name,
         &cfg.health,
@@ -563,9 +708,12 @@ where
                     })
                     .await;
             }
-            Some(UpdateOutcome::Landed {
-                containers: vec![name.to_owned()],
-            })
+            (
+                Some(UpdateOutcome::Landed {
+                    containers: vec![name.to_owned()],
+                }),
+                Verdict::Updated,
+            )
         }
         Ok(RecreateOutcome::RolledBack(ev)) => {
             warn!(container = %name, reason = ?ev.reason, "scheduler: update unhealthy, rolled back");
@@ -580,25 +728,29 @@ where
                     })
                     .await;
             }
-            Some(UpdateOutcome::Rejected {
-                digest: latest.to_owned(),
-                containers: vec![name.to_owned()],
-            })
+            (
+                Some(UpdateOutcome::Rejected {
+                    digest: latest.to_owned(),
+                    containers: vec![name.to_owned()],
+                }),
+                Verdict::NotUpdated,
+            )
         }
         Ok(RecreateOutcome::SkippedByHook(reason)) => {
             // Deliberate skip, not a failure: the bookkeeping already advanced,
             // so the next due cycle simply tries again.
             info!(container = %name, %reason, "scheduler: update skipped by pre-update hook; will retry when next due");
-            None
+            (None, Verdict::NotUpdated)
         }
         Err(e) => {
             warn!(container = %name, error = %e, "scheduler: recreate failed; daemon continues");
-            None
+            (None, Verdict::Failed)
         }
     };
     Processed {
         handled: vec![name.to_string()],
         outcome,
+        verdicts: vec![verdict],
     }
 }
 
@@ -1914,8 +2066,8 @@ mod tests {
         )
     });
 
-    #[tokio::test]
-    async fn own_container_skip_logs_once_across_ticks() {
+    /// Run `fut` under a capturing subscriber and return everything it logged.
+    async fn capture_logs(fut: impl std::future::Future<Output = ()>) -> String {
         use std::io::Write;
         use std::sync::Arc;
         use tracing::instrument::WithSubscriber;
@@ -1945,7 +2097,12 @@ mod tests {
             .with_writer(BufWriter(buf.clone()))
             .with_ansi(false)
             .finish();
+        fut.with_subscriber(subscriber).await;
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
 
+    #[tokio::test]
+    async fn own_container_skip_logs_once_across_ticks() {
         let node = FakeNode::new(
             vec![with_id(summary("freshdock", "alpine:3.19", &[]), SELF_ID)],
             DIG_A,
@@ -1953,18 +2110,224 @@ mod tests {
         let reg = FakeRegistry::new(DIG_B);
         let cfg = self_cfg();
         let mut st = TickState::default();
-        async {
+        let out = capture_logs(async {
             one_tick_cfg(&node, &reg, &cfg, watch_all_settings(), &mut st).await;
             one_tick_cfg(&node, &reg, &cfg, watch_all_settings(), &mut st).await;
-        }
-        .with_subscriber(subscriber)
+        })
         .await;
 
-        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert_eq!(
             out.matches("skipping freshdock's own container").count(),
             1,
             "the skip must log on first sight only, not every tick: {out}"
+        );
+    }
+
+    fn live_labels_for(name: &str, image: &str) -> ContainerSummary {
+        summary(
+            name,
+            image,
+            &[("freshdock.enable", "true"), ("freshdock.mode", "live")],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_run_that_checked_containers_logs_one_summary() {
+        // Issue #99: a run that changes nothing must still leave a trace at info.
+        let node = FakeNode::new(
+            vec![
+                live_labels_for("web", "alpine:3.19"),
+                live_labels_for("app", "built:1"),
+            ],
+            DIG_A,
+        )
+        .with_image("built:1", LocalImage::default());
+        let reg = FakeRegistry::new(DIG_A);
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            one_tick_cfg(&node, &reg, &cfg(), ResolvedSettings::default(), &mut st).await;
+            // Same clock, so nothing is due again: no second summary.
+            one_tick_cfg(&node, &reg, &cfg(), ResolvedSettings::default(), &mut st).await;
+        })
+        .await;
+
+        let lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("scheduler: run summary"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one summary per run that checked: {out}");
+        for field in [
+            "checked=2",
+            "up_to_date=1",
+            "unknown_digest=1",
+            " updated=0",
+        ] {
+            assert!(lines[0].contains(field), "missing {field}: {}", lines[0]);
+        }
+        assert!(lines[0].contains(" INFO "), "{}", lines[0]);
+    }
+
+    fn summary_line(out: &str) -> &str {
+        out.lines()
+            .find(|l| l.contains("scheduler: run summary"))
+            .unwrap_or_else(|| panic!("no summary: {out}"))
+    }
+
+    #[tokio::test]
+    async fn the_summary_tells_a_landed_update_from_a_rolled_back_one() {
+        let web = || vec![live_labels_for("web", "alpine:3.19")];
+        for (node, fields) in [
+            (
+                FakeNode::new(web(), DIG_A),
+                [" updated=1", " not_updated=0"],
+            ),
+            (
+                FakeNode::new(web(), DIG_A).unhealthy(),
+                [" updated=0", " not_updated=1"],
+            ),
+        ] {
+            let reg = FakeRegistry::new(DIG_B);
+            let out = capture_logs(async {
+                one_tick(&node, &reg).await;
+            })
+            .await;
+            let line = summary_line(&out);
+            for field in fields {
+                assert!(line.contains(field), "missing {field}: {line}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_summary_counts_every_service_a_rollout_updated() {
+        let (node, _) = compose_node();
+        let reg = FakeRegistry::new(DIG_B);
+        let out = capture_logs(tick_with_settings(&node, &reg, ResolvedSettings::default())).await;
+        let line = summary_line(&out);
+        for field in ["checked=2", " updated=2"] {
+            assert!(line.contains(field), "missing {field}: {line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_all_bystander_with_no_local_digest_does_not_warn() {
+        let node = FakeNode::with_digests(vec![summary("app", "built:1", &[])], &[]);
+        let reg = FakeRegistry::new(DIG_A);
+        let out = capture_logs(async {
+            one_tick_cfg(
+                &node,
+                &reg,
+                &cfg(),
+                watch_all_settings(),
+                &mut TickState::default(),
+            )
+            .await;
+        })
+        .await;
+        assert!(!out.contains("no local digest"), "{out}");
+        assert!(summary_line(&out).contains("unknown_digest=1"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_does_not_rearm_the_unknown_digest_warning() {
+        let node = FakeNode::with_digests(vec![live_labels_for("app", "built:1")], &[]);
+        let online = FakeRegistry::new(DIG_A);
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            let cfg = every_tick();
+            let settings = ResolvedSettings::default;
+            one_tick_cfg(&node, &online, &cfg, settings(), &mut st).await;
+            one_tick_cfg(&node, &FakeRegistry::offline(), &cfg, settings(), &mut st).await;
+            one_tick_cfg(&node, &online, &cfg, settings(), &mut st).await;
+        })
+        .await;
+        assert_eq!(out.matches("no local digest").count(), 1, "{out}");
+    }
+
+    #[tokio::test]
+    async fn the_unknown_digest_warning_returns_after_a_digest_was_known() {
+        let node = FakeNode::with_digests(vec![live_labels_for("app", "built:1")], &[]);
+        let reg = FakeRegistry::new(DIG_A);
+        let known = LocalImage {
+            id: None,
+            repo_digests: vec![format!("built@{DIG_A}")],
+        };
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            one_tick_cfg(
+                &node,
+                &reg,
+                &every_tick(),
+                ResolvedSettings::default(),
+                &mut st,
+            )
+            .await;
+            node.images
+                .lock()
+                .unwrap()
+                .insert("built:1".to_owned(), known);
+            one_tick_cfg(
+                &node,
+                &reg,
+                &every_tick(),
+                ResolvedSettings::default(),
+                &mut st,
+            )
+            .await;
+            node.images.lock().unwrap().clear();
+            one_tick_cfg(
+                &node,
+                &reg,
+                &every_tick(),
+                ResolvedSettings::default(),
+                &mut st,
+            )
+            .await;
+        })
+        .await;
+        assert_eq!(out.matches("no local digest").count(), 2, "{out}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_local_digest_warns_once_across_ticks() {
+        let node = FakeNode::with_digests(vec![live_labels_for("app", "built:1")], &[]);
+        let reg = FakeRegistry::new(DIG_A);
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            one_tick_cfg(
+                &node,
+                &reg,
+                &every_tick(),
+                ResolvedSettings::default(),
+                &mut st,
+            )
+            .await;
+            one_tick_cfg(
+                &node,
+                &reg,
+                &every_tick(),
+                ResolvedSettings::default(),
+                &mut st,
+            )
+            .await;
+        })
+        .await;
+
+        let warnings: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("no local digest"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "warn on first sight only: {out}");
+        assert!(warnings[0].contains(" WARN "), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("built:1"),
+            "names the image: {}",
+            warnings[0]
+        );
+        assert_eq!(
+            out.matches("scheduler: run summary").count(),
+            2,
+            "every run still counts it: {out}"
         );
     }
 
@@ -2483,6 +2846,22 @@ mod tests {
             1,
             "two ticks inside one interval are one attempt"
         );
+    }
+
+    #[tokio::test]
+    async fn an_inspect_failure_is_counted_as_failed() {
+        let node = FakeNode::new(
+            vec![with_id(summary("web", OLD_ID, &live_labels()), "c1")],
+            DIG_A,
+        )
+        .with_config_image("c1", "alpine:3.19")
+        .failing_container("c1");
+        let reg = FakeRegistry::new(DIG_B);
+        let out = capture_logs(async {
+            one_tick(&node, &reg).await;
+        })
+        .await;
+        assert!(summary_line(&out).contains("failed=1"), "{out}");
     }
 
     #[tokio::test]

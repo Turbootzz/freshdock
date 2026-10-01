@@ -91,6 +91,23 @@ Or change the fleet-wide fallback with `[settings] default_mode` /
 
 See [Scheduling & update modes](scheduling.md#modes).
 
+Every scheduler run that checked something ends with one summary line:
+
+```text
+INFO freshdock::scheduler: scheduler: run summary checked=3 up_to_date=2 unknown_digest=1 available=0 updated=0 not_updated=0 pinned=0 failed=0
+```
+
+- `up_to_date` for a container you expected to move usually means its tag is a
+  fixed version (`5.1.3`). freshdock follows the digest behind the tag you run and
+  never switches to a newer tag; change the tag yourself to upgrade.
+- `unknown_digest` means freshdock has nothing local to compare against, typically
+  a locally built image. For a container you labelled, a warning naming it is
+  logged the first time.
+- `not_updated` is an update that was due but rolled back or was deferred by a
+  hook; `failed` is an inspect, registry or recreate error. The lines above the
+  summary say which.
+- `pinned` is covered [below](#a-container-is-reported-as-pinned-no-check).
+
 ## My container doesn't appear in `check` at all
 
 The `freshdock.enable=true` label is missing (or typo'd). freshdock is opt-in: an

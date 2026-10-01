@@ -310,10 +310,15 @@ async fn probe(authority: &str) -> Result<(), RegistryError> {
 
 fn log_rate_limit(host: &str, resp: &reqwest::Response) {
     if let Some(limit) = resp.headers().get("ratelimit-limit") {
+        let remaining = resp
+            .headers()
+            .get("ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
         info!(
             host = %host,
             limit = ?limit,
-            remaining = ?resp.headers().get("ratelimit-remaining"),
+            remaining = ?remaining,
             "registry rate limit"
         );
     } else {
