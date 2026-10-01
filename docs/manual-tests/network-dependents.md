@@ -14,12 +14,13 @@ original id again, but the namespace behind it is new either way). The repair ru
 Docker refuses to remove a container whose namespace a running container still
 holds.
 
-Each dependent is re-created from the exact **image ID** it was running, not
-from its (mutable) tag. A repair must never double as an unrequested upgrade.
-(When the daemon reports no image id for it, which is rare, the existing image
-reference is used instead.) Its `Config.Image` therefore reads as an image id
-afterwards; that is deliberate, and the opposite of the owner's own cycle
-(issue #25).
+Each dependent is re-created from its own reference (`Config.Image`) as long as
+that still resolves to the image it runs, so it stays on its tag and freshdock
+keeps checking it (issue #102). Once the tag points elsewhere, it is re-created
+from the exact **image ID** instead, because a repair must never double as an
+unrequested upgrade; its `Config.Image` then reads as an image id, it reports
+`pinned (no check)`, and freshdock logs a warning saying so. (When the daemon
+reports no image id, which is rare, the reference is used.)
 
 The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdock/blob/main/src/docker/recreate.rs)
 (`healthy_update_reattaches_id_based_dependent`,
@@ -27,8 +28,12 @@ The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdoc
 `rollback_reattaches_dependents_without_rewrite`,
 `dependent_create_body_drops_what_a_shared_namespace_forbids`,
 `dependent_create_failure_restores_the_dependent`,
-`dependent_failure_does_not_fail_update`) are the authoritative checks; this
-procedure is for human verification against a real daemon.
+`dependent_failure_does_not_fail_update`,
+`dependent_stays_on_its_tag_while_the_tag_resolves_to_its_image`,
+`dependent_is_pinned_to_its_image_id_once_its_tag_moved`) and the live tests in
+[tests/contract_live.rs](https://github.com/Turbootzz/freshdock/blob/main/tests/contract_live.rs)
+are the authoritative checks; this procedure is for human verification against
+a real daemon.
 
 ## Prerequisites
 
@@ -65,6 +70,7 @@ docker inspect fd-base --format '{{.Id}}'                       # old owner id
 docker inspect fd-peer --format '{{.HostConfig.NetworkMode}}'   # container:<old id>
 docker inspect fd-peer --format '{{.State.StartedAt}}'
 docker inspect fd-peer --format '{{.Image}}'                    # image ID
+docker inspect fd-peer --format '{{.Config.Image}}'             # alpine:3.20
 
 # 5. Recreate the owner.
 ./target/release/freshdock recreate fd-base
@@ -81,9 +87,9 @@ docker inspect fd-peer --format '{{.Image}}'                    # image ID
   to an id at create time, this is the same rewrite as the id-based case below.
   (freshdock still has a branch that leaves a *literal* name reference untouched;
   it only fires on daemons that store the reference verbatim.)
-- `docker inspect fd-peer --format '{{.Image}}'` is **unchanged** from step 4:
-  the dependent is re-created from the exact image ID it was running (the
-  image-ref fallback only applies when the daemon reported no image id).
+- `docker inspect fd-peer --format '{{.Image}}'` is **unchanged** from step 4,
+  and `{{.Config.Image}}` still reads `alpine:3.20`: the tag resolves to the
+  image the dependent runs, so the repair keeps it.
 - `docker exec fd-peer wget -qO- 127.0.0.1 | head -1` reaches the **new** nginx.
   This is the headline assertion. Before #68 it failed with no route to host.
 - `docker ps -a` shows no `fd-peer-old-<ts>` left over: the dependent's own
@@ -108,6 +114,24 @@ docker exec fd-peer wget -qO- 127.0.0.1 | head -1
 Pass criteria: `NetworkMode` holds `container:<new fd-base id>` and the `wget`
 still succeeds. A `container:<old id>` here means the rewrite did not happen;
 the container would refuse to start at all on the next daemon restart.
+
+### Moved tag
+
+```bash
+docker rm -f fd-peer
+docker tag alpine:3.20 fd-peer-img:1
+docker run -d --name fd-peer --network container:fd-base fd-peer-img:1 sleep 1d
+running=$(docker inspect fd-peer --format '{{.Image}}')
+docker commit fd-peer fd-peer-img:1   # the tag now points at a new image
+
+./target/release/freshdock recreate fd-base
+
+docker inspect fd-peer --format '{{.Image}} {{.Config.Image}}'   # both $running
+```
+
+Pass criteria: both fields equal `$running`, and the log carries a warning that
+`fd-peer` was re-attached from its image id and is pinned until it is recreated
+from its tag, with `reason="its tag now points to <new id>"`. Clean up with `docker rmi fd-peer-img:1` after the cleanup below.
 
 ### Rollback path
 

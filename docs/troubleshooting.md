@@ -149,11 +149,11 @@ typically a second container on the same tag right after the first one was
 updated. The container is now probed by the reference it was created from, so
 that case reports a real `update?` verdict and is updated like any other.
 
-A container created from an image id rather than a tag is genuinely pinned, which
-includes a sidecar freshdock repaired after its network namespace was recreated
-(see [the sidecar section](#a-sidecar-on-network_mode-containerx-lost-its-network)).
-Put it back on a tag with `docker compose up -d <service>`, or recreate it from
-its tag by hand.
+A container created from an image id rather than a tag is genuinely pinned. That
+includes a sidecar freshdock repaired while its tag pointed at a newer image than
+the one it ran (see [the sidecar section](#a-sidecar-on-network_mode-containerx-lost-its-network)),
+and any sidecar an earlier release repaired. Put it back on a tag with
+`docker compose up -d <service>`, or recreate it from its tag by hand.
 
 See [Configuration: pinned images](configuration.md#labels).
 
@@ -182,10 +182,11 @@ sidecars share, so freshdock repairs them. The rules:
   restored container owns its original id again.
 - The sidecar needs no freshdock labels: it is not being updated, only repaired, so
   the `freshdock.enable` gate does not apply to it.
-- It is re-created from the exact image ID it was already running, so a moved tag
-  can never sneak an upgrade in through a repair. Only when the daemon reports no
-  image id does the existing image reference stand in. No health gate and no
-  lifecycle hooks run.
+- It is re-created from its own tag while that tag still points at the image it
+  runs, so a labelled sidecar stays managed. Once the tag has moved locally, it
+  is re-created from the exact image ID instead, so a repair can never sneak an
+  upgrade in; a warning says it is now pinned. No health gate and no lifecycle
+  hooks run.
 - A sidecar that explicitly opts out with `freshdock.enable=false` or
   `freshdock.mode=off` is skipped, with a warning naming it. It keeps a dead
   namespace until you restart it yourself. An *absent* label is not an opt-out,
