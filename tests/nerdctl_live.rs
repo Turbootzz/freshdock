@@ -28,6 +28,7 @@ use freshdock::docker::check::DockerCheck;
 use freshdock::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use freshdock::health::{HealthConfig, TokioClock};
 use freshdock::labels::LifecycleHooks;
+use freshdock::nerdctl::private::unique_suffix;
 use freshdock::nerdctl::{Nerdctl, compare};
 use freshdock::updater::RecreateOutcome;
 use serde_json::Value;
@@ -412,14 +413,9 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
     must(&["create", "--name", &trial, ALPINE, "true"]);
     // The same, but made by a process that is still running (this test): a
     // daemon in the middle of an update.
-    // Named now: a pid on an older name would read as reused by another
-    // process, and the name as left by a dead one.
-    let made = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let live = format!("{}-{made}", std::process::id());
-    let busy_aside = format!("{p}-busy-freshdock-aside-{live}-0");
+    // Named as this process names things: a name records its maker's pid
+    // and start, and another start under the same pid is another process.
+    let busy_aside = format!("{p}-busy-freshdock-aside-{}", unique_suffix());
     // And a dead freshdock's pid, reused since by this running process.
     let reused_trial = format!("{p}-reused-freshdock-check-{}-2-1", std::process::id());
     must(&["create", "--name", &reused_trial, ALPINE, "true"]);
@@ -432,7 +428,7 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
         "sleep",
         "100000",
     ]);
-    let busy_trial = format!("{p}-busy-freshdock-check-{live}-1");
+    let busy_trial = format!("{p}-busy-freshdock-check-{}", unique_suffix());
     must(&["create", "--name", &busy_trial, ALPINE, "true"]);
 
     // Connecting alone (what `check` does) changes nothing.

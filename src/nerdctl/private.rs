@@ -43,7 +43,7 @@ impl Drop for PrivateDir {
 }
 
 /// Split `<base><marker><suffix>` where `<suffix>` is exactly what
-/// [`unique_suffix`] makes (`<pid>-<nanos>-<n>`, all digits). Returns the base
+/// [`unique_suffix`] makes (`<pid>-<start>-<n>`, all digits). Returns the base
 /// and who made the name. Anything else, including a name that merely
 /// contains the marker, is `None`.
 pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, Maker)> {
@@ -54,34 +54,32 @@ pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, Maker)>
     Some((base, suffix_maker(suffix)?))
 }
 
-/// The process that made a [`unique_suffix`], and when.
+/// The process that made a [`unique_suffix`]: its pid and when it started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Maker {
     pub pid: u32,
-    /// Nanoseconds since the Unix epoch.
-    created: u128,
+    /// The process's start, in clock ticks since boot, or 0 if it couldn't
+    /// be read. With the pid it names one process, whatever the wall clock
+    /// does.
+    started: u64,
 }
 
 impl Maker {
     /// Is the process that made the name still running? Then whatever it
     /// named may be in use by it right now. A process under the same pid that
-    /// started after the name was made is another one (the pid was reused),
-    /// so the maker is gone. Where this can't be told, assume it is running,
-    /// so nothing is touched.
+    /// started at another time is another one (the pid was reused), so the
+    /// maker is gone. Where this can't be told, assume it is running, so
+    /// nothing is touched.
     pub fn alive(&self) -> bool {
         if !process_alive(self.pid) {
             return false;
         }
-        match process_started(self.pid) {
-            Some(started) => started <= self.created / 1_000_000_000 + REUSE_SLACK_S,
-            None => true,
+        if self.started == 0 {
+            return true;
         }
+        process_start(self.pid).is_none_or(|now| now == self.started)
     }
 }
-
-/// How much later than a name its maker may seem to have started: the boot
-/// time the start is counted from is in whole seconds.
-const REUSE_SLACK_S: u128 = 5;
 
 /// The maker in a [`unique_suffix`], or `None` if `suffix` isn't one.
 fn suffix_maker(suffix: &str) -> Option<Maker> {
@@ -95,31 +93,20 @@ fn suffix_maker(suffix: &str) -> Option<Maker> {
     }
     Some(Maker {
         pid: parts[0].parse().ok()?,
-        created: parts[1].parse().ok()?,
+        started: parts[1].parse().ok()?,
     })
 }
 
-/// When `pid` started, in seconds since the Unix epoch, from
-/// `/proc/<pid>/stat` (clock ticks since boot) and `/proc/stat` (`btime`).
-fn process_started(pid: u32) -> Option<u128> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let boot = std::fs::read_to_string("/proc/stat").ok()?;
-    let ticks = start_ticks(&stat)?;
-    let btime: u128 = boot
-        .lines()
-        .find_map(|l| l.strip_prefix("btime "))?
-        .trim()
-        .parse()
-        .ok()?;
-    // USER_HZ, the unit of starttime: 100 on every architecture freshdock is
-    // built for.
-    Some(btime + ticks / 100)
+/// When `pid` started, in clock ticks since boot (`/proc/<pid>/stat`), which
+/// no wall-clock change moves.
+fn process_start(pid: u32) -> Option<u64> {
+    start_ticks(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
 /// Field 22 (`starttime`) of a `/proc/<pid>/stat` line. The command name
 /// (field 2) is in parentheses and may itself contain spaces and `)`, so
 /// count from the last `)`.
-fn start_ticks(stat: &str) -> Option<u128> {
+fn start_ticks(stat: &str) -> Option<u64> {
     let (_, rest) = stat.rsplit_once(')')?;
     rest.split_whitespace().nth(19)?.parse().ok()
 }
@@ -185,16 +172,15 @@ pub fn process_alive(pid: u32) -> bool {
     !proc.is_dir() || proc.join(pid.to_string()).exists()
 }
 
-/// A suffix for temporary names: the process id, the time, and a counter, so
-/// two in one process never collide.
+/// A suffix for temporary names: the process id, when the process started
+/// (see [`Maker`]), and a counter, so two in one process never collide.
 pub fn unique_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
+    let pid = std::process::id();
+    let started = process_start(pid).unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{n}", std::process::id())
+    format!("{pid}-{started}-{n}")
 }
 
 #[cfg(unix)]
@@ -309,8 +295,8 @@ mod tests {
         let made = format!("web-x-{}", unique_suffix());
         let (_, maker) = split_marked(&made, "-x-").unwrap();
         assert!(maker.alive(), "made by this very process");
-        // The same pid on a name made in 1970: this process started long
-        // after, so it can't be the one that made it.
+        // The same pid, but a process that started at another time: the pid
+        // was reused, so this process isn't the one that made it.
         let reused = format!("web-x-{}-1-0", std::process::id());
         let (_, old) = split_marked(&reused, "-x-").unwrap();
         assert!(!old.alive());
@@ -327,16 +313,20 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn this_process_started_recently() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as u128;
-        let started = process_started(std::process::id()).expect("readable on Linux");
-        assert!(
-            started <= now + 1 && started + 3600 > now,
-            "{started} vs {now}"
-        );
+    fn a_suffix_records_this_process_start() {
+        let started = process_start(std::process::id()).expect("readable on Linux");
+        assert!(started > 0);
+        let made = format!("web-x-{}", unique_suffix());
+        let (_, maker) = split_marked(&made, "-x-").unwrap();
+        assert_eq!(maker.started, started);
+    }
+
+    #[test]
+    fn an_unknown_start_never_counts_as_gone() {
+        // Recorded as 0 where the start couldn't be read: only a missing
+        // process makes the maker gone then.
+        let (_, maker) = split_marked(&format!("web-x-{}-0-0", std::process::id()), "-x-").unwrap();
+        assert!(maker.alive());
     }
 
     #[cfg(target_os = "linux")]
