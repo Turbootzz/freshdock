@@ -10,6 +10,10 @@ pub struct LocalImage {
     pub id: Option<String>,
     /// `RepoDigests` as reported, `repo@sha256:<hex>` entries.
     pub repo_digests: Vec<String>,
+    /// The runtime could not tell whether the image came from a registry,
+    /// so `repo_digests` says nothing about it (nerdctl without a working
+    /// `ctr`). Never set by Docker, whose `RepoDigests` answer that itself.
+    pub source_unknown: bool,
 }
 
 /// The identity of a running container: its reference and the image it runs.

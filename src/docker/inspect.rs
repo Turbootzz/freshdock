@@ -15,6 +15,7 @@ impl super::Docker {
     pub async fn inspect_local_image(&self, image: &str) -> Result<LocalImage, DockerError> {
         let resp = self.client.inspect_image(image).await?;
         Ok(LocalImage {
+            source_unknown: false,
             id: resp.id,
             repo_digests: resp.repo_digests.unwrap_or_default(),
         })

@@ -176,6 +176,7 @@ impl ContainerInspect {
 impl From<ImageInspect> for LocalImage {
     fn from(img: ImageInspect) -> Self {
         LocalImage {
+            source_unknown: false,
             id: img.id,
             repo_digests: img.repo_digests.unwrap_or_default(),
         }

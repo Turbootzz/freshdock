@@ -628,6 +628,10 @@ where
             debug!(container = %name, "scheduler: locally built image (no check)");
             Verdict::UnknownDigest
         }
+        ProbeOutcome::SourceUnknown => {
+            warn!(container = %name, "scheduler: cannot tell whether the image came from a registry (is ctr working?) — not updating");
+            Verdict::Failed
+        }
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
             Verdict::Failed
@@ -1111,6 +1115,7 @@ mod tests {
             // RepoDigests match succeeds.
             let repo = image.split(':').next().unwrap_or(image);
             Ok(LocalImage {
+                source_unknown: false,
                 id: None,
                 repo_digests: self
                     .local_digests
@@ -2287,6 +2292,7 @@ mod tests {
         let known = LocalImage {
             id: None,
             repo_digests: vec![format!("built@{DIG_A}")],
+            source_unknown: false,
         };
         let mut st = TickState::default();
         let out = capture_logs(async {
@@ -2603,6 +2609,7 @@ mod tests {
     /// A local image with an id and full `repo@sha256:` entries.
     fn image(id: &str, digests: &[&str]) -> LocalImage {
         LocalImage {
+            source_unknown: false,
             id: Some(id.to_owned()),
             repo_digests: digests.iter().map(|d| (*d).to_owned()).collect(),
         }

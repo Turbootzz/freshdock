@@ -313,6 +313,10 @@ set `FRESHDOCK_CONTAINERD_NAMESPACE` to the one you use with `nerdctl --namespac
 WARN freshdock::nerdctl: cannot run containerd's ctr, so freshdock cannot tell pulled images from local builds; it will report containers but update none. Install ctr next to nerdctl or on PATH
 ```
 
+Until it can run `ctr`, `freshdock check` shows every container as
+`source unknown (see log)`, and the daemon logs a warning for each one on every
+poll instead of updating it.
+
 freshdock looks for `ctr` in the directory of `FRESHDOCK_NERDCTL_PATH`, then on
 `PATH`. If containerd listens somewhere other than
 `/run/containerd/containerd.sock` (an `address` in `nerdctl.toml`), set

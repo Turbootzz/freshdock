@@ -49,6 +49,7 @@ digest can't be resolved, `latest digest` shows the reason instead:
 |---|---|
 | a short digest (e.g. `sha256:ab12cd...`) | The resolved upstream digest; compare with `update?`. |
 | `pinned (no check)` | Image is pinned to a digest, so there is no moving tag to follow. |
+| `source unknown (see log)` | nerdctl only: `ctr` could not be run, so freshdock can't tell whether the image came from a registry. Nothing is compared or updated; see [troubleshooting](troubleshooting.md#nerdctl-could-not-reach-containerd). |
 | `local build (no check)` | The image carries no digest from a registry (built, committed or loaded on this host), so there is nothing upstream to compare it with. The registry isn't asked. |
 | `auth required (set credentials)` | The registry needs credentials that aren't configured. See [registry-auth](registry-auth.md). |
 | `network unavailable` | The registry couldn't be reached; nothing is assumed. |

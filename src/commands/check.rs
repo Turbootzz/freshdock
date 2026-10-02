@@ -23,6 +23,7 @@ const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
 const PINNED: &str = "pinned (no check)";
 const LOCAL_BUILD: &str = "local build (no check)";
+const SOURCE_UNKNOWN: &str = "source unknown (see log)";
 
 /// Run the read-only check: list opted-in containers, fetch latest
 /// digests for those on Docker Hub, and render a status table.
@@ -214,6 +215,7 @@ fn render_cells(
             (current, PINNED.to_string(), dash())
         }
         ProbeOutcome::LocalBuild => (dash(), LOCAL_BUILD.to_string(), dash()),
+        ProbeOutcome::SourceUnknown => (dash(), SOURCE_UNKNOWN.to_string(), dash()),
         ProbeOutcome::AuthRequired => (dash(), AUTH_REQUIRED.to_string(), dash()),
         ProbeOutcome::CredentialsRejected => (dash(), CREDENTIALS_REJECTED.to_string(), dash()),
         ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
@@ -354,6 +356,7 @@ mod tests {
                         (
                             (*img).to_owned(),
                             LocalImage {
+                                source_unknown: false,
                                 id: None,
                                 repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
                             },

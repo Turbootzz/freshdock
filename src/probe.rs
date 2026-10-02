@@ -81,6 +81,10 @@ pub enum ProbeOutcome {
     },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
+    /// The runtime can't tell whether the image came from a registry (nerdctl
+    /// without a working `ctr`), so nothing is compared and the registry isn't
+    /// asked. Distinct from [`LocalBuild`](Self::LocalBuild), which is known.
+    SourceUnknown,
     /// The image carries no digest from its registry: built, committed or
     /// loaded on this host. Nothing upstream can be compared with it, so the
     /// registry isn't asked (it would answer for an unrelated image, or deny
@@ -171,6 +175,9 @@ pub async fn probe_image(
     // manifest digest from `image inspect → RepoDigests`.
     let (local, tag_image_id) = match docker.inspect_image(image).await {
         Ok(img) => {
+            if img.source_unknown {
+                return ProbeOutcome::SourceUnknown;
+            }
             let digests = local_manifest_digests(image, &img.repo_digests);
             if digests.is_empty() {
                 debug!(image = %image, "no registry digest; a local build, nothing to check");
@@ -573,6 +580,7 @@ mod tests {
                         (
                             (*img).to_owned(),
                             LocalImage {
+                                source_unknown: false,
                                 id: None,
                                 repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
                             },
@@ -729,6 +737,18 @@ mod tests {
         let registry = FakeRegistry::auth_required();
         let outcome = probe_image(&docker, &registry, "lore-server:latest").await;
         assert_eq!(outcome, ProbeOutcome::LocalBuild);
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_image_of_unknown_source_is_never_looked_up() {
+        // Not a local build as far as anyone knows, but nothing to compare
+        // either: say so, rather than claim it was built here.
+        let mut docker = FakeDocker::with_digests(&[("alpine:3.19", &[])]);
+        docker.images.get_mut("alpine:3.19").unwrap().source_unknown = true;
+        let registry = FakeRegistry::new(DIG_A);
+        let outcome = probe_image(&docker, &registry, "alpine:3.19").await;
+        assert_eq!(outcome, ProbeOutcome::SourceUnknown);
         assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
     }
 

@@ -206,7 +206,9 @@ impl<R: CommandRunner> Nerdctl<R> {
                 warn!(
                     ctr = %path.display(),
                     error = %e,
-                    "cannot run containerd's ctr, so freshdock cannot tell pulled images from                      local builds; it will report containers but update none. Install ctr next                      to nerdctl or on PATH"
+                    "cannot run containerd's ctr, so freshdock cannot tell pulled images from \
+                     local builds; it will report containers but update none. Install ctr next \
+                     to nerdctl or on PATH"
                 );
                 self.ctr = None;
             }
@@ -231,22 +233,17 @@ impl<R: CommandRunner> Nerdctl<R> {
     }
 
     /// Did containerd pull this image from the registry and repository a
-    /// `RepoDigests` entry names? False for a local build, and whenever
-    /// that can't be told (see [`source`]).
-    async fn pulled_from(&self, repo_digest: &str) -> bool {
+    /// `RepoDigests` entry names? `Ok(false)` for a local build; an error when
+    /// `ctr` can't say (see [`source`]).
+    async fn pulled_from(&self, repo_digest: &str) -> Result<bool, String> {
         let Some((host, path, digest)) = source::registry_of(repo_digest) else {
-            return false;
+            return Ok(false);
         };
         let filter = format!("digest=={digest}");
-        match self.ctr_call(&["content", "ls", &filter]).await {
-            Ok(listing) => source::sources(&listing, digest)
-                .iter()
-                .any(|(h, p)| *h == host && *p == path),
-            Err(e) => {
-                debug!(image = %repo_digest, error = %e, "could not read where the image came from");
-                false
-            }
-        }
+        let listing = self.ctr_call(&["content", "ls", &filter]).await?;
+        Ok(source::sources(&listing, digest)
+            .iter()
+            .any(|(h, p)| *h == host && *p == path))
     }
 
     /// `nerdctl image inspect`, as reported: every `RepoDigests` entry kept.
@@ -337,13 +334,23 @@ impl<R: CommandRunner> DockerCheck for Nerdctl<R> {
         let mut img = self.image_record(image).await?;
         let mut pulled = Vec::new();
         for repo_digest in std::mem::take(&mut img.repo_digests) {
-            if self.pulled_from(&repo_digest).await {
-                pulled.push(repo_digest);
-            } else {
-                debug!(image = %image, %repo_digest, "not pulled from that registry; treating it as a local build");
+            match self.pulled_from(&repo_digest).await {
+                Ok(true) => pulled.push(repo_digest),
+                Ok(false) => {
+                    debug!(image = %image, %repo_digest, "not pulled from that registry; treating it as a local build");
+                }
+                Err(e) => {
+                    // Not "local": that would read as a confident verdict.
+                    debug!(image = %image, %repo_digest, error = %e, "cannot tell where the image came from");
+                    img.source_unknown = true;
+                }
             }
         }
-        img.repo_digests = pulled;
+        img.repo_digests = if img.source_unknown {
+            Vec::new()
+        } else {
+            pulled
+        };
         Ok(img)
     }
 
@@ -1473,13 +1480,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_ctr_every_image_counts_as_a_local_build() {
+    async fn without_ctr_no_image_counts_as_pulled_or_built() {
         let n = nerdctl(FakeRunner::default().on(
             "image inspect nginx:1.27-alpine",
             ok(fixture("nerdctl_image_inspect.json")),
         ));
         let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
+        assert!(img.repo_digests.is_empty(), "nothing to compare");
+        assert!(img.source_unknown, "and not mistaken for a local build");
+    }
+
+    #[tokio::test]
+    async fn a_failing_ctr_leaves_the_source_unknown() {
+        let mut n = nerdctl(FakeRunner::default().on(
+            "image inspect nginx:1.27-alpine",
+            ok(fixture("nerdctl_image_inspect.json")),
+        ));
+        n.ctr = Some(FakeRunner::default().on(
+            &format!("content ls digest=={NGINX_INDEX}"),
+            fail("connection refused"),
+        ));
+        let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
         assert!(img.repo_digests.is_empty());
+        assert!(img.source_unknown);
+    }
+
+    #[tokio::test]
+    async fn a_known_local_build_is_not_unknown() {
+        let n = nginx_with_ctr("containerd.io/gc.ref.content.config=sha256:4399");
+        let img = n.inspect_image("nginx:1.27-alpine").await.unwrap();
+        assert!(!img.source_unknown);
     }
 
     #[tokio::test]
