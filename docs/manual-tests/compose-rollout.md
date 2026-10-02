@@ -205,12 +205,12 @@ docker tag busybox:1.36 busybox:latest   # local digest now differs from upstrea
 docker compose -p fdsmoke down -v && rm -f data/*.log && docker compose -p fdsmoke up -d
 docker stop fdsmoke-paused-1
 
-freshdock run --interval 5 --tick 5
+RUST_LOG=freshdock=debug freshdock run --interval 5 --tick 5
 ```
 
-Expected on the first tick: one `registry rate limit` line (the image is probed
-**once**, for `web`), then the same three rollout steps. Every later tick must
-be quiet: the project is up to date, and nothing re-rolls.
+Expected on the first tick: one `registry rate limit` debug line (the image is
+probed **once**, for `web`), then the same three rollout steps. Later ticks probe
+again but must not re-roll: no further rollout steps.
 
 The single probe is the assertion that matters: it shows the rollout deduplicated
 its own members instead of processing each one separately.

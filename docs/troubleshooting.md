@@ -91,7 +91,10 @@ Or change the fleet-wide fallback with `[settings] default_mode` /
 
 See [Scheduling & update modes](scheduling.md#modes).
 
-Every scheduler run that checked something ends with one summary line:
+A scheduled run (`nightly`/`weekly`/`monthly`), and any run that found, applied or
+failed an update, ends with one summary line. A `live`/`watch` poll where nothing
+happened logs it at debug only, so it doesn't repeat every few minutes; set
+`RUST_LOG=freshdock=debug` to see it for those too:
 
 ```text
 INFO freshdock::scheduler: scheduler: run summary checked=3 up_to_date=2 unknown_digest=1 available=0 updated=0 not_updated=0 pinned=0 failed=0

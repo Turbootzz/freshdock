@@ -299,7 +299,7 @@ async fn run_tick<D, R>(
             Ok(t) => t,
             Err(e) => {
                 warn!(container = %name, error = %e, "scheduler: container inspect failed; skipping this tick");
-                summary.record(Verdict::Failed);
+                summary.record(Verdict::Failed, policy.mode);
                 // Cron windows are scarce; a poll interval is not.
                 if matches!(policy.mode, Mode::Live | Mode::Watch) {
                     state.last_checked = Some(now);
@@ -346,7 +346,7 @@ async fn run_tick<D, R>(
             state.unknown_digest_warned = false;
         }
         for verdict in processed.verdicts {
-            summary.record(verdict);
+            summary.record(verdict, policy.mode);
         }
         match processed.outcome {
             Some(UpdateOutcome::Rejected { digest, containers }) => {
@@ -396,9 +396,11 @@ impl Verdict {
     }
 }
 
-/// Per-tick tally, so a run that changes nothing still leaves an `info` line.
+/// Per-tick tally, logged once at the end of the tick.
 #[derive(Default)]
 struct RunSummary {
+    /// A calendar-mode container was checked, so this is a scheduled run.
+    scheduled: bool,
     checked: usize,
     up_to_date: usize,
     unknown_digest: usize,
@@ -410,7 +412,8 @@ struct RunSummary {
 }
 
 impl RunSummary {
-    fn record(&mut self, verdict: Verdict) {
+    fn record(&mut self, verdict: Verdict, mode: Mode) {
+        self.scheduled |= is_cron_mode(mode);
         let count = match verdict {
             Verdict::UpToDate => &mut self.up_to_date,
             Verdict::UnknownDigest => &mut self.unknown_digest,
@@ -424,22 +427,34 @@ impl RunSummary {
         self.checked += 1;
     }
 
-    /// Silent when nothing was due, so the bare tick doesn't log every minute.
+    /// At info for a scheduled run, so a quiet nightly run still leaves a
+    /// trace (#99), or when something moved or failed; a quiet live/watch poll
+    /// stays at debug (#104). Silent when nothing was due.
     fn log(&self) {
         if self.checked == 0 {
             return;
         }
-        info!(
-            checked = self.checked,
-            up_to_date = self.up_to_date,
-            unknown_digest = self.unknown_digest,
-            available = self.available,
-            updated = self.updated,
-            not_updated = self.not_updated,
-            pinned = self.pinned,
-            failed = self.failed,
-            "scheduler: run summary"
-        );
+        macro_rules! emit {
+            ($level:ident) => {
+                $level!(
+                    checked = self.checked,
+                    up_to_date = self.up_to_date,
+                    unknown_digest = self.unknown_digest,
+                    available = self.available,
+                    updated = self.updated,
+                    not_updated = self.not_updated,
+                    pinned = self.pinned,
+                    failed = self.failed,
+                    "scheduler: run summary"
+                )
+            };
+        }
+        let eventful = self.available + self.updated + self.not_updated + self.failed > 0;
+        if self.scheduled || eventful {
+            emit!(info);
+        } else {
+            emit!(debug);
+        }
     }
 }
 
@@ -2066,8 +2081,15 @@ mod tests {
         )
     });
 
-    /// Run `fut` under a capturing subscriber and return everything it logged.
+    /// Run `fut` under a capturing subscriber and return what it logged at info and up.
     async fn capture_logs(fut: impl std::future::Future<Output = ()>) -> String {
+        capture_logs_at(tracing::Level::INFO, fut).await
+    }
+
+    async fn capture_logs_at(
+        level: tracing::Level,
+        fut: impl std::future::Future<Output = ()>,
+    ) -> String {
         use std::io::Write;
         use std::sync::Arc;
         use tracing::instrument::WithSubscriber;
@@ -2095,6 +2117,7 @@ mod tests {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_writer(BufWriter(buf.clone()))
+            .with_max_level(level)
             .with_ansi(false)
             .finish();
         fut.with_subscriber(subscriber).await;
@@ -2132,8 +2155,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_run_that_checked_containers_logs_one_summary() {
-        // Issue #99: a run that changes nothing must still leave a trace at info.
+    async fn a_quiet_live_poll_logs_its_summary_at_debug() {
+        // #104: a live container is polled every few minutes; at info its
+        // all-quiet summary flooded the log.
         let node = FakeNode::new(
             vec![
                 live_labels_for("web", "alpine:3.19"),
@@ -2144,7 +2168,7 @@ mod tests {
         .with_image("built:1", LocalImage::default());
         let reg = FakeRegistry::new(DIG_A);
         let mut st = TickState::default();
-        let out = capture_logs(async {
+        let out = capture_logs_at(tracing::Level::DEBUG, async {
             one_tick_cfg(&node, &reg, &cfg(), ResolvedSettings::default(), &mut st).await;
             // Same clock, so nothing is due again: no second summary.
             one_tick_cfg(&node, &reg, &cfg(), ResolvedSettings::default(), &mut st).await;
@@ -2164,7 +2188,77 @@ mod tests {
         ] {
             assert!(lines[0].contains(field), "missing {field}: {}", lines[0]);
         }
-        assert!(lines[0].contains(" INFO "), "{}", lines[0]);
+        assert!(lines[0].contains(" DEBUG "), "{}", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn a_quiet_nightly_run_still_logs_its_summary_at_info() {
+        // #99: the one line a nightly run leaves, even when nothing moved. The
+        // live container is quiet at 03:00 and rides along at 04:00.
+        let node = FakeNode::new(
+            vec![
+                summary(
+                    "nightly",
+                    "alpine:3.19",
+                    &[("freshdock.enable", "true"), ("freshdock.mode", "nightly")],
+                ),
+                live_labels_for("web", "alpine:3.19"),
+            ],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_A);
+        let (_tx, rx) = watch::channel(false);
+        let mut states = HashMap::new();
+        let clock = std::cell::Cell::new(Local.with_ymd_and_hms(2026, 6, 2, 3, 0, 0).unwrap());
+        let now_fn = || clock.get();
+        let out = capture_logs(async {
+            for at in [3, 4] {
+                clock.set(Local.with_ymd_and_hms(2026, 6, 2, at, 0, 0).unwrap());
+                run_tick(
+                    &node,
+                    &reg,
+                    &cfg(),
+                    &TokioClock,
+                    &now_fn,
+                    &mut states,
+                    &mut HashSet::new(),
+                    &mut HashMap::new(),
+                    &rx,
+                    &Dispatcher::noop(),
+                    ResolvedSettings::default(),
+                )
+                .await;
+            }
+        })
+        .await;
+
+        assert_eq!(
+            out.matches("scheduler: run summary").count(),
+            1,
+            "only the scheduled run reaches info: {out}"
+        );
+        assert!(
+            summary_line(&out).contains("checked=2 up_to_date=2"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watch_poll_that_finds_an_update_logs_its_summary_at_info() {
+        let node = FakeNode::new(
+            vec![summary(
+                "web",
+                "alpine:3.19",
+                &[("freshdock.enable", "true"), ("freshdock.mode", "watch")],
+            )],
+            DIG_A,
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let out = capture_logs(async {
+            one_tick(&node, &reg).await;
+        })
+        .await;
+        assert!(summary_line(&out).contains("available=1"), "{out}");
     }
 
     fn summary_line(out: &str) -> &str {
@@ -2213,7 +2307,7 @@ mod tests {
     async fn a_watch_all_bystander_with_no_local_digest_does_not_warn() {
         let node = FakeNode::with_digests(vec![summary("app", "built:1", &[])], &[]);
         let reg = FakeRegistry::new(DIG_A);
-        let out = capture_logs(async {
+        let out = capture_logs_at(tracing::Level::DEBUG, async {
             one_tick_cfg(
                 &node,
                 &reg,
@@ -2293,7 +2387,7 @@ mod tests {
         let node = FakeNode::with_digests(vec![live_labels_for("app", "built:1")], &[]);
         let reg = FakeRegistry::new(DIG_A);
         let mut st = TickState::default();
-        let out = capture_logs(async {
+        let out = capture_logs_at(tracing::Level::DEBUG, async {
             one_tick_cfg(
                 &node,
                 &reg,
