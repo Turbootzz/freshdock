@@ -31,6 +31,9 @@ Anonymous Docker Hub is rate-limited (about 100 requests per 6 h); adding
 credentials raises the budget. freshdock dedupes to one request per unique image to
 stay well under it.
 
+A pull hit by a short-lived rate limit (GHCR does this in bursts) is retried after
+2, 5 and 10 seconds. Docker Hub's pull quota is not retried; it resets in hours.
+
 ## Aliases
 
 A `[registry.<name>]` table key, and the `<NAME>` in the env-var form, may be a

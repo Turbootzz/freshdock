@@ -6,6 +6,7 @@ pub mod spec;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bollard::auth::DockerCredentials;
@@ -25,7 +26,7 @@ use crate::compose::{self, ProjectMember};
 use crate::config::CredentialStore;
 use crate::docker::recreate::{DockerOps, HookStatus};
 use crate::docker::spec::ContainerSpec;
-use crate::health::{ContainerRuntimeState, HealthProbe};
+use crate::health::{Clock, ContainerRuntimeState, HealthProbe, TokioClock};
 use crate::registry::ImageRef;
 use crate::registry::digest::split_repository;
 
@@ -50,6 +51,64 @@ pub enum DockerError {
         api_version: String,
         networks: usize,
     },
+}
+
+impl DockerError {
+    /// A registry rate limit that clears within seconds. Docker Hub's pull
+    /// quota resets in hours, so it doesn't count.
+    pub fn is_transient_rate_limit(&self) -> bool {
+        use bollard::errors::Error;
+        let (status, message) = match self {
+            DockerError::Bollard(Error::DockerResponseServerError {
+                status_code,
+                message,
+            }) => (Some(*status_code), message),
+            DockerError::Bollard(Error::DockerStreamError { error }) => (None, error),
+            _ => return false,
+        };
+        let message = message.to_ascii_lowercase();
+        let limited = status == Some(429)
+            || ["toomanyrequests", "too many requests", "http 429"]
+                .iter()
+                .any(|needle| message.contains(needle));
+        limited && !message.contains("pull rate limit")
+    }
+}
+
+/// Backoff between pull retries (#105); fits the default 30 s shutdown drain.
+const PULL_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+
+/// Run `pull`, retrying it while the registry rate-limits it.
+async fn retry_rate_limited<F, Fut>(
+    clock: &impl Clock,
+    image: &str,
+    mut pull: F,
+) -> Result<(), DockerError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), DockerError>>,
+{
+    for delay in PULL_RETRY_DELAYS {
+        match pull().await {
+            Err(e) if e.is_transient_rate_limit() => {
+                warn!(%image, error = %e, retry_in_s = delay.as_secs(), "pull rate-limited by the registry; retrying");
+                clock.sleep(delay).await;
+            }
+            result => return result,
+        }
+    }
+    let result = pull().await;
+    if result
+        .as_ref()
+        .is_err_and(DockerError::is_transient_rate_limit)
+    {
+        warn!(%image, retries = PULL_RETRY_DELAYS.len(), "pull still rate-limited; giving up until the next run");
+    }
+    result
 }
 
 pub struct Docker {
@@ -572,7 +631,8 @@ impl DockerOps for Docker {
 
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
-        self.pull_image(image_ref).await
+        let image = format!("{}:{}", image_ref.repository, image_ref.tag);
+        retry_rate_limited(&TokioClock, &image, || self.pull_image(image_ref)).await
     }
 
     async fn stop(
@@ -666,6 +726,115 @@ impl HealthProbe for Docker {
 mod tests {
     use super::*;
     use bollard::models::Health;
+
+    // --- registry rate limits on pull (#105) ---
+
+    fn stream_error(error: &str) -> DockerError {
+        DockerError::Bollard(bollard::errors::Error::DockerStreamError {
+            error: error.to_owned(),
+        })
+    }
+
+    fn server_error(status_code: u16, message: &str) -> DockerError {
+        DockerError::Bollard(bollard::errors::Error::DockerResponseServerError {
+            status_code,
+            message: message.to_owned(),
+        })
+    }
+
+    #[test]
+    fn transient_rate_limits_are_recognised() {
+        // GHCR via lscr.io, classic image store.
+        assert!(
+            stream_error("toomanyrequests: retry-after: 224.292µs, allowed: 44000/minute")
+                .is_transient_rate_limit()
+        );
+        // Docker Desktop, containerd image store.
+        assert!(
+            server_error(
+                500,
+                "failed to resolve reference \"localhost:5001/fd105/app:1\": unexpected status \
+                 from HEAD request to http://localhost:5001/v2/fd105/app/manifests/1: 429 Too \
+                 Many Requests"
+            )
+            .is_transient_rate_limit()
+        );
+        assert!(server_error(429, "Too Many Requests").is_transient_rate_limit());
+        assert!(server_error(500, "too many requests to registry").is_transient_rate_limit());
+        assert!(
+            server_error(
+                500,
+                "error parsing HTTP 429 response body: invalid character"
+            )
+            .is_transient_rate_limit()
+        );
+        assert!(!stream_error("manifest unknown").is_transient_rate_limit());
+        assert!(!server_error(404, "No such image").is_transient_rate_limit());
+    }
+
+    #[test]
+    fn docker_hubs_pull_quota_is_not_retried() {
+        assert!(
+            !server_error(
+                429,
+                "toomanyrequests: You have reached your pull rate limit"
+            )
+            .is_transient_rate_limit(),
+            "not even as a bare 429"
+        );
+        assert!(
+            !server_error(
+                500,
+                "toomanyrequests: You have reached your pull rate limit. You may increase the \
+                 limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit"
+            )
+            .is_transient_rate_limit()
+        );
+    }
+
+    /// Returns the result, attempt count and time spent backing off.
+    async fn retry_over(
+        outcomes: &[fn() -> Result<(), DockerError>],
+    ) -> (Result<(), DockerError>, usize, Duration) {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result = retry_rate_limited(&crate::health::TokioClock, "img:1", || {
+            let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { outcomes[n.min(outcomes.len() - 1)]() }
+        })
+        .await;
+        (result, attempts.into_inner(), started.elapsed())
+    }
+
+    fn limited() -> Result<(), DockerError> {
+        Err(stream_error("toomanyrequests: retry-after: 1µs"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_pull_is_retried_until_it_succeeds() {
+        let (result, attempts, waited) = retry_over(&[limited, limited, || Ok(())]).await;
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+        assert_eq!(waited, Duration::from_secs(2 + 5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_that_stays_rate_limited_gives_up_inside_the_drain() {
+        let (result, attempts, waited) = retry_over(&[limited]).await;
+        assert!(result.is_err_and(|e| e.is_transient_rate_limit()));
+        assert_eq!(attempts, PULL_RETRY_DELAYS.len() + 1);
+        assert!(
+            waited < Duration::from_secs(30),
+            "the default stop timeout must outlast the ladder: {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn any_other_pull_error_is_not_retried() {
+        let (result, attempts, _) = retry_over(&[|| Err(stream_error("manifest unknown"))]).await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     // --- multi-network create preflight (API 1.44 / Docker 25.0 floor) ---
 
