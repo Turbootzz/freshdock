@@ -31,11 +31,8 @@ Anonymous Docker Hub is rate-limited (about 100 requests per 6 h); adding
 credentials raises the budget. freshdock dedupes to one request per unique image to
 stay well under it.
 
-A pull the registry sheds with a short-lived rate limit (`toomanyrequests` or an
-HTTP 429; GHCR does this in bursts) is retried three times, waiting 2, 5 and 10
-seconds in between, before the update counts as failed. Docker Hub's pull quota
-is not retried: it resets in hours, not seconds. The container keeps running
-throughout, since the pull happens before anything is stopped.
+A pull hit by a short-lived rate limit (GHCR does this in bursts) is retried after
+2, 5 and 10 seconds. Docker Hub's pull quota is not retried; it resets in hours.
 
 ## Aliases
 

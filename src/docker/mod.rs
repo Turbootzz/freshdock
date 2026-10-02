@@ -54,11 +54,8 @@ pub enum DockerError {
 }
 
 impl DockerError {
-    /// Did a registry shed this request for a rate limit that clears within
-    /// seconds? The classic image store relays the registry's `toomanyrequests`
-    /// code; the containerd store and Podman pass the bare 429 on in their own
-    /// words. Docker Hub's pull quota uses the same code but resets in hours,
-    /// so retrying it only stalls the tick.
+    /// A registry rate limit that clears within seconds. Docker Hub's pull
+    /// quota resets in hours, so it doesn't count.
     pub fn is_transient_rate_limit(&self) -> bool {
         use bollard::errors::Error;
         let (status, message) = match self {
@@ -78,17 +75,14 @@ impl DockerError {
     }
 }
 
-/// Backoff before each retry of a rate-limited pull (#105). GHCR sheds bursts
-/// with a `retry-after` in microseconds, so seconds are plenty, and the whole
-/// ladder stays inside the default 30 s shutdown drain.
+/// Backoff between pull retries (#105); fits the default 30 s shutdown drain.
 const PULL_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
     Duration::from_secs(10),
 ];
 
-/// Run `pull`, retrying it after each [`PULL_RETRY_DELAYS`] step while the
-/// registry rate-limits it. Any other error returns at once.
+/// Run `pull`, retrying it while the registry rate-limits it.
 async fn retry_rate_limited<F, Fut>(
     clock: &impl Clock,
     image: &str,
@@ -750,12 +744,12 @@ mod tests {
 
     #[test]
     fn transient_rate_limits_are_recognised() {
-        // Verbatim from a GHCR pull through lscr.io (classic image store).
+        // GHCR via lscr.io, classic image store.
         assert!(
             stream_error("toomanyrequests: retry-after: 224.292µs, allowed: 44000/minute")
                 .is_transient_rate_limit()
         );
-        // Verbatim from Docker Desktop 27.4 (containerd image store).
+        // Docker Desktop, containerd image store.
         assert!(
             server_error(
                 500,
@@ -798,8 +792,7 @@ mod tests {
         );
     }
 
-    /// Run the retry over scripted outcomes; returns the result, the attempts
-    /// made and the time spent backing off.
+    /// Returns the result, attempt count and time spent backing off.
     async fn retry_over(
         outcomes: &[fn() -> Result<(), DockerError>],
     ) -> (Result<(), DockerError>, usize, Duration) {
