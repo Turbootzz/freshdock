@@ -43,7 +43,8 @@ impl Drop for PrivateDir {
 }
 
 /// Split `<base><marker><suffix>` where `<suffix>` is exactly what
-/// [`unique_suffix`] makes (`<pid>-<start>-<n>`, all digits). Returns the base
+/// [`unique_suffix`] makes (`<pid>-<start>-<boot>-<n>`: digits, but `<boot>`
+/// in lowercase hex). Returns the base
 /// and who made the name. Anything else, including a name that merely
 /// contains the marker, is `None`.
 pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, Maker)> {
@@ -54,14 +55,19 @@ pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, Maker)>
     Some((base, suffix_maker(suffix)?))
 }
 
-/// The process that made a [`unique_suffix`]: its pid and when it started.
+/// The process that made a [`unique_suffix`]: its pid, when it started, and
+/// in which boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Maker {
     pub pid: u32,
     /// The process's start, in clock ticks since boot, or 0 if it couldn't
-    /// be read. With the pid it names one process, whatever the wall clock
-    /// does.
+    /// be read. With the pid it names one process within a boot, whatever the
+    /// wall clock does.
     started: u64,
+    /// The boot it ran in (see [`boot`]), or 0 if that couldn't be read.
+    /// Containers outlive a reboot; pids and start ticks don't mean the same
+    /// process in another boot.
+    boot: u64,
 }
 
 impl Maker {
@@ -71,6 +77,9 @@ impl Maker {
     /// maker is gone. Where this can't be told, assume it is running, so
     /// nothing is touched.
     pub fn alive(&self) -> bool {
+        if self.boot != 0 && boot().is_some_and(|now| now != self.boot) {
+            return false;
+        }
         if !process_alive(self.pid) {
             return false;
         }
@@ -84,16 +93,38 @@ impl Maker {
 /// The maker in a [`unique_suffix`], or `None` if `suffix` isn't one.
 fn suffix_maker(suffix: &str) -> Option<Maker> {
     let parts: Vec<&str> = suffix.split('-').collect();
-    if parts.len() != 3
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
-    {
+    let [pid, started, boot, n] = parts.as_slice() else {
+        return None;
+    };
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let hex = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 16
+            && p.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    if !digits(pid) || !digits(started) || !hex(boot) || !digits(n) {
         return None;
     }
     Some(Maker {
-        pid: parts[0].parse().ok()?,
-        started: parts[1].parse().ok()?,
+        pid: pid.parse().ok()?,
+        started: started.parse().ok()?,
+        boot: u64::from_str_radix(boot, 16).ok()?,
+    })
+}
+
+/// This boot: the first 12 hex digits of the kernel's random boot id, as a
+/// number (never 0 when read).
+fn boot() -> Option<u64> {
+    static BOOT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let hex: String = id
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .take(12)
+            .collect();
+        u64::from_str_radix(&hex, 16).ok().filter(|b| *b != 0)
     })
 }
 
@@ -164,23 +195,24 @@ fn owned_by_us(_path: &Path) -> bool {
     false
 }
 
-/// Is the process that made a marked name still running? Then whatever it
-/// named may be in use by it right now. Where this can't be told (no
-/// `/proc`), assume it is, so nothing is touched.
+/// Is there a process with this pid? Where this can't be told (no `/proc`),
+/// assume there is, so nothing is touched.
 pub fn process_alive(pid: u32) -> bool {
     let proc = Path::new("/proc");
     !proc.is_dir() || proc.join(pid.to_string()).exists()
 }
 
-/// A suffix for temporary names: the process id, when the process started
-/// (see [`Maker`]), and a counter, so two in one process never collide.
+/// A suffix for temporary names: the process id, when the process started,
+/// in which boot (see [`Maker`]), and a counter, so two in one process never
+/// collide, nor two in different boots.
 pub fn unique_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid = std::process::id();
     let started = process_start(pid).unwrap_or(0);
+    let boot = boot().unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{pid}-{started}-{n}")
+    format!("{pid}-{started}-{boot:x}-{n}")
 }
 
 #[cfg(unix)]
@@ -244,15 +276,17 @@ mod tests {
         let made = format!("web{M}{}", unique_suffix());
         let pid = |name| split_marked(name, M).map(|(base, maker)| (base, maker.pid));
         assert_eq!(pid(&made), Some(("web", std::process::id())));
-        assert_eq!(pid("db-freshdock-check-12-34-5"), Some(("db", 12)));
+        assert_eq!(pid("db-freshdock-check-12-34-ab-5"), Some(("db", 12)));
         for name in [
-            "db-freshdock-check-12-34",     // too few parts
-            "db-freshdock-check-12-34-5-6", // too many
-            "db-freshdock-check-12-34-x",   // not digits
-            "db-freshdock-check-",          // no suffix
-            "-freshdock-check-12-34-5",     // no base
-            "my-freshdock-check-list",      // merely contains the marker
-            "db-freshdock-check-12--5",     // empty part
+            "db-freshdock-check-12-34-5",      // too few parts
+            "db-freshdock-check-12-34-ab-5-6", // too many
+            "db-freshdock-check-12-34-ab-x",   // not digits
+            "db-freshdock-check-12-34-xyz-5",  // boot not hex
+            "db-freshdock-check-12-34-AB-5",   // boot not lowercase
+            "db-freshdock-check-",             // no suffix
+            "-freshdock-check-12-34-ab-5",     // no base
+            "my-freshdock-check-list",         // merely contains the marker
+            "db-freshdock-check-12--ab-5",     // empty part
         ] {
             assert_eq!(split_marked(name, M), None, "{name}");
         }
@@ -267,10 +301,10 @@ mod tests {
             std::fs::create_dir(&p).unwrap();
             p
         };
-        let dead = mk("freshdock-env-999999999-1-0");
+        let dead = mk("freshdock-env-999999999-1-0-0");
         let live = mk(&format!("freshdock-pull-{}", unique_suffix()));
         let other = mk("freshdock-env-notasuffix");
-        let unrelated = mk("something-else-999999999-1-0");
+        let unrelated = mk("something-else-999999999-1-0-0");
         assert_eq!(remove_stale_dirs_in(tmp.path()), 1);
         assert!(!dead.exists());
         assert!(live.exists() && other.exists() && unrelated.exists());
@@ -297,7 +331,7 @@ mod tests {
         assert!(maker.alive(), "made by this very process");
         // The same pid, but a process that started at another time: the pid
         // was reused, so this process isn't the one that made it.
-        let reused = format!("web-x-{}-1-0", std::process::id());
+        let reused = format!("web-x-{}-1-{:x}-0", std::process::id(), boot().unwrap());
         let (_, old) = split_marked(&reused, "-x-").unwrap();
         assert!(!old.alive());
     }
@@ -325,8 +359,25 @@ mod tests {
     fn an_unknown_start_never_counts_as_gone() {
         // Recorded as 0 where the start couldn't be read: only a missing
         // process makes the maker gone then.
-        let (_, maker) = split_marked(&format!("web-x-{}-0-0", std::process::id()), "-x-").unwrap();
+        let (_, maker) =
+            split_marked(&format!("web-x-{}-0-0-0", std::process::id()), "-x-").unwrap();
         assert!(maker.alive());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_from_another_boot_is_never_this_process() {
+        // Same pid and start as this process, as an early systemd service can
+        // get again after a reboot, but another boot: its maker is gone.
+        let now = boot().expect("readable on Linux");
+        let other = if now == 1 { 2 } else { 1 };
+        let pid = std::process::id();
+        let started = process_start(pid).unwrap();
+        let same = format!("web-x-{pid}-{started}-{now:x}-0");
+        let before = format!("web-x-{pid}-{started}-{other:x}-0");
+        assert!(split_marked(&same, "-x-").unwrap().1.alive());
+        assert!(!split_marked(&before, "-x-").unwrap().1.alive());
+        assert_ne!(unique_suffix(), before.trim_start_matches("web-x-"));
     }
 
     #[cfg(target_os = "linux")]

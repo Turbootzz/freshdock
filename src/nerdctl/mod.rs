@@ -2130,22 +2130,22 @@ mod tests {
             FakeRunner::default()
                 .on(
                     SWEEP_LIST,
-                    ok("web-freshdock-aside-999999999-2-0\tUp 2 hours\n\
-                        db-freshdock-check-999999999-2-1\tCreated\n\
+                    ok("web-freshdock-aside-999999999-2-0-0\tUp 2 hours\n\
+                        db-freshdock-check-999999999-2-0-1\tCreated\n\
                         plain\tUp 3 hours\n"),
                 )
                 .on("inspect web", fail(NOT_FOUND))
-                .on("rename web-freshdock-aside-999999999-2-0 web", ok(""))
-                .on("rm --force db-freshdock-check-999999999-2-1", ok("")),
+                .on("rename web-freshdock-aside-999999999-2-0-0 web", ok(""))
+                .on("rm --force db-freshdock-check-999999999-2-0-1", ok("")),
         );
         n.sweep().await.unwrap();
         let calls = n.runner.calls();
         assert!(
-            calls.contains(&"rename web-freshdock-aside-999999999-2-0 web".to_owned()),
+            calls.contains(&"rename web-freshdock-aside-999999999-2-0-0 web".to_owned()),
             "{calls:?}"
         );
         assert!(
-            calls.contains(&"rm --force db-freshdock-check-999999999-2-1".to_owned()),
+            calls.contains(&"rm --force db-freshdock-check-999999999-2-0-1".to_owned()),
             "{calls:?}"
         );
         assert_eq!(calls.len(), 4, "plain is left alone: {calls:?}");
@@ -2186,8 +2186,8 @@ mod tests {
             FakeRunner::default()
                 .on(
                     SWEEP_LIST,
-                    ok("web-freshdock-aside-999999999-2-0\tUp 2 hours\n\
-                        db-freshdock-check-999999999-2-1\tUp 5 seconds\n"),
+                    ok("web-freshdock-aside-999999999-2-0-0\tUp 2 hours\n\
+                        db-freshdock-check-999999999-2-0-1\tUp 5 seconds\n"),
                 )
                 // Something else has taken the name meanwhile.
                 .on("inspect web", ok(inspect_json("other", "web"))),

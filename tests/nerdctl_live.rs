@@ -406,10 +406,10 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
     // Left by a freshdock that died (pid 999999999 can't exist): a service
     // stepped aside between the renames, and a never-started trial container.
     let service = format!("{p}-svc");
-    let aside = format!("{service}-freshdock-aside-999999999-2-0");
+    let aside = format!("{service}-freshdock-aside-999999999-2-0-0");
     must(&["run", "-d", "--name", &aside, ALPINE, "sleep", "100000"]);
     let service_id = id_of(&aside).unwrap();
-    let trial = format!("{p}-db-freshdock-check-999999999-2-1");
+    let trial = format!("{p}-db-freshdock-check-999999999-2-0-1");
     must(&["create", "--name", &trial, ALPINE, "true"]);
     // The same, but made by a process that is still running (this test): a
     // daemon in the middle of an update.
@@ -417,7 +417,16 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
     // and start, and another start under the same pid is another process.
     let busy_aside = format!("{p}-busy-freshdock-aside-{}", unique_suffix());
     // And a dead freshdock's pid, reused since by this running process.
-    let reused_trial = format!("{p}-reused-freshdock-check-{}-2-1", std::process::id());
+    let mine: Vec<String> = unique_suffix().split('-').map(str::to_owned).collect();
+    let reused_trial = format!("{p}-reused-freshdock-check-{}-2-{}-1", mine[0], mine[2]);
+    // And one from the boot before, under this very pid and start: what a
+    // freshdock started early by systemd can get again after a reboot.
+    let other_boot = if mine[2] == "1" { "2" } else { "1" };
+    let old_boot_trial = format!(
+        "{p}-oldboot-freshdock-check-{}-{}-{other_boot}-1",
+        mine[0], mine[1]
+    );
+    must(&["create", "--name", &old_boot_trial, ALPINE, "true"]);
     must(&["create", "--name", &reused_trial, ALPINE, "true"]);
     must(&[
         "run",
@@ -462,6 +471,10 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
     assert!(
         inspect(&reused_trial).is_none(),
         "a pid now used by a later process doesn't keep a dead one's trial"
+    );
+    assert!(
+        inspect(&old_boot_trial).is_none(),
+        "a trial from the boot before is gone, whatever its pid and start"
     );
 }
 
