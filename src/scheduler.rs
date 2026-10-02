@@ -356,7 +356,7 @@ async fn run_tick<D, R>(
         let unknown_digest = processed.verdicts.contains(&Verdict::UnknownDigest);
         // A watch_all bystander (a local build, say) is expected to have none.
         if unknown_digest && !state.unknown_digest_warned && !policy.auto_enabled {
-            warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, or no RepoDigests entry for this reference); updates cannot be detected");
+            warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, no RepoDigests entry for this reference, or on nerdctl no working ctr); updates cannot be detected");
         }
         if unknown_digest {
             state.unknown_digest_warned = true;
@@ -628,9 +628,11 @@ where
             debug!(container = %name, "scheduler: locally built image (no check)");
             Verdict::UnknownDigest
         }
+        // As good as no local digest: the tick warns once for a labelled
+        // container, and the startup warning about ctr names the cause.
         ProbeOutcome::SourceUnknown => {
-            warn!(container = %name, "scheduler: cannot tell whether the image came from a registry (is ctr working?) — not updating");
-            Verdict::Failed
+            debug!(container = %name, "scheduler: cannot tell whether the image came from a registry (is ctr working?)");
+            Verdict::UnknownDigest
         }
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
@@ -2371,6 +2373,40 @@ mod tests {
             2,
             "every run still counts it: {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_image_source_warns_once_across_ticks() {
+        // nerdctl without a working ctr: nothing to compare, as with no local
+        // digest, and no warning every poll either.
+        let node = FakeNode::new(vec![live_labels_for("app", "alpine:3.19")], DIG_A).with_image(
+            "alpine:3.19",
+            LocalImage {
+                source_unknown: true,
+                ..LocalImage::default()
+            },
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let mut st = TickState::default();
+        let out = capture_logs(async {
+            for _ in 0..3 {
+                one_tick_cfg(
+                    &node,
+                    &reg,
+                    &every_tick(),
+                    ResolvedSettings::default(),
+                    &mut st,
+                )
+                .await;
+            }
+        })
+        .await;
+
+        assert_eq!(out.matches(" WARN ").count(), 1, "{out}");
+        assert!(out.contains("no working ctr"), "{out}");
+        assert_eq!(out.matches("unknown_digest=1").count(), 3, "{out}");
+        assert_eq!(node.creates(), 0);
+        assert_eq!(reg.calls.load(Ordering::SeqCst), 0, "no registry call");
     }
 
     // --- end-to-end: scheduler outcome → real dispatcher → mock HTTP target ---

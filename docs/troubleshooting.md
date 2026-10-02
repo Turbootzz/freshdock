@@ -314,8 +314,9 @@ WARN freshdock::nerdctl: cannot run containerd's ctr, so freshdock cannot tell p
 ```
 
 Until it can run `ctr`, `freshdock check` shows every container as
-`source unknown (see log)`, and the daemon logs a warning for each one on every
-poll instead of updating it.
+`source unknown (see log)`, and the daemon updates none of them. It warns once
+for each explicitly labelled container (`no local digest to compare against`),
+not on every poll.
 
 freshdock looks for `ctr` in the directory of `FRESHDOCK_NERDCTL_PATH`, then on
 `PATH`. If containerd listens somewhere other than
