@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1](https://github.com/Turbootzz/freshdock/compare/v1.7.0...v1.7.1) - 2026-10-02
+
+### Fixed
+
+- *(docker)* retry a pull the registry rate-limits for a moment ([#107](https://github.com/Turbootzz/freshdock/pull/107))
+- *(scheduler)* keep quiet live/watch polls out of the info log ([#106](https://github.com/Turbootzz/freshdock/pull/106))
+
 ## [1.7.0](https://github.com/Turbootzz/freshdock/compare/v1.6.0...v1.7.0) - 2026-10-01
 
 ### Added
