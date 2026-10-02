@@ -71,7 +71,7 @@ Examples:
 ```bash
 freshdock check                 # render the table
 freshdock --no-color check      # ANSI-free, for logs
-RUST_LOG=info freshdock check   # include registry rate-limit info
+RUST_LOG=freshdock=debug freshdock check   # include registry rate-limit info
 ```
 
 ---
