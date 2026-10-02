@@ -14,7 +14,7 @@ use super::{Digest, ImageRef, Registry, RegistryError};
 use crate::config::{CredentialStore, canonicalize_host};
 use crate::http::HttpError;
 
-const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ACCEPT_MANIFESTS: &str = "application/vnd.docker.distribution.manifest.v2+json, \
      application/vnd.oci.image.manifest.v1+json, \
