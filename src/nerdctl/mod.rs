@@ -905,6 +905,14 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
         )))
     }
 
+    /// The digest reference `reference` resolves to now. A container's
+    /// [`ContainerSpec::image_id`] on nerdctl is a digest reference too, not
+    /// an image id (see [`Seen`]), so the two compare like for like: equal
+    /// while the tag still points at the image the container runs (#102).
+    async fn local_image_id(&self, reference: &str) -> Result<Option<String>, DockerError> {
+        Ok(self.identify(reference).await.pinned)
+    }
+
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         let reference = format!("{}:{}", image_ref.repository, image_ref.tag);
         let kept = self.keep_current(&reference).await;
@@ -1899,6 +1907,53 @@ mod tests {
     const IMAGE: &str = "docker.io/library/nginx:1.27-alpine";
     /// The digest-pinned reference nerdctl takes for this exact image.
     const IMAGE_ID: &str = "docker.io/library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
+
+    #[tokio::test]
+    async fn a_dependents_tag_resolves_to_the_image_it_runs() {
+        // #102: a repaired network-namespace dependent stays on its tag while
+        // the tag still names its image, so the spec's image and the tag's
+        // must compare equal.
+        let n = nerdctl(inspectable("fd-full", "full"));
+        let spec = n.inspect("fd-full").await.unwrap();
+        assert_eq!(
+            n.local_image_id(IMAGE).await.unwrap(),
+            spec.image_id,
+            "same image, same digest reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependents_tag_that_moved_resolves_elsewhere() {
+        let n = nerdctl(
+            FakeRunner::default()
+                .on("inspect fd-full", ok(fixture("nerdctl_full_inspect.json")))
+                .on(
+                    "inspect --mode=native fd-full",
+                    ok(fixture("nerdctl_full_native.json")),
+                )
+                .on_once(
+                    &format!("image inspect {IMAGE}"),
+                    ok(fixture("nerdctl_image_inspect.json")),
+                )
+                .on(
+                    &format!("image inspect {IMAGE}"),
+                    ok(image_json("sha256:new", NEW_DIGEST)),
+                ),
+        );
+        // First sight: the container runs the fixture image.
+        let spec = n.inspect("fd-full").await.unwrap();
+        // Then a pull moves the tag.
+        let now = n.local_image_id(IMAGE).await.unwrap();
+        assert!(now.is_some());
+        assert_ne!(now, spec.image_id, "the dependent would be pinned");
+    }
+
+    #[tokio::test]
+    async fn a_dependents_tag_that_is_gone_resolves_to_nothing() {
+        let n =
+            nerdctl(FakeRunner::default().on(&format!("image inspect {IMAGE}"), fail(NOT_FOUND)));
+        assert_eq!(n.local_image_id(IMAGE).await.unwrap(), None);
+    }
 
     fn inspectable(name: &str, fixture_name: &str) -> FakeRunner {
         FakeRunner::default()

@@ -339,6 +339,10 @@ async fn a_network_namespace_dependent_follows_its_owner() {
         dep["HostConfig"]["NetworkMode"],
         format!("container:{owner_after}")
     );
+    assert_eq!(
+        dep["Config"]["Image"], ALPINE,
+        "still on its tag, so it keeps being checked (#102)"
+    );
     assert!(running(&dependent));
 }
 
