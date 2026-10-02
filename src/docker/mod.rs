@@ -61,19 +61,19 @@ impl DockerError {
     /// so retrying it only stalls the tick.
     pub fn is_transient_rate_limit(&self) -> bool {
         use bollard::errors::Error;
-        let message = match self {
+        let (status, message) = match self {
             DockerError::Bollard(Error::DockerResponseServerError {
-                status_code: 429, ..
-            }) => return true,
-            DockerError::Bollard(
-                Error::DockerStreamError { error: message }
-                | Error::DockerResponseServerError { message, .. },
-            ) => message.to_ascii_lowercase(),
+                status_code,
+                message,
+            }) => (Some(*status_code), message),
+            DockerError::Bollard(Error::DockerStreamError { error }) => (None, error),
             _ => return false,
         };
-        let limited = ["toomanyrequests", "too many requests", "http 429"]
-            .iter()
-            .any(|needle| message.contains(needle));
+        let message = message.to_ascii_lowercase();
+        let limited = status == Some(429)
+            || ["toomanyrequests", "too many requests", "http 429"]
+                .iter()
+                .any(|needle| message.contains(needle));
         limited && !message.contains("pull rate limit")
     }
 }
@@ -780,6 +780,14 @@ mod tests {
 
     #[test]
     fn docker_hubs_pull_quota_is_not_retried() {
+        assert!(
+            !server_error(
+                429,
+                "toomanyrequests: You have reached your pull rate limit"
+            )
+            .is_transient_rate_limit(),
+            "not even as a bare 429"
+        );
         assert!(
             !server_error(
                 500,
