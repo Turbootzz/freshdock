@@ -44,18 +44,47 @@ impl Drop for PrivateDir {
 
 /// Split `<base><marker><suffix>` where `<suffix>` is exactly what
 /// [`unique_suffix`] makes (`<pid>-<nanos>-<n>`, all digits). Returns the base
-/// and the pid of the process that made the name. Anything else, including a
-/// name that merely contains the marker, is `None`.
-pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, u32)> {
+/// and who made the name. Anything else, including a name that merely
+/// contains the marker, is `None`.
+pub fn split_marked<'a>(name: &'a str, marker: &str) -> Option<(&'a str, Maker)> {
     let (base, suffix) = name.rsplit_once(marker)?;
     if base.is_empty() {
         return None;
     }
-    Some((base, suffix_pid(suffix)?))
+    Some((base, suffix_maker(suffix)?))
 }
 
-/// The pid in a [`unique_suffix`], or `None` if `suffix` isn't one.
-fn suffix_pid(suffix: &str) -> Option<u32> {
+/// The process that made a [`unique_suffix`], and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Maker {
+    pub pid: u32,
+    /// Nanoseconds since the Unix epoch.
+    created: u128,
+}
+
+impl Maker {
+    /// Is the process that made the name still running? Then whatever it
+    /// named may be in use by it right now. A process under the same pid that
+    /// started after the name was made is another one (the pid was reused),
+    /// so the maker is gone. Where this can't be told, assume it is running,
+    /// so nothing is touched.
+    pub fn alive(&self) -> bool {
+        if !process_alive(self.pid) {
+            return false;
+        }
+        match process_started(self.pid) {
+            Some(started) => started <= self.created / 1_000_000_000 + REUSE_SLACK_S,
+            None => true,
+        }
+    }
+}
+
+/// How much later than a name its maker may seem to have started: the boot
+/// time the start is counted from is in whole seconds.
+const REUSE_SLACK_S: u128 = 5;
+
+/// The maker in a [`unique_suffix`], or `None` if `suffix` isn't one.
+fn suffix_maker(suffix: &str) -> Option<Maker> {
     let parts: Vec<&str> = suffix.split('-').collect();
     if parts.len() != 3
         || parts
@@ -64,7 +93,35 @@ fn suffix_pid(suffix: &str) -> Option<u32> {
     {
         return None;
     }
-    parts[0].parse().ok()
+    Some(Maker {
+        pid: parts[0].parse().ok()?,
+        created: parts[1].parse().ok()?,
+    })
+}
+
+/// When `pid` started, in seconds since the Unix epoch, from
+/// `/proc/<pid>/stat` (clock ticks since boot) and `/proc/stat` (`btime`).
+fn process_started(pid: u32) -> Option<u128> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let boot = std::fs::read_to_string("/proc/stat").ok()?;
+    let ticks = start_ticks(&stat)?;
+    let btime: u128 = boot
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // USER_HZ, the unit of starttime: 100 on every architecture freshdock is
+    // built for.
+    Some(btime + ticks / 100)
+}
+
+/// Field 22 (`starttime`) of a `/proc/<pid>/stat` line. The command name
+/// (field 2) is in parentheses and may itself contain spaces and `)`, so
+/// count from the last `)`.
+fn start_ticks(stat: &str) -> Option<u128> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// Remove the private directories a killed freshdock left in the temp
@@ -82,13 +139,13 @@ fn remove_stale_dirs_in(tmp: &Path) -> usize {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let pid = name
+        let maker = name
             .strip_prefix("freshdock-")
             .and_then(|rest| rest.split_once('-'))
             .filter(|(purpose, _)| purpose.bytes().all(|b| b.is_ascii_lowercase()))
-            .and_then(|(_, suffix)| suffix_pid(suffix));
-        if let Some(pid) = pid
-            && !process_alive(pid)
+            .and_then(|(_, suffix)| suffix_maker(suffix));
+        if let Some(maker) = maker
+            && !maker.alive()
             && owned_by_us(&entry.path())
             && std::fs::remove_dir_all(entry.path()).is_ok()
         {
@@ -199,11 +256,9 @@ mod tests {
     fn marked_names_split_only_on_the_exact_suffix() {
         const M: &str = "-freshdock-check-";
         let made = format!("web{M}{}", unique_suffix());
-        assert_eq!(split_marked(&made, M), Some(("web", std::process::id())));
-        assert_eq!(
-            split_marked("db-freshdock-check-12-34-5", M),
-            Some(("db", 12))
-        );
+        let pid = |name| split_marked(name, M).map(|(base, maker)| (base, maker.pid));
+        assert_eq!(pid(&made), Some(("web", std::process::id())));
+        assert_eq!(pid("db-freshdock-check-12-34-5"), Some(("db", 12)));
         for name in [
             "db-freshdock-check-12-34",     // too few parts
             "db-freshdock-check-12-34-5-6", // too many
@@ -227,7 +282,7 @@ mod tests {
             p
         };
         let dead = mk("freshdock-env-999999999-1-0");
-        let live = mk(&format!("freshdock-pull-{}-1-0", std::process::id()));
+        let live = mk(&format!("freshdock-pull-{}", unique_suffix()));
         let other = mk("freshdock-env-notasuffix");
         let unrelated = mk("something-else-999999999-1-0");
         assert_eq!(remove_stale_dirs_in(tmp.path()), 1);
@@ -246,6 +301,42 @@ mod tests {
             assert!(!owned_by_us(Path::new("/")));
         }
         assert!(!owned_by_us(Path::new("/definitely/not/here")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pid_reused_after_the_name_was_made_is_not_its_maker() {
+        let made = format!("web-x-{}", unique_suffix());
+        let (_, maker) = split_marked(&made, "-x-").unwrap();
+        assert!(maker.alive(), "made by this very process");
+        // The same pid on a name made in 1970: this process started long
+        // after, so it can't be the one that made it.
+        let reused = format!("web-x-{}-1-0", std::process::id());
+        let (_, old) = split_marked(&reused, "-x-").unwrap();
+        assert!(!old.alive());
+    }
+
+    #[test]
+    fn the_start_time_is_read_past_an_awkward_command_name() {
+        let mut fields = vec!["S"; 19];
+        fields.push("12345");
+        let line = format!("42 (a) b (c)) {} 0 0", fields.join(" "));
+        assert_eq!(start_ticks(&line), Some(12345));
+        assert_eq!(start_ticks("garbage"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_process_started_recently() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u128;
+        let started = process_started(std::process::id()).expect("readable on Linux");
+        assert!(
+            started <= now + 1 && started + 3600 > now,
+            "{started} vs {now}"
+        );
     }
 
     #[cfg(target_os = "linux")]

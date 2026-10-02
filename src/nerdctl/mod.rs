@@ -38,7 +38,7 @@ use self::inspect::{
     ContainerInspect, ImageInspect, Version, classify_error, error_message, parse_array,
 };
 use self::kept::{DEFAULT_STATE_FILE, KeptStore};
-use self::private::{PrivateDir, process_alive, remove_stale_dirs, split_marked, unique_suffix};
+use self::private::{PrivateDir, remove_stale_dirs, split_marked, unique_suffix};
 use self::runner::{CmdOutput, CommandRunner, ProcessRunner, RunError, proxy_env};
 use self::spec::{CreateInspect, NativeInspect, NerdctlSpec, NetworkConfig};
 
@@ -500,13 +500,17 @@ impl<R: CommandRunner> Nerdctl<R> {
                 return None;
             }
         }
+        // Recorded before the name exists: a freshdock killed between the two
+        // then leaves a record of a name that may not exist, which a release
+        // treats as done, never a name nothing would remove.
+        self.kept.insert(&pinned);
         match self.call(&["tag", tag, &pinned]).await {
             Ok(_) => {
                 debug!(image = %pinned, "keeping the image findable before its tag moves");
-                self.kept.insert(&pinned);
                 Some(pinned)
             }
             Err(e) => {
+                self.kept.remove(&pinned);
                 warn!(image = %pinned, error = %e, "could not keep the current image before the pull; a sibling on the same tag may be refused its update");
                 None
             }
@@ -755,9 +759,9 @@ impl<R: CommandRunner> Nerdctl<R> {
         for line in listing.lines() {
             let (name, status) = line.split_once('\t').unwrap_or((line, ""));
             let name = name.trim();
-            if let Some((original, pid)) = split_marked(name, ASIDE_MARKER) {
-                if process_alive(pid) {
-                    debug!(container = %name, pid, "stepped aside by a running freshdock; leaving it");
+            if let Some((original, maker)) = split_marked(name, ASIDE_MARKER) {
+                if maker.alive() {
+                    debug!(container = %name, pid = maker.pid, "stepped aside by a running freshdock; leaving it");
                     continue;
                 }
                 match self.inspect_container(original).await {
@@ -778,9 +782,9 @@ impl<R: CommandRunner> Nerdctl<R> {
                         warn!(container = %name, error = %e, "could not check a stepped-aside container")
                     }
                 }
-            } else if let Some((_, pid)) = split_marked(name, CHECK_MARKER) {
-                if process_alive(pid) {
-                    debug!(container = %name, pid, "trial container of a running freshdock; leaving it");
+            } else if let Some((_, maker)) = split_marked(name, CHECK_MARKER) {
+                if maker.alive() {
+                    debug!(container = %name, pid = maker.pid, "trial container of a running freshdock; leaving it");
                     continue;
                 }
                 if !status.trim().starts_with("Created") {
@@ -2094,10 +2098,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweep_leaves_a_running_freshdocks_markers_alone() {
-        // This test's own pid: a live process, as a daemon mid-update would be.
-        let pid = std::process::id();
-        let aside = format!("web-freshdock-aside-{pid}-2-0");
-        let trial = format!("db-freshdock-check-{pid}-2-1");
+        // Made by this test just now: a live process, as a daemon mid-update
+        // would be.
+        let aside = format!("web-freshdock-aside-{}", unique_suffix());
+        let trial = format!("db-freshdock-check-{}", unique_suffix());
         let n = nerdctl(FakeRunner::default().on(
             SWEEP_LIST,
             ok(format!("{aside}\tUp 2 hours\n{trial}\tCreated\n")),

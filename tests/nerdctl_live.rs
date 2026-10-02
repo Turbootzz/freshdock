@@ -408,8 +408,17 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
     must(&["create", "--name", &trial, ALPINE, "true"]);
     // The same, but made by a process that is still running (this test): a
     // daemon in the middle of an update.
-    let live = std::process::id();
-    let busy_aside = format!("{p}-busy-freshdock-aside-{live}-2-0");
+    // Named now: a pid on an older name would read as reused by another
+    // process, and the name as left by a dead one.
+    let made = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let live = format!("{}-{made}", std::process::id());
+    let busy_aside = format!("{p}-busy-freshdock-aside-{live}-0");
+    // And a dead freshdock's pid, reused since by this running process.
+    let reused_trial = format!("{p}-reused-freshdock-check-{}-2-1", std::process::id());
+    must(&["create", "--name", &reused_trial, ALPINE, "true"]);
     must(&[
         "run",
         "-d",
@@ -419,7 +428,7 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
         "sleep",
         "100000",
     ]);
-    let busy_trial = format!("{p}-busy-freshdock-check-{live}-2-1");
+    let busy_trial = format!("{p}-busy-freshdock-check-{live}-1");
     must(&["create", "--name", &busy_trial, ALPINE, "true"]);
 
     // Connecting alone (what `check` does) changes nothing.
@@ -450,11 +459,12 @@ async fn the_sweep_repairs_a_dead_freshdocks_leftovers_but_not_a_running_ones() 
         inspect(&busy_trial).is_some(),
         "a running freshdock's trial is left alone"
     );
+    assert!(
+        inspect(&reused_trial).is_none(),
+        "a pid now used by a later process doesn't keep a dead one's trial"
+    );
 }
 
-/// A second namespace to publish from. Namespaces have separate image stores,
-/// so the registry's tag can move while the test namespace's stays put, as
-/// when upstream publishes a new image.
 /// Removes one image record when dropped.
 struct RemoveImage(String);
 
@@ -504,6 +514,9 @@ async fn a_local_build_is_not_taken_for_its_registry_namesake() {
     );
 }
 
+/// A second namespace to publish from. Namespaces have separate image stores,
+/// so the registry's tag can move while the test namespace's stays put, as
+/// when upstream publishes a new image.
 const STAGING_NS: &str = "freshdock-live-staging";
 
 fn staging(args: &[&str]) -> Result<String, String> {

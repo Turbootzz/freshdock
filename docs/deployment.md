@@ -243,6 +243,12 @@ logs both.
   running, or freshdock restarted after updating one container on a tag but
   before the others. `check` then reports such a container as up to date until
   upstream publishes again.
+
+  `freshdock check` is a new process every time, so to it every tag that moved
+  is one that moved before it first looked. After the daemon updates one
+  container on a shared tag, `check` shows the others as up to date, although
+  the daemon still knows they are behind and updates them on their own
+  schedule. Trust the daemon's log over `check` for those.
 - **Containers are only ever created from local images** (`--pull=never`), so
   only `nerdctl pull` reaches the network, with freshdock's credentials and
   proxy settings. When other containers run the same image as the one being
