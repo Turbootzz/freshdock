@@ -87,6 +87,10 @@ pub struct NerdctlSpec {
     pub args: Vec<String>,
     /// Settings freshdock can't reproduce; a non-empty list refuses the update.
     pub unsupported: Vec<String>,
+    /// Variables refused because the env file can't carry them, each with
+    /// its entry in `unsupported` (see [`leave_image_env`](Self::leave_image_env)).
+    /// Never printed: the value may be a secret.
+    pub(crate) env_refusals: Vec<(String, String)>,
 }
 
 /// The parts of the Docker-compatible inspect a rebuild needs.
@@ -307,14 +311,19 @@ impl NerdctlSpec {
             // trims trailing whitespace from each, so such values can't be
             // carried over. The name only: the value may be a secret.
             let (key, value) = var.split_once('=').unwrap_or((&var, ""));
-            if value.contains(['\n', '\r']) {
-                spec.unsupported
-                    .push(format!("environment variable {key} has a multi-line value"));
+            let refusal = if value.contains(['\n', '\r']) {
+                Some(format!("environment variable {key} has a multi-line value"))
             } else if value.ends_with(char::is_whitespace) {
-                spec.unsupported
-                    .push(format!("environment variable {key} ends in whitespace"));
+                Some(format!("environment variable {key} ends in whitespace"))
             } else {
-                spec.env.push(var);
+                None
+            };
+            match refusal {
+                Some(why) => {
+                    spec.unsupported.push(why.clone());
+                    spec.env_refusals.push((var, why));
+                }
+                None => spec.env.push(var),
             }
         }
         let user_labels: Vec<(String, String)> = {
@@ -415,6 +424,31 @@ impl NerdctlSpec {
         }
         args.extend(self.args.iter().cloned());
         args
+    }
+
+    /// Leave to the image what it sets itself. A refused variable whose
+    /// exact `NAME=value` is in the environment of the image the container
+    /// runs (`image_env`, from the image config) needs no carrying over: a
+    /// container created from that image gets it anyway, and an updated one
+    /// gets its new image's. Prompts like LinuxServer's `PS1` end in a space.
+    /// A variable the container set itself, or set to another value, stays
+    /// refused.
+    pub fn leave_image_env(&mut self, image_env: &[String]) {
+        let (from_image, own): (Vec<_>, Vec<_>) = std::mem::take(&mut self.env_refusals)
+            .into_iter()
+            .partition(|(var, _)| image_env.contains(var));
+        for (_, why) in &from_image {
+            if let Some(i) = self.unsupported.iter().position(|u| u == why) {
+                self.unsupported.remove(i);
+            }
+        }
+        self.env_refusals = own;
+    }
+
+    /// Whether any variable was refused that [`leave_image_env`](Self::leave_image_env)
+    /// might yet leave to the image.
+    pub fn has_env_refusals(&self) -> bool {
+        !self.env_refusals.is_empty()
     }
 
     pub fn stop_signal(&self) -> Option<&str> {
@@ -1208,6 +1242,27 @@ mod tests {
         assert_eq!(
             spec.env_file().unwrap(),
             "DB_PASSWORD=hunter2-secret\nPLAIN=value\nEMPTY=\n"
+        );
+    }
+
+    #[test]
+    fn what_the_image_sets_itself_is_left_to_the_image() {
+        let mut spec = with_env(&["PS1=$ ", "MOTD=hi\nthere", "A=1"]);
+        assert_eq!(spec.unsupported.len(), 2);
+        spec.leave_image_env(&["PATH=/bin".into(), "PS1=$ ".into()]);
+        assert_eq!(
+            spec.unsupported,
+            ["environment variable MOTD has a multi-line value"],
+            "only the image's own value is exempt"
+        );
+        assert_eq!(spec.env, ["A=1"], "and nothing extra is passed for it");
+        assert!(spec.has_env_refusals());
+        // The same name with another value is the container's own setting.
+        let mut spec = with_env(&["PS1=# "]);
+        spec.leave_image_env(&["PS1=$ ".into()]);
+        assert_eq!(
+            spec.unsupported,
+            ["environment variable PS1 ends in whitespace"]
         );
     }
 

@@ -246,6 +246,27 @@ impl<R: CommandRunner> Nerdctl<R> {
             .any(|(h, p)| *h == host && *p == path))
     }
 
+    /// The environment the image with config digest `config` sets, read from
+    /// its config blob with `ctr` (nerdctl can't inspect an image by id, and
+    /// once a tag moves the image may have no name left). `None` when it
+    /// can't be read: nothing is then left to the image.
+    async fn image_env(&self, config: Option<&str>) -> Option<Vec<String>> {
+        let config = config.filter(|c| c.starts_with("sha256:"))?;
+        let blob = self
+            .ctr_call(&["content", "get", config])
+            .await
+            .inspect_err(|e| debug!(image = %config, error = %e, "could not read the image config"))
+            .ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&blob).ok()?;
+        Some(
+            parsed["config"]["Env"]
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+        )
+    }
+
     /// `nerdctl image inspect`, as reported: every `RepoDigests` entry kept.
     async fn image_record(&self, image: &str) -> Result<LocalImage, DockerError> {
         let stdout = self.call(&["image", "inspect", image]).await?;
@@ -841,16 +862,22 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
         // The image it ran when first seen, which a sibling's pull may since have
         // moved the tag away from: cleanup removes that one, a dependent repair
         // pins it, and preflight tries the flags against it.
-        let image_id = match listed.id.as_deref() {
-            Some(cid) => self.image_of(cid, &image_ref).await.pinned,
-            None => self.identify(&image_ref).await.pinned,
+        let seen = match listed.id.as_deref() {
+            Some(cid) => self.image_of(cid, &image_ref).await,
+            None => self.identify(&image_ref).await,
         };
         let network_config = self.network_config(&compat).await;
+        let mut spec = NerdctlSpec::from_inspect(compat, native, network_config);
+        if spec.has_env_refusals()
+            && let Some(env) = self.image_env(seen.id.as_deref()).await
+        {
+            spec.leave_image_env(&env);
+        }
         Ok(ContainerSpec {
             name: container_name,
             image_ref,
-            image_id,
-            body: SpecBody::Nerdctl(NerdctlSpec::from_inspect(compat, native, network_config)),
+            image_id: seen.pinned,
+            body: SpecBody::Nerdctl(spec),
         })
     }
 
@@ -1953,6 +1980,24 @@ mod tests {
         let n =
             nerdctl(FakeRunner::default().on(&format!("image inspect {IMAGE}"), fail(NOT_FOUND)));
         assert_eq!(n.local_image_id(IMAGE).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_image_env_is_read_from_its_config_blob() {
+        let mut n = nerdctl(FakeRunner::default());
+        n.ctr = Some(FakeRunner::default().on(
+            "content get sha256:cfg",
+            ok(r#"{"architecture":"amd64","config":{"Env":["PATH=/bin","PS1=$ "]}}"#),
+        ));
+        assert_eq!(
+            n.image_env(Some("sha256:cfg")).await,
+            Some(vec!["PATH=/bin".to_owned(), "PS1=$ ".to_owned()])
+        );
+        assert_eq!(n.image_env(None).await, None);
+        assert_eq!(n.image_env(Some("not-a-digest")).await, None);
+        // Without ctr nothing is known, so nothing is left to the image.
+        n.ctr = None;
+        assert_eq!(n.image_env(Some("sha256:cfg")).await, None);
     }
 
     fn inspectable(name: &str, fixture_name: &str) -> FakeRunner {
