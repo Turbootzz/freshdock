@@ -407,6 +407,12 @@ impl NerdctlSpec {
             push(&mut args, "--entrypoint", entrypoint.clone());
         }
         args.push(image.to_owned());
+        // nerdctl drops one `--` right after the image, so a command that
+        // starts with one (`tini -- ...` from an image's entrypoint) would
+        // lose it. Give it one to drop.
+        if self.args.first().is_some_and(|a| a == "--") {
+            args.push("--".to_owned());
+        }
         args.extend(self.args.iter().cloned());
         args
     }
@@ -1076,6 +1082,24 @@ mod tests {
             spec.hostname, None,
             "the short-id hostname nerdctl assigned is dropped"
         );
+    }
+
+    #[test]
+    fn a_command_starting_with_a_separator_keeps_it() {
+        // `ENTRYPOINT ["tini", "--", ...]`: nerdctl drops one `--` right after
+        // the image, so freshdock sends one more for it to drop.
+        let mut spec = spec_from("cmd", false);
+        spec.entrypoint = Some("tini".to_owned());
+        spec.args = vec!["--".into(), "python".into(), "-m".into(), "app".into()];
+        let args = spec.create_args("app", "img:1", None);
+        assert_eq!(
+            args[args.len() - 6..],
+            ["img:1", "--", "--", "python", "-m", "app"]
+        );
+        // A separator later on is passed through as it is.
+        spec.args = vec!["-c".into(), "run".into(), "--".into(), "x".into()];
+        let args = spec.create_args("app", "img:1", None);
+        assert_eq!(args[args.len() - 5..], ["img:1", "-c", "run", "--", "x"]);
     }
 
     #[test]

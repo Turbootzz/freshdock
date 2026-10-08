@@ -52,7 +52,10 @@ fn normalize(native: &Value, id: &str) -> Value {
     if let Some(s) = spec.as_object_mut() {
         s.remove("root");
         // nerdctl hands its hooks the environment of whichever process ran
-        // the create (a shell, or freshdock): not a container setting.
+        // the create (a shell, or freshdock): not a container setting. Nor is
+        // whether that process named the namespace with a flag (freshdock
+        // always does; compose, or CONTAINERD_NAMESPACE, may not): the
+        // container is in this namespace either way.
         if let Some(Value::Object(hooks)) = s.get_mut("hooks") {
             for entry in hooks
                 .values_mut()
@@ -61,6 +64,9 @@ fn normalize(native: &Value, id: &str) -> Value {
                 .filter_map(Value::as_object_mut)
             {
                 entry.remove("env");
+                if let Some(Value::Array(args)) = entry.get_mut("args") {
+                    args.retain(|a| !a.as_str().is_some_and(is_namespace_flag));
+                }
             }
         }
         if s.get("hostname").and_then(Value::as_str) == Some(short) {
@@ -71,6 +77,7 @@ fn normalize(native: &Value, id: &str) -> Value {
         }
         if let Some(Value::Object(annotations)) = s.get_mut("annotations") {
             drop_per_container(annotations);
+            forget_cid_file(annotations);
         }
         if let Some(Value::Object(linux)) = s.get_mut("linux") {
             linux.remove("cgroupsPath");
@@ -87,6 +94,7 @@ fn normalize(native: &Value, id: &str) -> Value {
     let mut labels = native.get("Labels").cloned().unwrap_or(Value::Null);
     if let Value::Object(l) = &mut labels {
         drop_per_container(l);
+        forget_cid_file(l);
     }
     let mut both = Map::new();
     both.insert("Spec".to_owned(), spec);
@@ -99,6 +107,29 @@ fn drop_per_container(map: &mut Map<String, Value>) {
         map.remove(key);
     }
 }
+
+/// `--namespace=<ns>` / `--n=<ns>` in a hook's arguments.
+fn is_namespace_flag(arg: &str) -> bool {
+    arg.starts_with("--namespace=") || arg.starts_with("--n=")
+}
+
+/// Blank `CidFile` in `nerdctl/host-config`: where the create wrote the new
+/// container's id (compose passes a temporary `--cidfile`), not a setting
+/// of the container.
+fn forget_cid_file(map: &mut Map<String, Value>) {
+    let Some(Value::String(raw)) = map.get_mut(HOST_CONFIG_KEY) else {
+        return;
+    };
+    let Ok(Value::Object(mut host)) = serde_json::from_str::<Value>(raw) else {
+        return;
+    };
+    if host.contains_key("CidFile") {
+        host.insert("CidFile".to_owned(), Value::from(""));
+        *raw = Value::Object(host).to_string();
+    }
+}
+
+const HOST_CONFIG_KEY: &str = "nerdctl/host-config";
 
 fn replace_ids(v: Value, id: &str, short: &str) -> Value {
     match v {
@@ -244,6 +275,68 @@ mod tests {
                 "Spec.hooks.createRuntime[0].args[1] would change from \"oci-hook\" to \"something-else\""
             ],
             "the hook itself still has to match"
+        );
+    }
+
+    #[test]
+    fn whether_the_creator_named_the_namespace_is_ignored() {
+        // Compose (or CONTAINERD_NAMESPACE) leaves the flag out of nerdctl's
+        // hook arguments; freshdock always passes it.
+        let hook = |args: Value| {
+            json!({"Spec": {"hooks": {"poststop": [
+                {"path": "/usr/local/bin/nerdctl", "args": args}
+            ]}}})
+        };
+        let original = native(
+            ID_A,
+            hook(json!(["nerdctl", "internal", "oci-hook", "postStop"])),
+        );
+        let trial = native(
+            ID_B,
+            hook(json!([
+                "nerdctl",
+                "--namespace=default",
+                "internal",
+                "oci-hook",
+                "postStop"
+            ])),
+        );
+        assert!(differences(&original, ID_A, &trial, ID_B).is_empty());
+        let other = native(
+            ID_B,
+            hook(json!([
+                "nerdctl",
+                "--data-root=/elsewhere",
+                "internal",
+                "oci-hook",
+                "postStop"
+            ])),
+        );
+        assert!(
+            !differences(&original, ID_A, &other, ID_B).is_empty(),
+            "other global flags still have to match"
+        );
+    }
+
+    #[test]
+    fn the_cid_file_a_create_wrote_is_ignored() {
+        let host = |cid: &str| {
+            let raw = json!({"BlkioWeight": 0, "CidFile": cid, "Devices": null}).to_string();
+            json!({
+                "Labels": {"nerdctl/host-config": raw},
+                "Spec": {"annotations": {"nerdctl/host-config": raw}}
+            })
+        };
+        let original = native(ID_A, host("/tmp/compose-1046676748/cid"));
+        let trial = native(ID_B, host(""));
+        assert!(differences(&original, ID_A, &trial, ID_B).is_empty());
+        let mut changed = host("");
+        changed["Labels"]["nerdctl/host-config"] =
+            Value::from(json!({"BlkioWeight": 300, "CidFile": "", "Devices": null}).to_string());
+        let other = native(ID_B, changed);
+        assert!(
+            !differences(&original, ID_A, &other, ID_B).is_empty(),
+            "the rest of the host config still has to match"
         );
     }
 

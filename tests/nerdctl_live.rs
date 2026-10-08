@@ -250,6 +250,95 @@ async fn a_richly_configured_container_round_trips() {
 
 #[tokio::test]
 #[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
+async fn a_compose_service_round_trips() {
+    // As `nerdctl compose` makes containers: a temporary `--cidfile`, and the
+    // namespace from the environment rather than a flag. The image's own
+    // entrypoint ends in `--` (`tini --` style), so the container's command
+    // starts with one, which a create from the command line would lose.
+    let Some(n) = backend().await else { return };
+    let p = prefix("compose");
+    // The update pulls the image, so it is served from a local registry.
+    let image = "127.0.0.1:15001/freshdock-live/entry:1".to_owned();
+    // Declared first so it drops last, after the containers using it.
+    let _image = RemoveImage(image.clone());
+    let _teardown = Teardown {
+        prefix: p.clone(),
+        networks: vec![format!("{p}_default")],
+    };
+    must(&[
+        "run",
+        "-d",
+        "--name",
+        &format!("{p}-registry"),
+        "-p",
+        "127.0.0.1:15001:5000",
+        "docker.io/library/registry:2",
+    ]);
+    let base = format!("{p}-base");
+    must(&["run", "-d", "--name", &base, ALPINE, "sleep", "100000"]);
+    must(&[
+        "commit",
+        "--change",
+        r#"ENTRYPOINT ["/usr/bin/env", "--"]"#,
+        &base,
+        &image,
+    ]);
+    must(&["stop", "--time", "1", &base]);
+    must(&["rm", &base]);
+    let mut pushed = Err(String::new());
+    for _ in 0..20 {
+        pushed = nerdctl(&["push", &image]);
+        if pushed.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    pushed.unwrap_or_else(|e| panic!("push {image}: {e}"));
+
+    let dir = std::env::temp_dir().join(&p);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("compose.yaml"),
+        format!(
+            "services:\n  app:\n    image: {image}\n    command: [\"sleep\", \"100000\"]\n    \
+             restart: unless-stopped\n    labels:\n      - freshdock.enable=true\n"
+        ),
+    )
+    .unwrap();
+    let up = Command::new(nerdctl_bin())
+        .args(["compose", "-p", &p, "up", "-d"])
+        .current_dir(&dir)
+        .env("CONTAINERD_NAMESPACE", NS)
+        .output()
+        .expect("nerdctl compose");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let name = format!("{p}-app-1");
+    let before = native(&name);
+    assert_eq!(
+        before["Spec"]["process"]["args"],
+        serde_json::json!(["/usr/bin/env", "--", "sleep", "100000"])
+    );
+
+    let outcome = recreate(&n, &name).await.expect("not refused");
+    assert!(
+        matches!(outcome, RecreateOutcome::Recreated { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        native(&name)["Spec"]["process"]["args"],
+        before["Spec"]["process"]["args"],
+        "the command, `--` included, carried over"
+    );
+    assert!(running(&name));
+}
+
+#[tokio::test]
+#[ignore = "needs rootful nerdctl; set FRESHDOCK_NERDCTL_LIVE=1"]
 async fn a_crashing_replacement_is_rolled_back() {
     let Some(n) = backend().await else { return };
     let p = prefix("rb");
