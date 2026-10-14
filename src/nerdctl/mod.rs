@@ -51,6 +51,16 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// A pull downloads the whole image, so it gets far longer.
 const PULL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Waits before each retry of a pull that hit a temporary registry error
+/// (see [`temporary_pull_error`]). A quarter of an hour in all, which also
+/// takes a scheduled pull out of the top-of-the-hour rush in which ghcr.io
+/// answered 429 night after night.
+const PULL_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(60),
+    Duration::from_secs(4 * 60),
+    Duration::from_secs(10 * 60),
+];
+
 /// A hook with no timeout of its own still must not hang the daemon forever.
 const HOOK_FALLBACK_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -957,10 +967,23 @@ impl<R: CommandRunner> DockerOps for Nerdctl<R> {
             auth.iter()
                 .map(|a| ("DOCKER_CONFIG".to_owned(), a.dir().display().to_string())),
         );
-        let pulled = self
-            .call_with(&["pull", "--quiet", &reference], &env, PULL_TIMEOUT)
-            .await
-            .map(|_| ());
+        let args = ["pull", "--quiet", reference.as_str()];
+        let mut pulled = self.call_with(&args, &env, PULL_TIMEOUT).await.map(|_| ());
+        for delay in PULL_RETRY_DELAYS {
+            match &pulled {
+                Err(e) if temporary_pull_error(&e.to_string()) => {
+                    warn!(
+                        image = %reference,
+                        error = %e,
+                        retry_in_s = delay.as_secs(),
+                        "pull hit a temporary registry error; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    pulled = self.call_with(&args, &env, PULL_TIMEOUT).await.map(|_| ());
+                }
+                _ => break,
+            }
+        }
         // The name was only needed if the pull moved the tag away from the
         // image. If it didn't (nothing new upstream, or the pull failed), the
         // tag still names it, so release it now rather than on a later pass.
@@ -1189,6 +1212,25 @@ fn failure(args: &[&str], out: &CmdOutput) -> DockerError {
     } else {
         message
     })
+}
+
+/// Is this pull failure worth another try in a few minutes? A registry
+/// that is rate limiting (429) or briefly failing (5xx), or a network hiccup.
+/// Not "not found", and not 401/403: those are about the image or the
+/// credentials, and waiting changes nothing.
+fn temporary_pull_error(message: &str) -> bool {
+    const TEMPORARY: [&str; 9] = [
+        "429 Too Many Requests",
+        "500 Internal Server Error",
+        "502 Bad Gateway",
+        "503 Service Unavailable",
+        "504 Gateway Timeout",
+        "connection reset by peer",
+        "i/o timeout",
+        "TLS handshake timeout",
+        "unexpected EOF",
+    ];
+    TEMPORARY.iter().any(|t| message.contains(t))
 }
 
 /// The command's own exit code from `exec failed with exit code N`.
@@ -1998,6 +2040,80 @@ mod tests {
         // Without ctr nothing is known, so nothing is left to the image.
         n.ctr = None;
         assert_eq!(n.image_env(Some("sha256:cfg")).await, None);
+    }
+
+    const RATE_LIMITED: &str = "time=\"2026-10-13T04:00:28Z\" level=fatal msg=\"failed to copy: \
+        httpReadSeeker: failed open: unexpected status from GET request to \
+        https://ghcr.io/v2/x/manifests/sha256:abc: 429 Too Many Requests\"";
+
+    fn pullable() -> FakeRunner {
+        FakeRunner::default().on(
+            "image inspect library/nginx:alpine",
+            ok(image_json("sha256:old", OLD_DIGEST)),
+        )
+    }
+
+    fn pulls(n: &Nerdctl<FakeRunner>) -> usize {
+        n.runner
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("pull "))
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_pull_is_tried_again_later() {
+        let n = nerdctl(
+            pullable()
+                .on_once("pull --quiet library/nginx:alpine", fail(RATE_LIMITED))
+                .on("pull --quiet library/nginx:alpine", ok("")),
+        );
+        let started = tokio::time::Instant::now();
+        n.pull(&ImageRef::parse("nginx:alpine")).await.unwrap();
+        assert_eq!(pulls(&n), 2);
+        assert_eq!(
+            started.elapsed(),
+            PULL_RETRY_DELAYS[0],
+            "after the first wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_that_stays_rate_limited_gives_up_after_the_retries() {
+        let n = nerdctl(pullable().on("pull --quiet library/nginx:alpine", fail(RATE_LIMITED)));
+        let err = n.pull(&ImageRef::parse("nginx:alpine")).await.unwrap_err();
+        assert!(err.to_string().contains("429"), "{err}");
+        assert_eq!(pulls(&n), 1 + PULL_RETRY_DELAYS.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_that_cannot_succeed_is_not_retried() {
+        let denied = "time=\"x\" level=fatal msg=\"failed to resolve reference: \
+            unexpected status from GET request: 401 Unauthorized\"";
+        let n = nerdctl(pullable().on("pull --quiet library/nginx:alpine", fail(denied)));
+        let started = tokio::time::Instant::now();
+        n.pull(&ImageRef::parse("nginx:alpine")).await.unwrap_err();
+        assert_eq!(pulls(&n), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO, "no waiting");
+    }
+
+    #[test]
+    fn temporary_registry_errors_are_told_from_lasting_ones() {
+        for msg in [
+            "unexpected status from GET request to https://ghcr.io/v2/a/manifests/b: 429 Too Many Requests",
+            "unexpected status: 503 Service Unavailable",
+            "read tcp 10.0.0.2:443: read: connection reset by peer",
+            "dial tcp: i/o timeout",
+        ] {
+            assert!(temporary_pull_error(msg), "{msg}");
+        }
+        for msg in [
+            "unexpected status: 401 Unauthorized",
+            "unexpected status: 403 Forbidden",
+            "failed to resolve reference: docker.io/library/nope:1: not found",
+        ] {
+            assert!(!temporary_pull_error(msg), "{msg}");
+        }
     }
 
     fn inspectable(name: &str, fixture_name: &str) -> FakeRunner {

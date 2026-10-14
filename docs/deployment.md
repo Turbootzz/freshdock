@@ -264,6 +264,14 @@ logs both.
   `nerdctl pull` through a temporary, owner-only `DOCKER_CONFIG`. Without them,
   nerdctl's own login (`nerdctl login`) is used. See
   [Registry authentication](registry-auth.md).
+- **A rate-limited pull is retried.** When the registry answers a pull with
+  429 Too Many Requests or a 5xx error, or the connection drops, freshdock
+  logs `pull hit a temporary registry error; retrying` and tries again after
+  1, 4 and 10 minutes before giving up until the next scheduled run. ghcr.io
+  (which also serves `lscr.io`) limits anonymous pulls, most often on the
+  hour, when many scheduled pulls fire at once. Registry credentials raise
+  that limit, and a schedule off the hour (`freshdock.schedule=17 4 * * *`)
+  avoids the rush. A 401, 403 or "not found" is not retried.
 
 ## Compatibility
 
