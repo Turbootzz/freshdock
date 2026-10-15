@@ -13,7 +13,7 @@ use super::auth::{CachedToken, parse_www_authenticate};
 use super::{Digest, ImageRef, Registry, RegistryError};
 use crate::config::{CredentialStore, canonicalize_host};
 
-const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const ACCEPT_MANIFESTS: &str = "application/vnd.docker.distribution.manifest.v2+json, \
      application/vnd.oci.image.manifest.v1+json, \
