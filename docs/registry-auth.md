@@ -32,7 +32,9 @@ credentials raises the budget. freshdock dedupes to one request per unique image
 stay well under it.
 
 A pull hit by a short-lived rate limit (GHCR does this in bursts) is retried after
-2, 5 and 10 seconds. Docker Hub's pull quota is not retried; it resets in hours.
+2, 5 and 10 seconds (with nerdctl, after 1, 4 and 10 minutes; see
+[Deployment](deployment.md#with-nerdctl-containerd)). Docker Hub's pull quota is not
+retried; it resets in hours.
 
 With the [nerdctl runtime](deployment.md#with-nerdctl-containerd), the same
 credentials are used for the pull too: freshdock writes them to a temporary,

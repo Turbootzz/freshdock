@@ -108,13 +108,19 @@ impl DockerError {
             DockerError::Bollard(Error::DockerStreamError { error }) => (None, error),
             _ => return false,
         };
-        let message = message.to_ascii_lowercase();
-        let limited = status == Some(429)
-            || ["toomanyrequests", "too many requests", "http 429"]
-                .iter()
-                .any(|needle| message.contains(needle));
-        limited && !message.contains("pull rate limit")
+        transient_rate_limit(status, message)
     }
+}
+
+/// [`DockerError::is_transient_rate_limit`] on a status and message, for a
+/// runtime that reports a pull failure as text (nerdctl).
+pub(crate) fn transient_rate_limit(status: Option<u16>, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    let limited = status == Some(429)
+        || ["toomanyrequests", "too many requests", "http 429"]
+            .iter()
+            .any(|needle| message.contains(needle));
+    limited && !message.contains("pull rate limit")
 }
 
 /// Backoff between pull retries (#105); fits the default 30 s shutdown drain.

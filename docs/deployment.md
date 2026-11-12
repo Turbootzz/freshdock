@@ -271,7 +271,10 @@ logs both.
   (which also serves `lscr.io`) limits anonymous pulls, most often on the
   hour, when many scheduled pulls fire at once. Registry credentials raise
   that limit, and a schedule off the hour (`freshdock.schedule=17 4 * * *`)
-  avoids the rush. A 401, 403 or "not found" is not retried.
+  avoids the rush. A 401, 403, "not found" or Docker Hub's pull quota
+  (which resets in hours) is not retried. The waits are longer than the
+  Docker backend's 2, 5 and 10 seconds: in testing, ghcr.io's limit on
+  nerdctl pulls outlasted seconds but cleared within the first minute.
 
 ## Compatibility
 

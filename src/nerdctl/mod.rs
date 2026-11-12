@@ -55,6 +55,12 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// (see [`temporary_pull_error`]). A quarter of an hour in all, which also
 /// takes a scheduled pull out of the top-of-the-hour rush in which ghcr.io
 /// answered 429 night after night.
+///
+/// Longer than the Docker backend's (2, 5 and 10 s, sized to fit the 30 s
+/// shutdown drain): on the nerdctl soak host ghcr.io's 429 outlasted seconds
+/// but cleared within the first minute, on all 11 nights it hit. A shutdown
+/// during a wait is forced after the drain, which is harmless: the pull runs
+/// before anything is stopped, and a kept image name is released later.
 const PULL_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(60),
     Duration::from_secs(4 * 60),
@@ -1214,13 +1220,19 @@ fn failure(args: &[&str], out: &CmdOutput) -> DockerError {
     })
 }
 
-/// Is this pull failure worth another try in a few minutes? A registry
-/// that is rate limiting (429) or briefly failing (5xx), or a network hiccup.
-/// Not "not found", and not 401/403: those are about the image or the
-/// credentials, and waiting changes nothing.
+/// Is this pull failure worth another try in a few minutes? A short-lived
+/// rate limit, judged as the Docker backend judges it (so Docker Hub's pull
+/// quota, which resets in hours, is not one), a registry briefly failing
+/// (5xx), or a network hiccup. Not "not found", and not 401/403: those are
+/// about the image or the credentials, and waiting changes nothing.
 fn temporary_pull_error(message: &str) -> bool {
-    const TEMPORARY: [&str; 9] = [
-        "429 Too Many Requests",
+    if message.to_ascii_lowercase().contains("pull rate limit") {
+        return false;
+    }
+    if crate::docker::transient_rate_limit(None, message) {
+        return true;
+    }
+    const TEMPORARY: [&str; 8] = [
         "500 Internal Server Error",
         "502 Bad Gateway",
         "503 Service Unavailable",
@@ -2107,9 +2119,16 @@ mod tests {
         ] {
             assert!(temporary_pull_error(msg), "{msg}");
         }
+        assert!(temporary_pull_error(
+            "toomanyrequests: retry-after: 224.292µs, allowed: 44000/minute"
+        ));
         for msg in [
             "unexpected status: 401 Unauthorized",
             "unexpected status: 403 Forbidden",
+            // Docker Hub's pull quota resets in hours: not worth the wait.
+            "toomanyrequests: You have reached your pull rate limit. You may increase the limit",
+            "unexpected status from GET request: 429 Too Many Requests: \
+             toomanyrequests: You have reached your pull rate limit",
             "failed to resolve reference: docker.io/library/nope:1: not found",
         ] {
             assert!(!temporary_pull_error(msg), "{msg}");
