@@ -6,12 +6,23 @@ use bollard::models::{
 };
 use bollard::query_parameters::{CreateContainerOptions, CreateContainerOptionsBuilder};
 
+use crate::nerdctl::spec::NerdctlSpec;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SpecError {
     #[error("inspect response is missing the {0} field")]
     Missing(&'static str),
+    /// A spec reached a backend other than the one that built it.
+    #[error("a {0} container spec was handed to the {1} backend")]
+    WrongRuntime(&'static str, &'static str),
 }
 
+/// Everything needed to re-create a container, captured by one inspect.
+///
+/// The fields every backend shares sit on the struct; the runtime's own
+/// settings sit in [`body`](Self::body). Shared code (the recreate cycle,
+/// rollouts, the `recreate` command) reads the body only through the accessor
+/// methods below, so it never depends on one daemon's types.
 #[derive(Debug, Clone)]
 pub struct ContainerSpec {
     pub name: String,
@@ -22,12 +33,109 @@ pub struct ContainerSpec {
     /// retags an unchanged `:latest`. `None` for a container with no resolved
     /// image (cleanup then no-ops).
     pub image_id: Option<String>,
+    pub body: SpecBody,
+}
+
+/// The runtime-specific part of a [`ContainerSpec`].
+///
+/// The Docker variant is much larger, but a spec lives only for one
+/// container's update, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum SpecBody {
+    Docker(DockerSpec),
+    Nerdctl(NerdctlSpec),
+}
+
+/// A container's settings as the Docker API reports them, replayed verbatim
+/// into the create call.
+#[derive(Debug, Clone, Default)]
+pub struct DockerSpec {
     pub config: ContainerConfig,
     pub host_config: Option<HostConfig>,
     pub network_endpoints: Option<HashMap<String, EndpointSettings>>,
 }
 
 impl ContainerSpec {
+    /// The Docker-API settings. An error on a spec another backend produced;
+    /// a process drives one runtime, so in practice a spec only ever reaches
+    /// the backend whose `inspect` built it.
+    pub fn docker(&self) -> Result<&DockerSpec, SpecError> {
+        match &self.body {
+            SpecBody::Docker(d) => Ok(d),
+            SpecBody::Nerdctl(_) => Err(SpecError::WrongRuntime("nerdctl", "Docker")),
+        }
+    }
+
+    /// The nerdctl settings. An error on a Docker spec, as
+    /// [`docker`](Self::docker) is the other way round.
+    pub fn nerdctl(&self) -> Result<&NerdctlSpec, SpecError> {
+        match &self.body {
+            SpecBody::Nerdctl(n) => Ok(n),
+            SpecBody::Docker(_) => Err(SpecError::WrongRuntime("Docker", "nerdctl")),
+        }
+    }
+
+    pub fn labels(&self) -> Option<&HashMap<String, String>> {
+        match &self.body {
+            SpecBody::Docker(d) => d.config.labels.as_ref(),
+            SpecBody::Nerdctl(n) => Some(&n.labels),
+        }
+    }
+
+    /// The signal a stop sends first; `None` means the runtime's default.
+    pub fn stop_signal(&self) -> Option<&str> {
+        match &self.body {
+            SpecBody::Docker(d) => d.config.stop_signal.as_deref(),
+            SpecBody::Nerdctl(n) => n.stop_signal(),
+        }
+    }
+
+    /// Seconds a stop waits before killing; `None` means the runtime's default.
+    pub fn stop_timeout(&self) -> Option<i64> {
+        match &self.body {
+            SpecBody::Docker(d) => d.config.stop_timeout,
+            SpecBody::Nerdctl(n) => n.stop_timeout(),
+        }
+    }
+
+    /// `HostConfig.NetworkMode`: `bridge`, a network name, `container:<ref>`, …
+    pub fn network_mode(&self) -> Option<&str> {
+        match &self.body {
+            SpecBody::Docker(d) => d
+                .host_config
+                .as_ref()
+                .and_then(|hc| hc.network_mode.as_deref()),
+            SpecBody::Nerdctl(n) => n.network_mode(),
+        }
+    }
+
+    pub fn set_network_mode(&mut self, mode: String) {
+        match &mut self.body {
+            SpecBody::Docker(d) => {
+                d.host_config
+                    .get_or_insert_with(HostConfig::default)
+                    .network_mode = Some(mode)
+            }
+            SpecBody::Nerdctl(n) => n.set_network_mode(mode),
+        }
+    }
+
+    /// Forget the settings that belong to a container's *own* network stack:
+    /// hostname, domain name, exposed ports and network endpoints. For a
+    /// container that borrows another's network namespace, which has none.
+    pub fn drop_own_network_identity(&mut self) {
+        match &mut self.body {
+            SpecBody::Docker(docker) => {
+                docker.config.hostname = None;
+                docker.config.domainname = None;
+                docker.config.exposed_ports = None;
+                docker.network_endpoints = None;
+            }
+            SpecBody::Nerdctl(n) => n.drop_own_network_identity(),
+        }
+    }
+
     pub fn from_inspect(resp: ContainerInspectResponse) -> Result<Self, SpecError> {
         let name = resp
             .name
@@ -54,15 +162,18 @@ impl ContainerSpec {
             name,
             image_ref,
             image_id: resp.image,
-            config,
-            host_config: resp.host_config,
-            network_endpoints,
+            body: SpecBody::Docker(DockerSpec {
+                config,
+                host_config: resp.host_config,
+                network_endpoints,
+            }),
         })
     }
 
-    pub fn to_create_body(&self, new_image: &str) -> ContainerCreateBody {
-        let cfg = &self.config;
-        ContainerCreateBody {
+    pub fn to_create_body(&self, new_image: &str) -> Result<ContainerCreateBody, SpecError> {
+        let docker = self.docker()?;
+        let cfg = &docker.config;
+        Ok(ContainerCreateBody {
             hostname: cfg.hostname.clone(),
             domainname: cfg.domainname.clone(),
             user: cfg.user.clone(),
@@ -87,11 +198,11 @@ impl ContainerSpec {
             stop_signal: cfg.stop_signal.clone(),
             stop_timeout: cfg.stop_timeout,
             shell: cfg.shell.clone(),
-            host_config: self.host_config.clone(),
-            networking_config: self.network_endpoints.clone().map(|e| NetworkingConfig {
+            host_config: docker.host_config.clone(),
+            networking_config: docker.network_endpoints.clone().map(|e| NetworkingConfig {
                 endpoints_config: Some(e),
             }),
-        }
+        })
     }
 
     pub fn to_create_options(&self) -> CreateContainerOptions {
@@ -188,20 +299,26 @@ mod tests {
     #[test]
     fn daemon_assigned_hostname_is_dropped() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("41b589f2924c"))).unwrap();
-        assert_eq!(spec.config.hostname, None);
-        assert_eq!(spec.to_create_body("nginx:alpine").hostname, None);
+        assert_eq!(spec.docker().unwrap().config.hostname, None);
+        assert_eq!(spec.to_create_body("nginx:alpine").unwrap().hostname, None);
     }
 
     #[test]
     fn explicit_hostname_round_trips() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("web"))).unwrap();
-        assert_eq!(spec.config.hostname.as_deref(), Some("web"));
+        assert_eq!(
+            spec.docker().unwrap().config.hostname.as_deref(),
+            Some("web")
+        );
     }
 
     #[test]
     fn id_shaped_hostname_of_another_container_is_kept() {
         let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("deadbeef1234"))).unwrap();
-        assert_eq!(spec.config.hostname.as_deref(), Some("deadbeef1234"));
+        assert_eq!(
+            spec.docker().unwrap().config.hostname.as_deref(),
+            Some("deadbeef1234")
+        );
     }
 
     #[test]

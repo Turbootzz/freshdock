@@ -195,13 +195,9 @@ async fn swap_container(
     image: &str,
     ts_provider: &impl Fn() -> i64,
 ) -> Result<(String, String), SwapError> {
-    ops.stop(
-        name,
-        spec.config.stop_signal.as_deref(),
-        spec.config.stop_timeout,
-    )
-    .await
-    .map_err(SwapError::Stop)?;
+    ops.stop(name, spec.stop_signal(), spec.stop_timeout())
+        .await
+        .map_err(SwapError::Stop)?;
     let archive = ops
         .rename(name, ts_provider())
         .await
@@ -351,10 +347,7 @@ async fn reattach_dependents(
 /// is.
 fn rewrite_owner_reference(spec: &mut ContainerSpec, owner_name: &str, new_owner_id: Option<&str>) {
     let Some(new_id) = new_owner_id else { return };
-    let Some(host_config) = spec.host_config.as_mut() else {
-        return;
-    };
-    let Some(mode) = host_config.network_mode.as_deref() else {
+    let Some(mode) = spec.network_mode() else {
         return;
     };
     let Some(reference) = container_reference(mode) else {
@@ -368,7 +361,7 @@ fn rewrite_owner_reference(spec: &mut ContainerSpec, owner_name: &str, new_owner
     if reference == owner_name {
         return;
     }
-    host_config.network_mode = Some(format!("container:{new_id}"));
+    spec.set_network_mode(format!("container:{new_id}"));
 }
 
 /// Drop the settings Docker refuses to accept alongside a container-scoped
@@ -389,19 +382,11 @@ fn rewrite_owner_reference(spec: &mut ContainerSpec, owner_name: &str, new_owner
 /// Deliberately scoped to the dependent repair: the container being *updated*
 /// owns its network stack and must round-trip it byte-for-byte.
 fn strip_shared_namespace_conflicts(spec: &mut ContainerSpec) {
-    let shares_namespace = spec
-        .host_config
-        .as_ref()
-        .and_then(|hc| hc.network_mode.as_deref())
-        .and_then(container_reference)
-        .is_some();
+    let shares_namespace = spec.network_mode().and_then(container_reference).is_some();
     if !shares_namespace {
         return;
     }
-    spec.config.hostname = None;
-    spec.config.domainname = None;
-    spec.config.exposed_ports = None;
-    spec.network_endpoints = None;
+    spec.drop_own_network_identity();
 }
 
 /// One dependent's repair cycle: `inspect → rewrite NetworkMode → stop →
@@ -732,17 +717,12 @@ pub async fn recreate_one_shot(
 /// longer referenced by it). Every step is best-effort: a failure — notably a
 /// 409 from removing an image still used by another container, which is the
 /// desired guard — is logged and swallowed, never failing the completed update.
-/// A 409 from `remove_image` means another container still references the image
-/// — the intended guard against deleting a shared base, not a real failure. Any
-/// other error (network, daemon, not-found) is a genuine cleanup error.
+/// A conflict (Docker's 409) from `remove_image` means another container still
+/// references the image — the intended guard against deleting a shared base,
+/// not a real failure. Any other error (network, daemon, not-found) is a
+/// genuine cleanup error.
 fn is_image_in_use(e: &DockerError) -> bool {
-    matches!(
-        e,
-        DockerError::Bollard(bollard::errors::Error::DockerResponseServerError {
-            status_code: 409,
-            ..
-        })
-    )
+    e.is_conflict()
 }
 
 async fn run_cleanup(ops: &impl DockerOps, cleanup: Cleanup, old_image_id: Option<&str>) {
@@ -1012,20 +992,22 @@ mod tests {
                     // carries a daemon-generated hostname (its own short id)
                     // and the image's EXPOSE merged into ExposedPorts — the
                     // very pair the daemon then refuses to accept back.
-                    config: bollard::models::ContainerConfig {
-                        hostname: Some("7c0ffee1d0de".to_owned()),
-                        domainname: Some("lan".to_owned()),
-                        exposed_ports: Some(vec!["80/tcp".to_owned()]),
-                        ..Default::default()
-                    },
-                    host_config: Some(bollard::models::HostConfig {
-                        network_mode: self.dependent_network_mode.clone(),
-                        ..Default::default()
+                    body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                        config: bollard::models::ContainerConfig {
+                            hostname: Some("7c0ffee1d0de".to_owned()),
+                            domainname: Some("lan".to_owned()),
+                            exposed_ports: Some(vec!["80/tcp".to_owned()]),
+                            ..Default::default()
+                        },
+                        host_config: Some(bollard::models::HostConfig {
+                            network_mode: self.dependent_network_mode.clone(),
+                            ..Default::default()
+                        }),
+                        network_endpoints: Some(std::collections::HashMap::from([(
+                            "bridge".to_owned(),
+                            bollard::models::EndpointSettings::default(),
+                        )])),
                     }),
-                    network_endpoints: Some(std::collections::HashMap::from([(
-                        "bridge".to_owned(),
-                        bollard::models::EndpointSettings::default(),
-                    )])),
                 });
             }
             Ok(ContainerSpec {
@@ -1039,16 +1021,18 @@ mod tests {
                 image_id: (!self.omit_image_id).then(|| "sha256:oldimg".to_owned()),
                 // The updated container owns its network stack, so it carries
                 // exactly the fields a container-scoped dependent must not.
-                config: bollard::models::ContainerConfig {
-                    hostname: Some("fd-smoke".to_owned()),
-                    exposed_ports: Some(vec!["80/tcp".to_owned()]),
-                    ..Default::default()
-                },
-                host_config: None,
-                network_endpoints: Some(std::collections::HashMap::from([(
-                    "bridge".to_owned(),
-                    bollard::models::EndpointSettings::default(),
-                )])),
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: bollard::models::ContainerConfig {
+                        hostname: Some("fd-smoke".to_owned()),
+                        exposed_ports: Some(vec!["80/tcp".to_owned()]),
+                        ..Default::default()
+                    },
+                    host_config: None,
+                    network_endpoints: Some(std::collections::HashMap::from([(
+                        "bridge".to_owned(),
+                        bollard::models::EndpointSettings::default(),
+                    )])),
+                }),
             })
         }
 
@@ -1086,7 +1070,7 @@ mod tests {
             }
             // Record what the daemon would actually be sent, not what the spec
             // holds — the two differ exactly where a bug would live.
-            let body = spec.to_create_body(image);
+            let body = spec.to_create_body(image)?;
             self.created.lock().unwrap().push(CreatedContainer {
                 container: name.to_owned(),
                 image: body.image.clone().unwrap_or_default(),
@@ -1958,20 +1942,17 @@ mod tests {
                 name: "vpn-peer".to_owned(),
                 image_ref: "alpine:3.20".to_owned(),
                 image_id: None,
-                config: bollard::models::ContainerConfig::default(),
-                host_config: Some(bollard::models::HostConfig {
-                    network_mode: Some(mode.to_owned()),
-                    ..Default::default()
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: bollard::models::ContainerConfig::default(),
+                    host_config: Some(bollard::models::HostConfig {
+                        network_mode: Some(mode.to_owned()),
+                        ..Default::default()
+                    }),
+                    network_endpoints: None,
                 }),
-                network_endpoints: None,
             }
         }
-        let mode_of = |spec: &ContainerSpec| {
-            spec.host_config
-                .as_ref()
-                .and_then(|hc| hc.network_mode.clone())
-                .unwrap()
-        };
+        let mode_of = |spec: &ContainerSpec| spec.network_mode().unwrap().to_owned();
 
         let mut by_id = spec_with("container:0123456789abcdef");
         rewrite_owner_reference(&mut by_id, "fd-smoke", Some("new-id"));
@@ -2250,9 +2231,11 @@ mod tests {
                 name: name.to_owned(),
                 image_ref: "nginx:alpine".to_owned(),
                 image_id: None,
-                config: bollard::models::ContainerConfig::default(),
-                host_config: None,
-                network_endpoints: None,
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: bollard::models::ContainerConfig::default(),
+                    host_config: None,
+                    network_endpoints: None,
+                }),
             })
         }
 

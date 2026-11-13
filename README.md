@@ -155,6 +155,7 @@ forks, but none combine what matters for a small homelab:
 | Docker Desktop (Linux, macOS, Windows) | Supported. |
 | Portainer (CE and Business) | Supported via the same Docker socket. |
 | Podman 4+ | Supported via the Docker-compatible socket. |
+| containerd with nerdctl 2.3+ (rootful) | Supported with `FRESHDOCK_RUNTIME=nerdctl`, as a host binary running as root. Compose projects are updated one container at a time. |
 | Docker Compose | A project is updated as one unit: one-shot `service_completed_successfully` services are re-run first, the rest follow in `depends_on` order. Compose files are never read or written. |
 | Compose-based UIs (Dockge, Komodo, and similar) | Supported; the compose files themselves are untouched. |
 | Kubernetes / Swarm | Out of scope. Use platform-native mechanisms. |

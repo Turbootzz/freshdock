@@ -29,6 +29,17 @@ test:
 live:
     cargo test --locked --all-features --tests -- --ignored --nocapture --test-threads=1
 
+# The nerdctl live gate, as CI runs it: the update cycle against a real
+# containerd through rootful nerdctl. The test binary runs as root (via sudo);
+# everything happens in the `freshdock-live` containerd namespace.
+live-nerdctl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin=$(cargo test --locked --test nerdctl_live --no-run --message-format=json \
+      | jq -r 'select(.executable != null and .profile.test) | .executable')
+    sudo FRESHDOCK_NERDCTL_LIVE=1 FRESHDOCK_NERDCTL_PATH="$(command -v nerdctl)" \
+      "$bin" --ignored --nocapture --test-threads=1
+
 # Check licenses, advisories, and bans (requires `cargo install cargo-deny`).
 deny:
     cargo deny check

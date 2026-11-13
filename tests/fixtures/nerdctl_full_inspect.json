@@ -1,0 +1,197 @@
+[
+  {
+    "Id": "c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67",
+    "Created": "2026-09-25T18:52:16.867585843Z",
+    "Path": "/docker-entrypoint.sh",
+    "Args": [
+      "nginx",
+      "-g",
+      "daemon off;"
+    ],
+    "State": {
+      "Status": "restarting",
+      "Running": false,
+      "Paused": false,
+      "Restarting": true,
+      "Pid": 0,
+      "ExitCode": 1,
+      "Error": "",
+      "StartedAt": "2026-09-25T18:52:24.321428931Z",
+      "FinishedAt": "2026-09-25T18:52:24.372201802Z"
+    },
+    "Image": "docker.io/library/nginx:1.27-alpine",
+    "ResolvConfPath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67/resolv.conf",
+    "HostnamePath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67/hostname",
+    "HostsPath": "/var/lib/nerdctl/1935db59/etchosts/freshdock-test/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67/hosts",
+    "LogPath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67-json.log",
+    "Name": "fd-full",
+    "RestartCount": 1,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "AppArmorProfile": "nerdctl-default",
+    "HostConfig": {
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "driver": "json-file",
+        "opts": {
+          "max-size": "5m"
+        },
+        "address": "/run/containerd/containerd.sock"
+      },
+      "NetworkMode": "fdtest-net",
+      "PortBindings": {},
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "CapAdd": [
+        "CAP_NET_ADMIN"
+      ],
+      "CapDrop": [
+        "CAP_MKNOD"
+      ],
+      "CgroupnsMode": "private",
+      "Dns": [
+        "9.9.9.9"
+      ],
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": [
+        "example.test:10.0.0.9"
+      ],
+      "GroupAdd": [
+        "101"
+      ],
+      "IpcMode": "private",
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "ReadonlyRootfs": false,
+      "Tmpfs": {
+        "/scratch": "noexec,nosuid,nodev"
+      },
+      "UTSMode": "",
+      "ShmSize": 0,
+      "Sysctls": {
+        "net.ipv4.ip_unprivileged_port_start": "0"
+      },
+      "Runtime": "io.containerd.runc.v2",
+      "CpusetMems": "",
+      "CpusetCpus": "",
+      "CpuQuota": 50000,
+      "CpuShares": 0,
+      "CpuPeriod": 100000,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "Memory": 268435456,
+      "MemorySwap": 536870912,
+      "MemoryReservation": 0,
+      "MemorySwappiness": null,
+      "PidsLimit": 200,
+      "Ulimits": null,
+      "OomKillDisable": false,
+      "Devices": null,
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": [],
+      "BlkioDeviceReadBps": [],
+      "BlkioDeviceWriteBps": [],
+      "BlkioDeviceReadIOps": [],
+      "BlkioDeviceWriteIOps": []
+    },
+    "Mounts": [
+      {
+        "Type": "volume",
+        "Name": "fdtest-vol",
+        "Source": "/var/lib/nerdctl/1935db59/volumes/freshdock-test/fdtest-vol/_data",
+        "Destination": "/data",
+        "Driver": "local",
+        "Mode": "",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/etc/hostname",
+        "Destination": "/host-hostname",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": ""
+      },
+      {
+        "Type": "tmpfs",
+        "Source": "tmpfs",
+        "Destination": "/scratch",
+        "Mode": "noexec,nosuid,nodev",
+        "RW": true,
+        "Propagation": ""
+      }
+    ],
+    "Config": {
+      "Hostname": "fdhost",
+      "User": "101:101",
+      "AttachStdin": false,
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "NGINX_VERSION=1.27.5",
+        "PKG_RELEASE=1",
+        "DYNPKG_RELEASE=1",
+        "NJS_VERSION=0.8.10",
+        "NJS_RELEASE=1",
+        "FOO=bar",
+        "EMPTY=",
+        "HOSTNAME=fdhost"
+      ],
+      "Healthcheck": {
+        "Test": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost/ || exit 1"
+        ],
+        "Interval": 10000000000,
+        "Timeout": 30000000000,
+        "Retries": 2,
+        "StartPeriod": 5000000000
+      },
+      "Image": "docker.io/library/nginx:1.27-alpine",
+      "Labels": {
+        "containerd.io/restart.count": "1",
+        "containerd.io/restart.explicitly-stopped": "false",
+        "containerd.io/restart.loguri": "binary:///usr/local/bin/nerdctl?_NERDCTL_INTERNAL_LOGGING=%2Fvar%2Flib%2Fnerdctl%2F1935db59",
+        "containerd.io/restart.policy": "unless-stopped",
+        "containerd.io/restart.status": "running",
+        "freshdock.enable": "true",
+        "freshdock.mode": "nightly",
+        "io.containerd.image.config.stop-signal": "SIGQUIT",
+        "maintainer": "NGINX Docker Maintainers <docker-maint@nginx.com>",
+        "nerdctl/auto-remove": "false",
+        "nerdctl/dns": "{\"DNSServers\":[\"9.9.9.9\"],\"DNSResolvConfOptions\":null,\"DNSSearchDomains\":null}",
+        "nerdctl/extraHosts": "[\"example.test:10.0.0.9\"]",
+        "nerdctl/healthcheck": "{\"Test\":[\"CMD-SHELL\",\"wget -qO- http://localhost/ || exit 1\"],\"Interval\":10000000000,\"Timeout\":30000000000,\"Retries\":2,\"StartPeriod\":5000000000}",
+        "nerdctl/host-config": "{\"BlkioWeight\":0,\"CidFile\":\"\",\"Devices\":null}",
+        "nerdctl/hostname": "fdhost",
+        "nerdctl/ipc": "{\"mode\":\"private\"}",
+        "nerdctl/log-config": "{\"driver\":\"json-file\",\"opts\":{\"max-size\":\"5m\"},\"address\":\"/run/containerd/containerd.sock\"}",
+        "nerdctl/log-uri": "binary:///usr/local/bin/nerdctl?_NERDCTL_INTERNAL_LOGGING=%2Fvar%2Flib%2Fnerdctl%2F1935db59",
+        "nerdctl/mounts.0": "{\"Type\":\"volume\",\"Name\":\"fdtest-vol\",\"Source\":\"/var/lib/nerdctl/1935db59/volumes/freshdock-test/fdtest-vol/_data\",\"Destination\":\"/data\",\"Driver\":\"local\",\"Mode\":\"\",\"RW\":true,\"Propagation\":\"\"}",
+        "nerdctl/mounts.1": "{\"Type\":\"bind\",\"Source\":\"/etc/hostname\",\"Destination\":\"/host-hostname\",\"Mode\":\"ro\",\"RW\":false,\"Propagation\":\"\"}",
+        "nerdctl/mounts.2": "{\"Type\":\"tmpfs\",\"Source\":\"tmpfs\",\"Destination\":\"/scratch\",\"Mode\":\"noexec,nosuid,nodev\",\"RW\":true,\"Propagation\":\"\"}",
+        "nerdctl/name": "fd-full",
+        "nerdctl/namespace": "freshdock-test",
+        "nerdctl/networks": "[\"fdtest-net\"]",
+        "nerdctl/platform": "linux/amd64",
+        "nerdctl/state-dir": "/var/lib/nerdctl/1935db59/containers/freshdock-test/c5b06b49b252243d79987734a25a6ddc81a186ecbc4209f4035eec36d6231e67",
+        "nerdctl/stop-timeout": "25",
+        "nerdctl/user": "101:101"
+      }
+    },
+    "NetworkSettings": {
+      "Ports": {},
+      "GlobalIPv6Address": "",
+      "GlobalIPv6PrefixLen": 0,
+      "IPAddress": "",
+      "IPPrefixLen": 0,
+      "MacAddress": "",
+      "Networks": {}
+    }
+  }
+]

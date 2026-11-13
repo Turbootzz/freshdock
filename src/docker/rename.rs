@@ -95,7 +95,11 @@ impl super::Docker {
 
 /// Async sibling of [`next_available_old_name`] for the real-daemon case
 /// where the existence check is itself an async API call.
-async fn next_available_old_name_async<F, Fut>(original: &str, ts_unix: i64, exists: F) -> String
+pub(crate) async fn next_available_old_name_async<F, Fut>(
+    original: &str,
+    ts_unix: i64,
+    exists: F,
+) -> String
 where
     F: Fn(&str) -> Fut,
     Fut: std::future::Future<Output = bool>,

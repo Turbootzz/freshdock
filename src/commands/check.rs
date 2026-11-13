@@ -6,21 +6,24 @@ use comfy_table::presets::{NOTHING, UTF8_FULL};
 use futures::future::join_all;
 use tracing::warn;
 
-use crate::config::{CredentialStore, ResolvedSettings};
+use crate::config::{CredentialStore, ResolvedSettings, Runtime, RuntimeSettings};
 use crate::docker::Docker;
 use crate::docker::check::DockerCheck;
+use crate::docker::container::ContainerInfo;
 use crate::errors::AppError;
 use crate::format::short_digest;
 use crate::labels::{self, Mode, PolicyDefaults};
+use crate::nerdctl::Nerdctl;
 use crate::probe::{self, ProbeOutcome, ProbeTarget, pinned_digest};
 use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
-use bollard::models::ContainerSummary;
 
 const AUTH_REQUIRED: &str = "auth required (set credentials)";
 const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
 const NETWORK_UNAVAILABLE: &str = "network unavailable";
 const PINNED: &str = "pinned (no check)";
+const LOCAL_BUILD: &str = "local build (no check)";
+const SOURCE_UNKNOWN: &str = "source unknown (see log)";
 
 /// Run the read-only check: list opted-in containers, fetch latest
 /// digests for those on Docker Hub, and render a status table.
@@ -33,18 +36,22 @@ pub async fn run(
     no_color: bool,
     store: Arc<CredentialStore>,
     settings: ResolvedSettings,
+    runtime: RuntimeSettings,
 ) -> Result<(), AppError> {
-    // Built before the Docker connect so a missing CA store fails the start.
+    // Built before the runtime connect so a missing CA store fails the start.
     let registry = OciRegistry::new(store.clone())?;
-    let docker = Docker::connect(store).await?;
     let own_id_prefix = crate::selfid::own_container_id_prefix();
-    let cells = collect_cells(
-        &docker,
-        &registry,
-        settings.policy_defaults(),
-        own_id_prefix.as_deref(),
-    )
-    .await?;
+    let defaults = settings.policy_defaults();
+    let cells = match runtime.runtime {
+        Runtime::Docker => {
+            let docker = Docker::connect(store).await?;
+            collect_cells(&docker, &registry, defaults, own_id_prefix.as_deref()).await?
+        }
+        Runtime::Nerdctl => {
+            let nerdctl = Nerdctl::connect(&runtime, store).await?;
+            collect_cells(&nerdctl, &registry, defaults, own_id_prefix.as_deref()).await?
+        }
+    };
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));
@@ -68,7 +75,7 @@ async fn collect_cells(
 
     let empty = HashMap::new();
 
-    let mut pending: Vec<(String, Mode, ContainerSummary)> = Vec::new();
+    let mut pending: Vec<(String, Mode, ContainerInfo)> = Vec::new();
     for c in containers {
         let lbls = c.labels.as_ref().unwrap_or(&empty);
         // Warn-and-skip like the scheduler: one bad label (on any container,
@@ -207,6 +214,8 @@ fn render_cells(
             let current = pinned_digest(image).map(short_digest).unwrap_or_else(dash);
             (current, PINNED.to_string(), dash())
         }
+        ProbeOutcome::LocalBuild => (dash(), LOCAL_BUILD.to_string(), dash()),
+        ProbeOutcome::SourceUnknown => (dash(), SOURCE_UNKNOWN.to_string(), dash()),
         ProbeOutcome::AuthRequired => (dash(), AUTH_REQUIRED.to_string(), dash()),
         ProbeOutcome::CredentialsRejected => (dash(), CREDENTIALS_REJECTED.to_string(), dash()),
         ProbeOutcome::NetworkUnavailable => (dash(), NETWORK_UNAVAILABLE.to_string(), dash()),
@@ -303,8 +312,8 @@ mod tests {
     const DIG_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const DIG_C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerInfo {
+        ContainerInfo {
             names: Some(vec![format!("/{name}")]),
             id: Some(format!("id-{name}")),
             image: Some(image.to_owned()),
@@ -321,7 +330,7 @@ mod tests {
     /// Recording fake daemon: serves a fixed container list + per-image
     /// `LocalImage`s, and counts `inspect_image` calls for the dedupe contract.
     struct FakeDocker {
-        containers: Vec<ContainerSummary>,
+        containers: Vec<ContainerInfo>,
         images: HashMap<String, LocalImage>,
         config_images: HashMap<String, String>,
         failing: HashSet<String>,
@@ -329,7 +338,7 @@ mod tests {
     }
 
     impl FakeDocker {
-        fn new(containers: Vec<ContainerSummary>, repo_digests: &[(&str, &str)]) -> Self {
+        fn new(containers: Vec<ContainerInfo>, repo_digests: &[(&str, &str)]) -> Self {
             let one_each: Vec<(&str, &[&str])> = repo_digests
                 .iter()
                 .map(|(img, rd)| (*img, std::slice::from_ref(rd)))
@@ -338,10 +347,7 @@ mod tests {
         }
         /// Images recorded under several manifest digests each — what a
         /// republished multi-arch index leaves behind (#74).
-        fn with_digests(
-            containers: Vec<ContainerSummary>,
-            repo_digests: &[(&str, &[&str])],
-        ) -> Self {
+        fn with_digests(containers: Vec<ContainerInfo>, repo_digests: &[(&str, &[&str])]) -> Self {
             Self {
                 containers,
                 images: repo_digests
@@ -350,6 +356,7 @@ mod tests {
                         (
                             (*img).to_owned(),
                             LocalImage {
+                                source_unknown: false,
                                 id: None,
                                 repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
                             },
@@ -380,12 +387,15 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeDocker {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             Ok(self.containers.clone())
         }
         async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
             self.inspect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.images.get(image).cloned().unwrap_or_default())
+            self.images
+                .get(image)
+                .cloned()
+                .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
         }
         async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
             if self.failing.contains(id) {
@@ -545,9 +555,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locally_built_image_with_no_repo_digests_renders_unknown() {
-        // Nothing to compare against: report `?`, never `yes` — recreating
-        // would replace a local build with an unrelated registry image.
+    async fn locally_built_image_is_reported_without_asking_the_registry() {
+        // Nothing to compare against: never `yes` — recreating would replace a
+        // local build with an unrelated registry image. Nor is the registry
+        // asked: it would deny a repository that doesn't exist, as needing
+        // credentials.
         let docker = FakeDocker::with_digests(
             vec![summary("app", "myapp:dev", &[("freshdock.enable", "true")])],
             &[("myapp:dev", &[])],
@@ -558,7 +570,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cells[0][3], "-", "no current digest is known");
-        assert_eq!(cells[0][5], "?");
+        assert_eq!(cells[0][4], LOCAL_BUILD);
+        assert_eq!(cells[0][5], "-");
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -665,8 +679,8 @@ mod tests {
     }
 
     /// Give a summary a fixed container id, for the self-guard tests.
-    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_id(summary: ContainerInfo, id: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             ..summary
         }
@@ -780,8 +794,8 @@ mod tests {
         image: &str,
         image_id: Option<&str>,
         labels: &[(&str, &str)],
-    ) -> ContainerSummary {
-        ContainerSummary {
+    ) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             image_id: image_id.map(str::to_owned),
             ..summary(name, image, labels)
@@ -880,7 +894,7 @@ mod tests {
     #[tokio::test]
     async fn missing_image_in_the_listing_renders_a_placeholder() {
         let docker = FakeDocker::new(
-            vec![ContainerSummary {
+            vec![ContainerInfo {
                 image: None,
                 ..summary("web", "ignored", &[("freshdock.enable", "true")])
             }],

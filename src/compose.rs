@@ -62,8 +62,9 @@ pub struct ComposeInfo {
     pub depends_on: Vec<Dependency>,
 }
 
-/// One container of a compose project, as the rollout planner needs it. Not
-/// bollard's `ContainerSummary`, so the planner stays free of daemon types.
+/// One container of a compose project, as the rollout planner needs it. Not a
+/// listing row ([`ContainerInfo`](crate::docker::container::ContainerInfo)), so
+/// the planner only sees what it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMember {
     pub name: String,

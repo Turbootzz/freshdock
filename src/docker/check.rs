@@ -1,5 +1,5 @@
+use crate::docker::container::ContainerInfo;
 use async_trait::async_trait;
-use bollard::models::ContainerSummary;
 
 use super::{Docker, DockerError};
 
@@ -10,6 +10,10 @@ pub struct LocalImage {
     pub id: Option<String>,
     /// `RepoDigests` as reported, `repo@sha256:<hex>` entries.
     pub repo_digests: Vec<String>,
+    /// The runtime could not tell whether the image came from a registry,
+    /// so `repo_digests` says nothing about it (nerdctl without a working
+    /// `ctr`). Never set by Docker, whose `RepoDigests` answer that itself.
+    pub source_unknown: bool,
 }
 
 /// The identity of a running container: its reference and the image it runs.
@@ -30,7 +34,7 @@ pub struct ContainerImage {
 /// uses.
 #[async_trait]
 pub trait DockerCheck {
-    async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError>;
+    async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError>;
     /// Inspect a local image by reference or id. An unknown image is an error.
     async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError>;
     /// Inspect a container for its `Config.Image` and the id of the image it runs.
@@ -39,7 +43,7 @@ pub trait DockerCheck {
 
 #[async_trait]
 impl DockerCheck for Docker {
-    async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+    async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
         // Explicit `Docker::` path forwards to the inherent method of the same
         // name (inherent impls win path resolution), so this is not recursive.
         Docker::list_running(self).await

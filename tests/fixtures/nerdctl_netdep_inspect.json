@@ -1,0 +1,164 @@
+[
+  {
+    "Id": "ccaf33aa4167e0c0dc05b622bc3237a6ddddae1a48ade08964e4fe3b17ce4706",
+    "Created": "2026-09-25T18:52:17.984643033Z",
+    "Path": "sleep",
+    "Args": [
+      "100000"
+    ],
+    "State": {
+      "Status": "running",
+      "Running": true,
+      "Paused": false,
+      "Restarting": false,
+      "Pid": 193793,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-09-25T18:52:18.045010666Z",
+      "FinishedAt": ""
+    },
+    "Image": "docker.io/library/alpine:3.20",
+    "ResolvConfPath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/resolv.conf",
+    "HostnamePath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/hostname",
+    "HostsPath": "/var/lib/nerdctl/1935db59/etchosts/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/hosts",
+    "LogPath": "/var/lib/nerdctl/1935db59/containers/freshdock-test/ccaf33aa4167e0c0dc05b622bc3237a6ddddae1a48ade08964e4fe3b17ce4706/ccaf33aa4167e0c0dc05b622bc3237a6ddddae1a48ade08964e4fe3b17ce4706-json.log",
+    "Name": "fd-netdep",
+    "RestartCount": 0,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "AppArmorProfile": "nerdctl-default",
+    "HostConfig": {
+      "ContainerIDFile": "",
+      "LogConfig": {
+        "driver": "json-file",
+        "address": "/run/containerd/containerd.sock"
+      },
+      "NetworkMode": "container:b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8",
+      "PortBindings": {},
+      "RestartPolicy": {
+        "Name": "",
+        "MaximumRetryCount": 0
+      },
+      "AutoRemove": false,
+      "CapAdd": [],
+      "CapDrop": [],
+      "CgroupnsMode": "private",
+      "Dns": null,
+      "DnsOptions": null,
+      "DnsSearch": null,
+      "ExtraHosts": [],
+      "GroupAdd": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "6",
+        "10",
+        "11",
+        "20",
+        "26",
+        "27"
+      ],
+      "IpcMode": "private",
+      "OomScoreAdj": 0,
+      "PidMode": "",
+      "Privileged": false,
+      "ReadonlyRootfs": false,
+      "UTSMode": "",
+      "ShmSize": 0,
+      "Sysctls": {
+        "net.ipv4.ip_unprivileged_port_start": "0"
+      },
+      "Runtime": "io.containerd.runc.v2",
+      "CpusetMems": "",
+      "CpusetCpus": "",
+      "CpuQuota": 0,
+      "CpuShares": 0,
+      "CpuPeriod": 0,
+      "CpuRealtimePeriod": 0,
+      "CpuRealtimeRuntime": 0,
+      "Memory": 0,
+      "MemorySwap": 0,
+      "MemoryReservation": 0,
+      "MemorySwappiness": null,
+      "PidsLimit": 0,
+      "Ulimits": null,
+      "OomKillDisable": false,
+      "Devices": null,
+      "BlkioWeight": 0,
+      "BlkioWeightDevice": [],
+      "BlkioDeviceReadBps": [],
+      "BlkioDeviceWriteBps": [],
+      "BlkioDeviceReadIOps": [],
+      "BlkioDeviceWriteIOps": []
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/var/lib/nerdctl/1935db59/containers/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/resolv.conf",
+        "Destination": "/etc/resolv.conf",
+        "Mode": "bind,rprivate",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/var/lib/nerdctl/1935db59/etchosts/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/hosts",
+        "Destination": "/etc/hosts",
+        "Mode": "bind,rprivate",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/var/lib/nerdctl/1935db59/containers/freshdock-test/b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8/hostname",
+        "Destination": "/etc/hostname",
+        "Mode": "bind,rprivate",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ],
+    "Config": {
+      "Hostname": "b196d3ba3a8a",
+      "AttachStdin": false,
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOSTNAME="
+      ],
+      "Image": "docker.io/library/alpine:3.20",
+      "Labels": {
+        "containerd.io/restart.explicitly-stopped": "false",
+        "io.containerd.image.config.stop-signal": "SIGTERM",
+        "nerdctl/auto-remove": "false",
+        "nerdctl/dns": "{\"DNSServers\":null,\"DNSResolvConfOptions\":null,\"DNSSearchDomains\":null}",
+        "nerdctl/extraHosts": "[]",
+        "nerdctl/host-config": "{\"BlkioWeight\":0,\"CidFile\":\"\",\"Devices\":null}",
+        "nerdctl/ipc": "{\"mode\":\"private\"}",
+        "nerdctl/log-config": "{\"driver\":\"json-file\",\"address\":\"/run/containerd/containerd.sock\"}",
+        "nerdctl/log-uri": "binary:///usr/local/bin/nerdctl?_NERDCTL_INTERNAL_LOGGING=%2Fvar%2Flib%2Fnerdctl%2F1935db59",
+        "nerdctl/name": "fd-netdep",
+        "nerdctl/namespace": "freshdock-test",
+        "nerdctl/networks": "[\"container:b196d3ba3a8a5e7d4b54a070f45d7522286de1aad1c1a875a478627a2aad79e8\"]",
+        "nerdctl/platform": "linux/amd64",
+        "nerdctl/state-dir": "/var/lib/nerdctl/1935db59/containers/freshdock-test/ccaf33aa4167e0c0dc05b622bc3237a6ddddae1a48ade08964e4fe3b17ce4706"
+      }
+    },
+    "NetworkSettings": {
+      "Ports": {},
+      "GlobalIPv6Address": "",
+      "GlobalIPv6PrefixLen": 0,
+      "IPAddress": "10.4.0.6",
+      "IPPrefixLen": 24,
+      "MacAddress": "46:19:2d:a6:e6:d7",
+      "Networks": {
+        "unknown-eth0": {
+          "IPAddress": "10.4.0.6",
+          "IPPrefixLen": 24,
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "MacAddress": "46:19:2d:a6:e6:d7"
+        }
+      }
+    }
+  }
+]

@@ -208,6 +208,10 @@ rollout complete: 3 step(s)
   deployment. The graph in the labels is enough.
 - Scaled services (`--scale`) are handled: every replica of a target service is
   updated, in name order.
+- Not on nerdctl. nerdctl compose writes only the project and service labels, not
+  `depends_on` or `oneoff`, so there is no graph to follow. With
+  `runtime = "nerdctl"`, `compose_aware` is turned off and every container is
+  updated on its own. See [Deployment: with nerdctl](deployment.md#what-is-different-on-nerdctl).
 
 ## See also
 

@@ -50,7 +50,7 @@ Anything else leaves the container untouched, running its old image:
 |---|---|
 | Exit code `75` (`EX_TEMPFAIL`, Watchtower-compatible) | The polite "not now": the app is mid-backup, mid-migration, or has active sessions. freshdock logs the deferral at `info` and tries again the next time the container is due. |
 | Any other non-zero exit | Logged as a warning, update skipped. |
-| Timeout | Logged as a warning, update skipped. Docker has no way to kill an exec, so the command itself keeps running inside the container; only the verdict is decided. |
+| Timeout | Logged as a warning, update skipped. Docker has no way to kill an exec, so the command itself keeps running inside the container; only the verdict is decided. The same holds on nerdctl: freshdock stops waiting, and the command runs on to completion. |
 | Exec failure (no `sh` in the image, daemon error) | Logged as a warning, update skipped. |
 
 The skip is not an error: `freshdock recreate` reports it and exits `0`, and the

@@ -90,6 +90,51 @@ jobs:
       - name: Live daemon gate
         run: just live
 
+  nerdctl-integration:
+    name: Live nerdctl gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      NERDCTL_VERSION: "2.3.4"
+      # sha256 of nerdctl-full-2.3.4-linux-amd64.tar.gz, pinned here rather than
+      # read from the same release, so a replaced asset fails the job. Update it
+      # together with NERDCTL_VERSION.
+      NERDCTL_SHA256: "40a80a6eec6fc4f225473a87946c2098821b6ec31becef0120c8a50d7b4e432c"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: just
+
+      # The runner's containerd belongs to Docker and may be older than the
+      # bundle's. Replace it with the nerdctl-full bundle (containerd, CNI and
+      # nerdctl together); its unit in /usr/local takes precedence over the
+      # packaged one. The download is checked against the pinned NERDCTL_SHA256.
+      - name: Install nerdctl (full bundle)
+        run: |
+          base="https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}"
+          file="nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "$base/$file"
+          echo "$NERDCTL_SHA256  $file" | sha256sum -c -
+          sudo systemctl stop docker.socket docker.service containerd.service || true
+          sudo tar -C /usr/local -xzf "$file"
+          sudo systemctl daemon-reload
+          sudo systemctl restart containerd
+          sudo nerdctl version
+
+      # Runs the #[ignore]d nerdctl tests as root; they opt in through
+      # FRESHDOCK_NERDCTL_LIVE, which the recipe sets.
+      - name: Live nerdctl gate
+        run: just live-nerdctl
+
   cross-compile:
     name: Cross-compile (${{ matrix.target }})
     runs-on: ubuntu-latest

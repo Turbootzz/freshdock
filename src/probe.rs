@@ -3,13 +3,14 @@
 //! registry, and returns a [`ProbeOutcome`] each caller turns into a verdict.
 //!
 //! Routing: digest-pinned refs (`sha256:<id>` or `repo@sha256:<id>`) return
-//! [`ProbeOutcome::Pinned`] before any registry call (issue #27); every other
+//! [`ProbeOutcome::Pinned`] before any registry call (issue #27), and so does
+//! an image with no registry digest ([`ProbeOutcome::LocalBuild`]); every other
 //! ref goes to the registry, which resolves the host and runs the bearer-token
 //! flow. A registry that needs (or rejects) credentials surfaces as
 //! [`ProbeOutcome::AuthRequired`].
 
-use bollard::models::ContainerSummary;
-use tracing::warn;
+use crate::docker::container::ContainerInfo;
+use tracing::{debug, warn};
 
 use crate::docker::DockerError;
 use crate::docker::check::DockerCheck;
@@ -80,6 +81,15 @@ pub enum ProbeOutcome {
     },
     /// The reference is pinned to a digest — there is nothing to check.
     Pinned,
+    /// The runtime can't tell whether the image came from a registry (nerdctl
+    /// without a working `ctr`), so nothing is compared and the registry isn't
+    /// asked. Distinct from [`LocalBuild`](Self::LocalBuild), which is known.
+    SourceUnknown,
+    /// The image carries no digest from its registry: built, committed or
+    /// loaded on this host. Nothing upstream can be compared with it, so the
+    /// registry isn't asked (it would answer for an unrelated image, or deny
+    /// a repository that doesn't exist).
+    LocalBuild,
     /// The registry needs credentials we don't have. Reported, not errored —
     /// set `[registry.<name>]` creds.
     AuthRequired,
@@ -117,7 +127,7 @@ impl ProbeTarget {
 /// image id is `Config.Image` verbatim, so it needs no inspect.
 pub async fn resolve_target(
     docker: &impl DockerCheck,
-    container: &ContainerSummary,
+    container: &ContainerInfo,
 ) -> Result<ProbeTarget, DockerError> {
     let image = container
         .image
@@ -160,14 +170,21 @@ pub async fn probe_image(
         return ProbeOutcome::Pinned;
     }
 
-    // ContainerSummary.image_id is the image *config* digest, not the *manifest*
+    // ContainerInfo.image_id is the image *config* digest, not the *manifest*
     // digest the registry returns via Docker-Content-Digest. Resolve the local
     // manifest digest from `image inspect → RepoDigests`.
     let (local, tag_image_id) = match docker.inspect_image(image).await {
-        Ok(img) => (
-            LocalDigests::new(local_manifest_digests(image, &img.repo_digests)),
-            img.id,
-        ),
+        Ok(img) => {
+            if img.source_unknown {
+                return ProbeOutcome::SourceUnknown;
+            }
+            let digests = local_manifest_digests(image, &img.repo_digests);
+            if digests.is_empty() {
+                debug!(image = %image, "no registry digest; a local build, nothing to check");
+                return ProbeOutcome::LocalBuild;
+            }
+            (LocalDigests::new(digests), img.id)
+        }
         Err(e) => {
             warn!(image = %image, error = %e, "image inspect failed; current digest will be unknown");
             (LocalDigests::default(), None)
@@ -260,9 +277,9 @@ pub(crate) fn strip_tag(image_no_digest: &str) -> &str {
 mod tests {
     use super::*;
     use crate::docker::check::{ContainerImage, LocalImage};
+    use crate::docker::container::ContainerInfo;
     use crate::registry::Digest;
     use async_trait::async_trait;
-    use bollard::models::ContainerSummary;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -563,6 +580,7 @@ mod tests {
                         (
                             (*img).to_owned(),
                             LocalImage {
+                                source_unknown: false,
                                 id: None,
                                 repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
                             },
@@ -599,12 +617,15 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeDocker {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             Ok(vec![])
         }
         async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
             self.inspect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.images.get(image).cloned().unwrap_or_default())
+            self.images
+                .get(image)
+                .cloned()
+                .ok_or_else(|| DockerError::NotFound(format!("no such image: {image}")))
         }
         async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
             self.container_inspects.fetch_add(1, Ordering::SeqCst);
@@ -710,6 +731,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_build_is_never_looked_up() {
+        // Inspected fine, but no registry digest: built on this host.
+        let docker = FakeDocker::with_digests(&[("lore-server:latest", &[])]);
+        let registry = FakeRegistry::auth_required();
+        let outcome = probe_image(&docker, &registry, "lore-server:latest").await;
+        assert_eq!(outcome, ProbeOutcome::LocalBuild);
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_image_of_unknown_source_is_never_looked_up() {
+        // Not a local build as far as anyone knows, but nothing to compare
+        // either: say so, rather than claim it was built here.
+        let mut docker = FakeDocker::with_digests(&[("alpine:3.19", &[])]);
+        docker.images.get_mut("alpine:3.19").unwrap().source_unknown = true;
+        let registry = FakeRegistry::new(DIG_A);
+        let outcome = probe_image(&docker, &registry, "alpine:3.19").await;
+        assert_eq!(outcome, ProbeOutcome::SourceUnknown);
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_image_that_cannot_be_inspected_is_still_looked_up() {
+        // Not a local build as far as anyone knows: report what upstream has.
+        let docker = FakeDocker::new(&[]);
+        let registry = FakeRegistry::new(DIG_A);
+        let outcome = probe_image(&docker, &registry, "alpine:3.19").await;
+        assert!(
+            matches!(outcome, ProbeOutcome::Fetched { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn registry_auth_error_maps_to_auth_required() {
         let docker = FakeDocker::new(&[]);
         let registry = FakeRegistry::auth_required();
@@ -732,8 +788,8 @@ mod tests {
     const OLD_ID: &str = "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
     const NEW_ID: &str = "sha256:0e7f2f0e2e8b4a4b8c3d1a5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
 
-    fn summary(id: &str, image: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(id: &str, image: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             image: Some(image.to_owned()),
             ..Default::default()
@@ -828,7 +884,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_target_uses_the_listing_when_it_names_a_reference() {
         let docker = FakeDocker::new(&[]);
-        let summary = ContainerSummary {
+        let summary = ContainerInfo {
             image_id: Some(OLD_ID.to_owned()),
             ..summary("c1", "nginx:alpine")
         };
@@ -852,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_target_errors_when_the_listing_has_no_image() {
         let docker = FakeDocker::new(&[]);
-        let summary = ContainerSummary {
+        let summary = ContainerInfo {
             image: None,
             ..summary("c1", "ignored")
         };

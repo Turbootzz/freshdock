@@ -4,12 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use crate::config::{CredentialStore, ResolvedSettings};
+use crate::config::{CredentialStore, ResolvedSettings, Runtime, RuntimeSettings};
 use crate::docker::Docker;
 use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe, TokioClock};
 use crate::labels::{self, Mode};
+use crate::nerdctl::Nerdctl;
 use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
 
@@ -55,17 +56,40 @@ pub async fn run(
     name: String,
     credentials: Arc<CredentialStore>,
     settings: ResolvedSettings,
+    runtime: RuntimeSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(credentials).await?;
-    run_with(
-        &docker,
-        &name,
-        &HealthConfig::default(),
-        &TokioClock,
-        settings,
-        current_unix_timestamp,
-    )
-    .await
+    let health = HealthConfig::default();
+    match runtime.runtime {
+        Runtime::Docker => {
+            let docker = Docker::connect(credentials).await?;
+            run_with(
+                &docker,
+                &name,
+                &health,
+                &TokioClock,
+                settings,
+                current_unix_timestamp,
+            )
+            .await
+        }
+        Runtime::Nerdctl => {
+            let nerdctl = Nerdctl::connect(&runtime, credentials).await?;
+            nerdctl.sweep_or_warn().await;
+            nerdctl.note_running().await;
+            let result = run_with(
+                &nerdctl,
+                &name,
+                &health,
+                &TokioClock,
+                settings,
+                current_unix_timestamp,
+            )
+            .await;
+            // The daemon does this on every pass; a one-off run has only now.
+            nerdctl.release_unneeded_images().await;
+            result
+        }
+    }
 }
 
 /// Testable core of `recreate`: parameterised over the daemon ops, health
@@ -83,10 +107,7 @@ pub async fn run_with(
     let spec = docker.inspect(name).await?;
 
     let empty: HashMap<String, String> = HashMap::new();
-    let policy = labels::parse_policy(
-        spec.config.labels.as_ref().unwrap_or(&empty),
-        settings.policy_defaults(),
-    )?;
+    let policy = labels::parse_policy(spec.labels().unwrap_or(&empty), settings.policy_defaults())?;
     if !policy.enabled || policy.mode == Mode::Off {
         return Err(RecreateError::NotOptedIn {
             container: name.to_owned(),
@@ -96,7 +117,7 @@ pub async fn run_with(
         .into());
     }
 
-    for note in labels::watchtower_diagnostics(spec.config.labels.as_ref().unwrap_or(&empty)) {
+    for note in labels::watchtower_diagnostics(spec.labels().unwrap_or(&empty)) {
         warn!(container = %name, %note, "watchtower label");
     }
 
@@ -106,7 +127,7 @@ pub async fn run_with(
         && let Some(report) = rollout::for_container(
             docker,
             &spec.name,
-            spec.config.labels.as_ref().unwrap_or(&empty),
+            spec.labels().unwrap_or(&empty),
             &RolloutConfig {
                 health: health.clone(),
                 prune_dangling: settings.prune_dangling,
@@ -265,12 +286,14 @@ mod tests {
                 name: name.to_owned(),
                 image_ref: "nginx:alpine".to_owned(),
                 image_id: None,
-                config: ContainerConfig {
-                    labels: self.labels.clone(),
-                    ..Default::default()
-                },
-                host_config: None,
-                network_endpoints: None,
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: ContainerConfig {
+                        labels: self.labels.clone(),
+                        ..Default::default()
+                    },
+                    host_config: None,
+                    network_endpoints: None,
+                }),
             })
         }
         async fn pull(&self, _image_ref: &ImageRef) -> Result<(), DockerError> {

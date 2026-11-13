@@ -75,12 +75,30 @@ struct ContainerState {
     next_fire: Option<DateTime<Local>>,
     /// Parsed effective cron, cached so it's parsed once.
     cron: Option<CronExpr>,
-    /// Upstream digest of the last `watch`-mode "update available" notification,
-    /// so the same available update isn't re-announced every poll (it would
-    /// otherwise notify every `poll_interval` until the user acts).
-    last_notified_digest: Option<String>,
+    /// What `watch` mode already announced, so an update that stays available
+    /// isn't re-announced every `poll_interval` until the user acts.
+    announced: Announced,
     /// The unknown-local-digest warning was logged; cleared once a digest is known.
     unknown_digest_warned: bool,
+}
+
+/// The upstream digests one `watch` container's available update was last
+/// announced for.
+#[derive(Debug, Default)]
+struct Announced {
+    /// Logged at INFO; later polls of the same digest log at debug.
+    logged: Option<String>,
+    /// Sent as an "update available" notification.
+    notified: Option<String>,
+}
+
+/// Record `latest` as announced; true the first time it is seen.
+fn first_announcement(last: &mut Option<String>, latest: &str) -> bool {
+    if last.as_deref() == Some(latest) {
+        return false;
+    }
+    *last = Some(latest.to_owned());
+    true
 }
 
 /// Resolve the effective cron for a policy: explicit `freshdock.schedule`
@@ -112,7 +130,7 @@ fn seed_state(policy: &Policy, name: &str, now: DateTime<Local>) -> ContainerSta
         last_checked: None,
         next_fire,
         cron,
-        last_notified_digest: None,
+        announced: Announced::default(),
         unknown_digest_warned: false,
     }
 }
@@ -330,7 +348,7 @@ async fn run_tick<D, R>(
             &target,
             dispatcher,
             failed.get(&name).cloned(),
-            &mut state.last_notified_digest,
+            &mut state.announced,
             settings,
         )
         .await;
@@ -338,7 +356,7 @@ async fn run_tick<D, R>(
         let unknown_digest = processed.verdicts.contains(&Verdict::UnknownDigest);
         // A watch_all bystander (a local build, say) is expected to have none.
         if unknown_digest && !state.unknown_digest_warned && !policy.auto_enabled {
-            warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, or no RepoDigests entry for this reference); updates cannot be detected");
+            warn!(container = %name, image = %target.image, "scheduler: no local digest to compare against (locally built, no RepoDigests entry for this reference, or on nerdctl no working ctr); updates cannot be detected");
         }
         if unknown_digest {
             state.unknown_digest_warned = true;
@@ -536,7 +554,7 @@ async fn process_container<D, R>(
     target: &ProbeTarget,
     dispatcher: &Dispatcher,
     last_failed: Option<String>,
-    last_notified: &mut Option<String>,
+    announced: &mut Announced,
     settings: ResolvedSettings,
 ) -> Processed
 where
@@ -566,10 +584,14 @@ where
             }
             match policy.mode {
                 Mode::Watch => {
-                    info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
+                    if first_announcement(&mut announced.logged, &latest) {
+                        info!(container = %name, %latest, event = "update_available", "scheduler: update available (watch mode — not applied)");
+                    } else {
+                        debug!(container = %name, %latest, "scheduler: update still available (watch mode — not applied)");
+                    }
                     // Only notify once per distinct upstream digest, or a watched
                     // update would re-alert every poll until the user acts.
-                    if policy.notify && last_notified.as_deref() != Some(latest.as_str()) {
+                    if policy.notify && announced.notified.as_deref() != Some(latest.as_str()) {
                         dispatcher
                             .dispatch(&NotifyEvent::UpdateAvailable {
                                 container: name.to_string(),
@@ -577,7 +599,7 @@ where
                                 latest_digest: latest.clone(),
                             })
                             .await;
-                        *last_notified = Some(latest.clone());
+                        announced.notified = Some(latest.clone());
                     }
                     Verdict::Available
                 }
@@ -614,6 +636,18 @@ where
         ProbeOutcome::Pinned => {
             debug!(container = %name, "scheduler: image pinned to a digest (no check)");
             Verdict::Pinned
+        }
+        // No registry digest to compare against: the tick warns once for a
+        // labelled container, as for any unknown local digest.
+        ProbeOutcome::LocalBuild => {
+            debug!(container = %name, "scheduler: locally built image (no check)");
+            Verdict::UnknownDigest
+        }
+        // As good as no local digest: the tick warns once for a labelled
+        // container, and the startup warning about ctr names the cause.
+        ProbeOutcome::SourceUnknown => {
+            debug!(container = %name, "scheduler: cannot tell whether the image came from a registry (is ctr working?)");
+            Verdict::UnknownDigest
         }
         ProbeOutcome::AuthRequired => {
             warn!(container = %name, "scheduler: registry requires credentials; set [registry.<name>] creds — not updating");
@@ -832,11 +866,12 @@ mod tests {
     use super::*;
     use crate::docker::DockerError;
     use crate::docker::check::{ContainerImage, LocalImage};
+    use crate::docker::container::ContainerInfo;
     use crate::docker::spec::ContainerSpec;
     use crate::health::{ContainerRuntimeState, TokioClock};
     use crate::registry::{Digest, ImageRef, RegistryError};
     use async_trait::async_trait;
-    use bollard::models::{ContainerConfig, ContainerSummary};
+    use bollard::models::ContainerConfig;
     use chrono::TimeZone;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -946,8 +981,8 @@ mod tests {
 
     // --- run_tick behaviour with a recording fake ---
 
-    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
-        ContainerSummary {
+    fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerInfo {
+        ContainerInfo {
             names: Some(vec![format!("/{name}")]),
             id: Some(format!("id-{name}")),
             image: Some(image.to_owned()),
@@ -965,7 +1000,7 @@ mod tests {
     /// serves a fixed container list + local digest, reports healthy, and
     /// counts `create_from_spec` calls so "did a recreate happen?" is checkable.
     struct FakeNode {
-        containers: Mutex<Vec<ContainerSummary>>,
+        containers: Mutex<Vec<ContainerInfo>>,
         /// Every digest the local image is recorded under — a list so the
         /// republished-index case (#74) is expressible.
         local_digests: Vec<String>,
@@ -992,12 +1027,12 @@ mod tests {
     }
 
     impl FakeNode {
-        fn new(containers: Vec<ContainerSummary>, local_digest: &str) -> Self {
+        fn new(containers: Vec<ContainerInfo>, local_digest: &str) -> Self {
             Self::with_digests(containers, &[local_digest])
         }
         /// The image recorded under several manifest digests, as a republished
         /// multi-arch index leaves it (#74).
-        fn with_digests(containers: Vec<ContainerSummary>, local_digests: &[&str]) -> Self {
+        fn with_digests(containers: Vec<ContainerInfo>, local_digests: &[&str]) -> Self {
             Self {
                 containers: Mutex::new(containers),
                 local_digests: local_digests.iter().map(|d| (*d).to_owned()).collect(),
@@ -1081,7 +1116,7 @@ mod tests {
 
     #[async_trait]
     impl DockerCheck for FakeNode {
-        async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
+        async fn list_running(&self) -> Result<Vec<ContainerInfo>, DockerError> {
             if self.list_fails {
                 Err(err())
             } else {
@@ -1097,6 +1132,7 @@ mod tests {
             // RepoDigests match succeeds.
             let repo = image.split(':').next().unwrap_or(image);
             Ok(LocalImage {
+                source_unknown: false,
                 id: None,
                 repo_digests: self
                     .local_digests
@@ -1138,9 +1174,11 @@ mod tests {
                 name: name.to_owned(),
                 image_ref: "alpine:3.19".to_owned(),
                 image_id: Some("sha256:oldimg".to_owned()),
-                config: ContainerConfig::default(),
-                host_config: None,
-                network_endpoints: None,
+                body: crate::docker::spec::SpecBody::Docker(crate::docker::spec::DockerSpec {
+                    config: ContainerConfig::default(),
+                    host_config: None,
+                    network_endpoints: None,
+                }),
             })
         }
         async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
@@ -1428,6 +1466,11 @@ mod tests {
         let reg = FakeRegistry::new(DIG_B);
         one_tick(&node, &reg).await;
         assert_eq!(node.creates(), 0, "an unknown local digest must not update");
+        assert_eq!(
+            reg.calls.load(Ordering::SeqCst),
+            0,
+            "nor is the registry asked about it"
+        );
     }
 
     #[tokio::test]
@@ -1793,12 +1836,12 @@ mod tests {
     const COMPOSE_IMAGE: &str = "app:latest";
 
     /// A running, live-mode compose member of project `stack`.
-    fn compose_summary(service: &str, deps: &str) -> ContainerSummary {
+    fn compose_summary(service: &str, deps: &str) -> ContainerInfo {
         compose_summary_with(service, deps, &[])
     }
 
     /// As [`compose_summary`], plus any extra freshdock labels.
-    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerSummary {
+    fn compose_summary_with(service: &str, deps: &str, extra: &[(&str, &str)]) -> ContainerInfo {
         let mut labels = vec![
             ("freshdock.enable", "true"),
             ("freshdock.mode", "live"),
@@ -1811,7 +1854,7 @@ mod tests {
     }
 
     /// The same container as `list_project` reports it.
-    fn compose_member(summary: &ContainerSummary) -> crate::compose::ProjectMember {
+    fn compose_member(summary: &ContainerInfo) -> crate::compose::ProjectMember {
         crate::compose::ProjectMember {
             name: container_name(summary),
             id: summary.id.clone().unwrap_or_default(),
@@ -1822,7 +1865,7 @@ mod tests {
         }
     }
 
-    fn compose_node() -> (FakeNode, Vec<ContainerSummary>) {
+    fn compose_node() -> (FakeNode, Vec<ContainerInfo>) {
         let running = vec![compose_summary("web", ""), compose_summary("worker", "")];
         let members = running.iter().map(compose_member).collect();
         (
@@ -1974,16 +2017,16 @@ mod tests {
     }
 
     /// Give a summary a fixed container id, for the self-guard tests.
-    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_id(summary: ContainerInfo, id: &str) -> ContainerInfo {
+        ContainerInfo {
             id: Some(id.to_owned()),
             ..summary
         }
     }
 
     /// Give a summary the id of the image it actually runs.
-    fn with_image_id(summary: ContainerSummary, image_id: &str) -> ContainerSummary {
-        ContainerSummary {
+    fn with_image_id(summary: ContainerInfo, image_id: &str) -> ContainerInfo {
+        ContainerInfo {
             image_id: Some(image_id.to_owned()),
             ..summary
         }
@@ -2146,7 +2189,7 @@ mod tests {
         );
     }
 
-    fn live_labels_for(name: &str, image: &str) -> ContainerSummary {
+    fn live_labels_for(name: &str, image: &str) -> ContainerInfo {
         summary(
             name,
             image,
@@ -2345,6 +2388,7 @@ mod tests {
         let known = LocalImage {
             id: None,
             repo_digests: vec![format!("built@{DIG_A}")],
+            source_unknown: false,
         };
         let mut st = TickState::default();
         let out = capture_logs(async {
@@ -2425,6 +2469,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_unknown_image_source_warns_once_across_ticks() {
+        // nerdctl without a working ctr: nothing to compare, as with no local
+        // digest, and no warning every poll either.
+        let node = FakeNode::new(vec![live_labels_for("app", "alpine:3.19")], DIG_A).with_image(
+            "alpine:3.19",
+            LocalImage {
+                source_unknown: true,
+                ..LocalImage::default()
+            },
+        );
+        let reg = FakeRegistry::new(DIG_B);
+        let mut st = TickState::default();
+        // A quiet live poll logs its summary at debug (#106).
+        let out = capture_logs_at(tracing::Level::DEBUG, async {
+            for _ in 0..3 {
+                one_tick_cfg(
+                    &node,
+                    &reg,
+                    &every_tick(),
+                    ResolvedSettings::default(),
+                    &mut st,
+                )
+                .await;
+            }
+        })
+        .await;
+
+        assert_eq!(out.matches(" WARN ").count(), 1, "{out}");
+        assert!(out.contains("no working ctr"), "{out}");
+        assert_eq!(out.matches("unknown_digest=1").count(), 3, "{out}");
+        assert_eq!(node.creates(), 0);
+        assert_eq!(reg.calls.load(Ordering::SeqCst), 0, "no registry call");
+    }
+
     // --- end-to-end: scheduler outcome → real dispatcher → mock HTTP target ---
     //
     // These drive the real `run_tick` → updater → health gate → rollback path
@@ -2454,7 +2533,7 @@ mod tests {
         )
     }
 
-    fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerSummary> {
+    fn notifying_container(mode: &str, notify: bool) -> Vec<ContainerInfo> {
         vec![summary(
             "web",
             "alpine:3.19",
@@ -2499,6 +2578,18 @@ mod tests {
         let node = FakeNode::new(notifying_container("watch", true), DIG_A);
         let reg = FakeRegistry::new(DIG_A); // same digest → up to date
         one_tick_with(&node, &reg, &webhook_dispatcher(server.uri())).await;
+    }
+
+    #[test]
+    fn an_available_update_is_announced_once_per_digest() {
+        let mut last = None;
+        assert!(first_announcement(&mut last, DIG_A), "first sight");
+        assert!(
+            !first_announcement(&mut last, DIG_A),
+            "the same update again"
+        );
+        assert!(first_announcement(&mut last, DIG_B), "upstream moved on");
+        assert!(!first_announcement(&mut last, DIG_B));
     }
 
     #[tokio::test]
@@ -2649,6 +2740,7 @@ mod tests {
     /// A local image with an id and full `repo@sha256:` entries.
     fn image(id: &str, digests: &[&str]) -> LocalImage {
         LocalImage {
+            source_unknown: false,
             id: Some(id.to_owned()),
             repo_digests: digests.iter().map(|d| (*d).to_owned()).collect(),
         }
@@ -2893,7 +2985,7 @@ mod tests {
     async fn a_restarted_dependent_keeps_its_own_rejected_digest() {
         // `web` is bumped because `db` moved, not because its own image did.
         let db = compose_summary("db", "");
-        let web = ContainerSummary {
+        let web = ContainerInfo {
             image: Some("other:latest".to_owned()),
             ..compose_summary_with("web", "db:service_healthy:true", &[])
         };

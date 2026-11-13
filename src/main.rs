@@ -73,10 +73,13 @@ async fn main() -> Result<()> {
     let config = Config::load(config_path.as_deref())?;
     let credentials = config.credentials;
     let settings = config.settings;
+    let runtime = config.runtime;
 
     match cli.cmd {
-        Cmd::Check => commands::check::run(no_color, credentials, settings).await?,
-        Cmd::Recreate { name } => commands::recreate::run(name, credentials, settings).await?,
+        Cmd::Check => commands::check::run(no_color, credentials, settings, runtime).await?,
+        Cmd::Recreate { name } => {
+            commands::recreate::run(name, credentials, settings, runtime).await?
+        }
         Cmd::Run {
             interval,
             tick,
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
                 credentials,
                 config.notifications,
                 settings,
+                runtime,
             )
             .await?
         }
