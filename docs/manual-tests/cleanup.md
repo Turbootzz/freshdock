@@ -2,15 +2,15 @@
 
 Verifies the opt-in image cleanup that runs after a successful, health-passed
 update (PLAN §5.2 step 8). Cleanup is **off by default**; it removes the image
-the *replaced* container was running, and is best-effort — a shared image still
+the *replaced* container was running, and is best-effort (a shared image still
 referenced by another container is kept, and a cleanup failure never fails the
-update.
+update).
 
 There are two knobs:
 
-- `[settings] cleanup = true` (or per container `freshdock.cleanup=true`) —
+- `[settings] cleanup = true` (or per container `freshdock.cleanup=true`):
   remove the replaced image after a healthy update.
-- `[settings] prune_dangling = true` — additionally run a daemon-wide
+- `[settings] prune_dangling = true`: additionally run a daemon-wide
   dangling-image prune after each successful update.
 
 The unit tests in [src/docker/recreate.rs](https://github.com/Turbootzz/freshdock/blob/main/src/docker/recreate.rs)
@@ -26,31 +26,33 @@ procedure is for human verification against a real daemon.
 
 ## Steps
 
-`freshdock recreate` recreates against the *current* tag, so to see the old
-image actually become superseded we re-point a local tag at a different image
-between launch and recreate. Here `:demo` first points at one image, then at
-another, so the originally-running image is no longer referenced after the
-recreate.
+`freshdock recreate` always pulls the container's tag before it recreates, so
+the tag has to exist upstream: a local-only tag such as `fd-cleanup:demo` fails
+the pull with a 404 before cleanup ever runs. The procedure therefore points the
+real `nginx:alpine` tag at an older image for the duration of the test. The
+container keeps that older image id, and the recreate's own pull moves the tag
+back to the current upstream image, so the originally-running image is no
+longer referenced afterwards.
 
 ```bash
-# 1. Create a local moving tag pointing at an older image, and run a container
-#    on it with cleanup opted in.
+# 1. Point `nginx:alpine` at an older image and run a container on it with
+#    cleanup opted in.
 docker pull nginx:1.27-alpine
-docker tag  nginx:1.27-alpine fd-cleanup:demo
-old_id=$(docker image inspect fd-cleanup:demo --format '{{.Id}}')
+docker tag  nginx:1.27-alpine nginx:alpine
 
 docker run -d --name fd-cleanup \
   --label freshdock.enable=true \
   --label freshdock.mode=watch \
   --label freshdock.cleanup=true \
-  fd-cleanup:demo
+  nginx:alpine
+old_id=$(docker inspect fd-cleanup --format '{{.Image}}')
 
-# 2. Re-point the tag at a newer image so the recreate pulls a different id.
-docker pull nginx:1.28-alpine
-docker tag  nginx:1.28-alpine fd-cleanup:demo
+# 2. Drop the extra tag so nothing but the container references the old image.
+#    Skip this step to exercise the shared-image guard instead (see below).
+docker rmi nginx:1.27-alpine
 
-# 3. Recreate. After the new container is healthy, the superseded image is
-#    removed (best-effort).
+# 3. Recreate. The pull restores the upstream `nginx:alpine`; after the new
+#    container is healthy the superseded image is removed (best-effort).
 ./target/release/freshdock recreate fd-cleanup
 
 # 4. The old image id must be gone (no container references it any more).
@@ -61,20 +63,22 @@ docker image inspect "$old_id" >/dev/null 2>&1 \
 
 ## Expected observations
 
-- The CLI prints `recreated fd-cleanup: healthy — ...`.
+- The CLI prints a line starting `recreated fd-cleanup: healthy` that names the
+  removed archive and the new id.
 - Step 4 prints `OK: superseded image removed`.
 - With `freshdock.cleanup=false` (or the label omitted and `[settings] cleanup`
-  unset), step 4 instead prints `FAIL` — i.e. the old image is **kept**. That is
-  the correct default-off behaviour; re-run the procedure without the cleanup
-  label to confirm.
-- **Shared-image guard.** If a second container is still running on `$old_id`
-  when you recreate, the removal is refused by the daemon (HTTP 409), logged as a
-  warning, and the update still reports success. The image stays until the last
-  referencing container is gone.
+  unset), step 4 instead prints `FAIL`, i.e. the old image is **kept**. That is
+  the correct default-off behaviour; re-run the procedure from step 1 without
+  the cleanup label to confirm.
+- **Shared-image guard.** Skip step 2 (or keep a second container running on
+  `$old_id`) and the removal is refused by the daemon (HTTP 409) because the
+  image is still referenced, logged as a warning, and the update still reports
+  success. The image stays until the last reference is gone.
 
 ## Cleanup
 
 ```bash
 docker rm -f fd-cleanup $(docker ps -a --filter name=fd-cleanup-old- -q) 2>/dev/null
-docker rmi fd-cleanup:demo nginx:1.27-alpine nginx:1.28-alpine 2>/dev/null || true
+docker rmi nginx:1.27-alpine 2>/dev/null || true
+docker pull nginx:alpine   # only needed if you skipped step 3
 ```

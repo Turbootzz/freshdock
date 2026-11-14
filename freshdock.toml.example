@@ -1,4 +1,4 @@
-# freshdock.toml — example configuration.
+# freshdock.toml: example configuration.
 #
 # The file is OPTIONAL: freshdock runs without it (public images need no
 # credentials, notifications are simply off). Copy this next to where you run
@@ -7,20 +7,27 @@
 #   cp freshdock.toml.example freshdock.toml
 #
 # Resolution order: --config <path> flag > $FRESHDOCK_CONFIG > ./freshdock.toml.
-# Every value here can also come from environment variables — see
-# docs/configuration.md#environment-variables or `freshdock --help`.
+# Most values here can also come from environment variables (see
+# docs/configuration.md#environment-variables or `freshdock --help`). The one
+# exception is a registry host with dots in it, which only the file can hold.
 # Secrets are redacted in all log output, even at RUST_LOG=trace.
 
 # ── Fleet-wide defaults ──────────────────────────────────────────────────────
-# Env alternatives: FRESHDOCK_DEFAULT_MODE, FRESHDOCK_CLEANUP,
+# Env alternatives: FRESHDOCK_DEFAULT_MODE, FRESHDOCK_WATCH_ALL,
+# FRESHDOCK_COMPOSE_AWARE, FRESHDOCK_ONE_SHOT_TIMEOUT, FRESHDOCK_CLEANUP,
 # FRESHDOCK_PRUNE_DANGLING (env wins over the file).
 
 # [settings]
-# default_mode   = "watch"   # mode for enabled containers without a freshdock.mode
+# default_mode     = "watch" # mode for enabled containers without a freshdock.mode
 #                            # label: live | nightly | weekly | monthly | watch | off
-# cleanup        = false     # remove the replaced image after a healthy update;
+# watch_all        = false   # true: every running container counts as enabled unless
+#                            # it opts out (freshdock.enable=false, watchtower enable=false, mode=off)
+# compose_aware    = true    # roll a Compose project out as one unit
+# one_shot_timeout = 600     # seconds a compose one-shot may run before the rollout gives up
+# cleanup          = false   # remove the replaced image after a healthy update;
 #                            # per-container override: freshdock.cleanup label
-# prune_dangling = false     # daemon-wide dangling-image prune after each success
+# prune_dangling   = false   # daemon-wide dangling-image prune after each success
+#                            # (no per-container label)
 
 # ── Registry credentials (private images) ────────────────────────────────────
 # <name> is an alias (dockerhub, ghcr, quay, lscr) or a literal host.

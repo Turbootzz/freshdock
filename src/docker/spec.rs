@@ -36,11 +36,17 @@ impl ContainerSpec {
             .trim_start_matches('/')
             .to_owned();
 
-        let config = resp.config.ok_or(SpecError::Missing("Config"))?;
+        let mut config = resp.config.ok_or(SpecError::Missing("Config"))?;
         let image_ref = config
             .image
             .clone()
             .ok_or(SpecError::Missing("Config.Image"))?;
+
+        if let (Some(id), Some(host)) = (resp.id.as_deref(), config.hostname.as_deref())
+            && is_daemon_assigned_hostname(id, host)
+        {
+            config.hostname = None;
+        }
 
         let network_endpoints = resp.network_settings.and_then(|ns| ns.networks);
 
@@ -93,6 +99,12 @@ impl ContainerSpec {
             .name(&self.name)
             .build()
     }
+}
+
+/// Docker names a container after its own first 12 id characters when no
+/// hostname is given; such a name belongs to the container, not to the spec.
+pub(crate) fn is_daemon_assigned_hostname(container_id: &str, hostname: &str) -> bool {
+    hostname.len() == 12 && container_id.len() >= 12 && container_id.starts_with(hostname)
 }
 
 /// Splits a label map into the freshdock-managed subset (keys with the
@@ -156,5 +168,47 @@ mod tests {
         let (managed, user) = split_labels(&HashMap::new());
         assert!(managed.is_empty());
         assert!(user.is_empty());
+    }
+
+    fn inspect_with(id: &str, hostname: Option<&str>) -> ContainerInspectResponse {
+        ContainerInspectResponse {
+            id: Some(id.to_owned()),
+            name: Some("/web".to_owned()),
+            config: Some(ContainerConfig {
+                image: Some("nginx:alpine".to_owned()),
+                hostname: hostname.map(str::to_owned),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    const ID: &str = "41b589f2924cf5b22571430db5ab422ebd200b0f4f4113511eac9fbac0e41d69";
+
+    #[test]
+    fn daemon_assigned_hostname_is_dropped() {
+        let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("41b589f2924c"))).unwrap();
+        assert_eq!(spec.config.hostname, None);
+        assert_eq!(spec.to_create_body("nginx:alpine").hostname, None);
+    }
+
+    #[test]
+    fn explicit_hostname_round_trips() {
+        let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("web"))).unwrap();
+        assert_eq!(spec.config.hostname.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn id_shaped_hostname_of_another_container_is_kept() {
+        let spec = ContainerSpec::from_inspect(inspect_with(ID, Some("deadbeef1234"))).unwrap();
+        assert_eq!(spec.config.hostname.as_deref(), Some("deadbeef1234"));
+    }
+
+    #[test]
+    fn is_daemon_assigned_hostname_needs_the_twelve_char_prefix() {
+        assert!(is_daemon_assigned_hostname(ID, "41b589f2924c"));
+        assert!(!is_daemon_assigned_hostname(ID, "41b589f2924"));
+        assert!(!is_daemon_assigned_hostname(ID, "41b589f2924cf5"));
+        assert!(!is_daemon_assigned_hostname("", "41b589f2924c"));
     }
 }

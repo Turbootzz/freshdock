@@ -9,8 +9,24 @@ use crate::docker::Docker;
 use crate::docker::recreate::{Cleanup, DockerOps, recreate_with_health};
 use crate::errors::AppError;
 use crate::health::{Clock, HealthConfig, HealthProbe, TokioClock};
-use crate::labels::{self, Mode, PolicyDefaults};
+use crate::labels::{self, Mode};
+use crate::rollout::{self, RolloutConfig, RolloutReport, RolloutStep};
 use crate::updater::RecreateOutcome;
+
+/// `freshdock recreate` refused to touch the container.
+#[derive(Debug, thiserror::Error)]
+pub enum RecreateError {
+    /// The container is not opted into freshdock.
+    #[error(
+        "refusing to recreate {container}: not opted into freshdock (enable={enabled}, \
+         mode={mode}; set freshdock.enable=true and a mode other than off)"
+    )]
+    NotOptedIn {
+        container: String,
+        enabled: bool,
+        mode: Mode,
+    },
+}
 
 /// Recreate a single container by name, health-gated: inspect → pull → stop →
 /// rename → create → start → wait-for-healthy → (remove old | rollback).
@@ -30,6 +46,9 @@ use crate::updater::RecreateOutcome;
 /// is not a freshdock target at all" and we respect that even on a
 /// manual invocation.
 ///
+/// Under `watch_all` (issue #79) an unlabelled container counts as opted in,
+/// so the gate passes; the explicit opt-outs above are still refused.
+///
 /// Thin entry: wires the live daemon + default health timing, delegates to the
 /// testable [`run_with`].
 pub async fn run(
@@ -43,8 +62,7 @@ pub async fn run(
         &name,
         &HealthConfig::default(),
         &TokioClock,
-        settings.policy_defaults(),
-        settings.prune_dangling,
+        settings,
         current_unix_timestamp,
     )
     .await
@@ -52,41 +70,64 @@ pub async fn run(
 
 /// Testable core of `recreate`: parameterised over the daemon ops, health
 /// timing, clock, and timestamp source so unit tests can exercise the policy
-/// gate without a live socket. `defaults`/`prune_dangling` come from
-/// `[settings]`; the per-container `freshdock.cleanup` label still wins.
-#[allow(clippy::too_many_arguments)]
+/// gate without a live socket. `settings` carries the `[settings]` defaults;
+/// the per-container `freshdock.cleanup` label still wins.
 pub async fn run_with(
     docker: &(impl DockerOps + HealthProbe),
     name: &str,
     health: &HealthConfig,
     clock: &impl Clock,
-    defaults: PolicyDefaults,
-    prune_dangling: bool,
+    settings: ResolvedSettings,
     ts_provider: impl Fn() -> i64,
 ) -> Result<(), AppError> {
     let spec = docker.inspect(name).await?;
 
     let empty: HashMap<String, String> = HashMap::new();
-    let policy = labels::parse_policy(spec.config.labels.as_ref().unwrap_or(&empty), defaults)?;
+    let policy = labels::parse_policy(
+        spec.config.labels.as_ref().unwrap_or(&empty),
+        settings.policy_defaults(),
+    )?;
     if !policy.enabled || policy.mode == Mode::Off {
-        warn!(
-            container = %name,
-            mode = %policy.mode,
-            enabled = policy.enabled,
-            "refusing to recreate: container is not opted into freshdock \
-             (set freshdock.enable=true and a non-off mode to allow even \
-             manual recreate)"
-        );
-        return Ok(());
+        return Err(RecreateError::NotOptedIn {
+            container: name.to_owned(),
+            enabled: policy.enabled,
+            mode: policy.mode,
+        }
+        .into());
     }
 
     for note in labels::watchtower_diagnostics(spec.config.labels.as_ref().unwrap_or(&empty)) {
         warn!(container = %name, %note, "watchtower label");
     }
 
+    // A compose member is rolled out with the rest of its project (#78); the
+    // operator named one container, but the stack is the unit of work.
+    if settings.compose_aware
+        && let Some(report) = rollout::for_container(
+            docker,
+            &spec.name,
+            spec.config.labels.as_ref().unwrap_or(&empty),
+            &RolloutConfig {
+                health: health.clone(),
+                prune_dangling: settings.prune_dangling,
+                one_shot_timeout: settings.one_shot_timeout,
+                // Asked for by hand: take everything on the tag.
+                tag_image_id: None,
+            },
+            clock,
+            settings.policy_defaults(),
+            crate::selfid::own_container_id_prefix().as_deref(),
+            &ts_provider,
+        )
+        .await
+    {
+        print_rollout(&report);
+        return Ok(());
+    }
+
     let cleanup = Cleanup {
         remove_replaced: policy.cleanup,
-        prune_dangling,
+        prune_dangling: settings.prune_dangling,
     };
     let outcome = recreate_with_health(
         docker,
@@ -143,6 +184,40 @@ fn current_unix_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
+/// Report a rollout on stdout, one line per step plus the verdict, in the
+/// order it happened.
+fn print_rollout(report: &RolloutReport) {
+    println!("rollout of compose project {}:", report.project);
+    for step in &report.steps {
+        match step {
+            RolloutStep::OneShotCompleted { container } => {
+                println!("  {container}: re-ran to a successful exit")
+            }
+            RolloutStep::Updated {
+                container, new_id, ..
+            } => {
+                println!("  {container}: updated and healthy (new id {new_id})")
+            }
+            RolloutStep::Restarted { container } => {
+                println!("  {container}: restarted (depends_on restart: true)")
+            }
+        }
+    }
+    match &report.aborted {
+        None if report.steps.is_empty() => {
+            println!("rollout did nothing:");
+            for skipped in &report.skipped {
+                println!("  {}: {}", skipped.container, skipped.reason);
+            }
+        }
+        None => println!("rollout complete: {} step(s)", report.steps.len()),
+        Some(reason) => println!(
+            "rollout ABORTED: {reason}. The services after this point were not touched \
+             and are still running their previous image."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,11 +229,10 @@ mod tests {
     use bollard::models::ContainerConfig;
 
     /// Fake whose only real method is `inspect` (returns a configurable label
-    /// set). Every other op panics — so any test where the policy gate *fails*
-    /// to short-circuit will blow up loudly, proving "zero DockerOps calls past
-    /// the initial inspect".
+    /// set). `pull` records into `calls` and errors; every op past it panics.
     struct GateOps {
         labels: Option<HashMap<String, String>>,
+        calls: std::sync::Mutex<Vec<&'static str>>,
     }
 
     impl GateOps {
@@ -170,10 +244,17 @@ mod tests {
                         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                         .collect(),
                 ),
+                calls: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn without_labels() -> Self {
-            Self { labels: None }
+            Self {
+                labels: None,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().expect("calls mutex poisoned").clone()
         }
     }
 
@@ -193,7 +274,14 @@ mod tests {
             })
         }
         async fn pull(&self, _image_ref: &ImageRef) -> Result<(), DockerError> {
-            panic!("policy gate must refuse before pull");
+            // An error, never a panic: reaching pull is what a gate-pass asserts.
+            self.calls
+                .lock()
+                .expect("calls mutex poisoned")
+                .push("pull");
+            Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                "pull refused by the test fake",
+            )))
         }
         async fn stop(
             &self,
@@ -249,18 +337,34 @@ mod tests {
         }
     }
 
-    async fn assert_refused(ops: GateOps) {
-        run_with(
+    async fn assert_refused_with(ops: GateOps, settings: ResolvedSettings) {
+        let err = run_with(
             &ops,
             "c",
             &HealthConfig::default(),
             &TokioClock,
-            PolicyDefaults::default(),
-            false,
+            settings,
             || 0,
         )
         .await
-        .expect("a refused recreate is a graceful no-op, not an error");
+        .expect_err("a refused recreate must fail so a script can see it");
+        assert!(
+            matches!(err, AppError::Recreate(RecreateError::NotOptedIn { .. })),
+            "{err}"
+        );
+        assert!(ops.calls().is_empty(), "a refusal must touch nothing");
+    }
+
+    async fn assert_refused(ops: GateOps) {
+        assert_refused_with(ops, ResolvedSettings::default()).await;
+    }
+
+    /// Settings with the opt-out mode switched on.
+    fn watch_all() -> ResolvedSettings {
+        ResolvedSettings {
+            watch_all: true,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -279,6 +383,65 @@ mod tests {
             ("freshdock.enable", "true"),
             ("freshdock.mode", "off"),
         ]))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_names_the_observed_enable_and_mode() {
+        let ops = GateOps::with_labels(&[("freshdock.enable", "true"), ("freshdock.mode", "off")]);
+        let err = run_with(
+            &ops,
+            "c",
+            &HealthConfig::default(),
+            &TokioClock,
+            ResolvedSettings::default(),
+            || 0,
+        )
+        .await
+        .expect_err("a refused recreate must fail so a script can see it");
+        let rendered = err.to_string();
+        assert!(rendered.contains("enable=true"), "{rendered}");
+        assert!(rendered.contains("mode=off"), "{rendered}");
+    }
+
+    // --- watch_all opt-out mode (issue #79) ---
+
+    #[tokio::test]
+    async fn unlabelled_with_watch_all_passes_the_gate() {
+        // A refusal and a gate-pass both return `Err`; the pull separates them.
+        let ops = GateOps::without_labels();
+        let err = run_with(
+            &ops,
+            "c",
+            &HealthConfig::default(),
+            &TokioClock,
+            watch_all(),
+            || 0,
+        )
+        .await
+        .expect_err("the test fake fails the pull");
+        assert!(
+            !matches!(err, AppError::Recreate(RecreateError::NotOptedIn { .. })),
+            "watch_all must let an unlabelled container through the gate: {err}"
+        );
+        assert_eq!(ops.calls(), ["pull"]);
+    }
+
+    #[tokio::test]
+    async fn enable_false_with_watch_all_is_refused() {
+        assert_refused_with(
+            GateOps::with_labels(&[("freshdock.enable", "false")]),
+            watch_all(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mode_off_with_watch_all_is_refused() {
+        assert_refused_with(
+            GateOps::with_labels(&[("freshdock.mode", "off")]),
+            watch_all(),
+        )
         .await;
     }
 }

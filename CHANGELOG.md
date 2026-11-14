@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1](https://github.com/Turbootzz/freshdock/compare/v1.7.0...v1.7.1) - 2026-10-02
+
+### Fixed
+
+- *(docker)* retry a pull the registry rate-limits for a moment ([#107](https://github.com/Turbootzz/freshdock/pull/107))
+- *(scheduler)* keep quiet live/watch polls out of the info log ([#106](https://github.com/Turbootzz/freshdock/pull/106))
+
+## [1.7.0](https://github.com/Turbootzz/freshdock/compare/v1.6.0...v1.7.0) - 2026-10-01
+
+### Added
+
+- *(scheduler)* log a summary per run and warn on unknown local digests ([#100](https://github.com/Turbootzz/freshdock/pull/100))
+
+### Fixed
+
+- *(recreate)* keep a repaired sidecar on its tag while it still resolves ([#103](https://github.com/Turbootzz/freshdock/pull/103))
+
+## [1.6.0](https://github.com/Turbootzz/freshdock/compare/v1.5.0...v1.6.0) - 2026-09-06
+
+### Added
+
+- reject unknown config keys and fail clearly on a missing CA store ([#94](https://github.com/Turbootzz/freshdock/pull/94))
+
+### Fixed
+
+- *(recreate)* let the daemon assign the new container's hostname ([#92](https://github.com/Turbootzz/freshdock/pull/92))
+- *(registry)* resolve fully qualified Docker Hub references ([#91](https://github.com/Turbootzz/freshdock/pull/91))
+- *(scheduler)* update every container on a shared tag, not only the first ([#90](https://github.com/Turbootzz/freshdock/pull/90))
+
+### Other
+
+- *(live)* guard the daemon-facing contract in CI ([#95](https://github.com/Turbootzz/freshdock/pull/95))
+- *(deps)* bump comfy-table from 7.2.2 to 8.0.0 ([#85](https://github.com/Turbootzz/freshdock/pull/85))
+- *(deps)* bump the cargo-minor-patch group with 7 updates ([#84](https://github.com/Turbootzz/freshdock/pull/84))
+- link to freshdock.dev and tighten the docs ([#88](https://github.com/Turbootzz/freshdock/pull/88))
+
+## [1.5.0](https://github.com/Turbootzz/freshdock/compare/v1.4.2...v1.5.0) - 2026-08-28
+
+### Added
+
+- *(compose)* treat a Compose project as one update unit ([#83](https://github.com/Turbootzz/freshdock/pull/83))
+- optional watch-all opt-out mode ([#81](https://github.com/Turbootzz/freshdock/pull/81))
+
+### Other
+
+- *(release)* auto-generate release notes from merged PRs ([#76](https://github.com/Turbootzz/freshdock/pull/76))
+
 ## [1.4.2](https://github.com/Turbootzz/freshdock/compare/v1.4.1...v1.4.2) - 2026-08-19
 
 ### Fixed

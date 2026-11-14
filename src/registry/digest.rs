@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -7,11 +7,12 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::auth::{CachedToken, parse_www_authenticate};
 use super::{Digest, ImageRef, Registry, RegistryError};
 use crate::config::{CredentialStore, canonicalize_host};
+use crate::http::HttpError;
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -120,29 +121,74 @@ pub struct OciRegistry {
     client: Client,
     store: Arc<CredentialStore>,
     token_cache: Mutex<HashMap<String, CachedToken>>,
+    /// Hosts already warned about a low pull budget, until it recovers.
+    low_budget: Mutex<HashSet<String>>,
     /// Forces the registry base at a fixed URL (mock server) for tests; `None`
     /// in production, where the base is derived from each image's host.
     registry_override: Option<Endpoints>,
 }
 
 impl OciRegistry {
-    pub fn new(store: Arc<CredentialStore>) -> Self {
-        Self::build(store, None)
+    /// Build a registry client, failing when there is no usable CA store.
+    pub fn new(store: Arc<CredentialStore>) -> Result<Self, HttpError> {
+        Ok(Self::with_client(crate::http::client()?, store))
+    }
+
+    /// Build on an existing client so the daemon shares one connection pool.
+    pub fn with_client(client: Client, store: Arc<CredentialStore>) -> Self {
+        Self::build(client, store, None)
     }
 
     /// Test seam: route every request at `base_url` (a mock server). The auth
     /// realm is still discovered from the challenge the mock returns.
-    pub fn with_base_url(store: Arc<CredentialStore>, base_url: &str) -> Self {
+    pub fn with_base_url(client: Client, store: Arc<CredentialStore>, base_url: &str) -> Self {
         let endpoints = Endpoints::new(base_url).expect("test base url must be valid");
-        Self::build(store, Some(endpoints))
+        Self::build(client, store, Some(endpoints))
     }
 
-    fn build(store: Arc<CredentialStore>, registry_override: Option<Endpoints>) -> Self {
+    fn build(
+        client: Client,
+        store: Arc<CredentialStore>,
+        registry_override: Option<Endpoints>,
+    ) -> Self {
         Self {
-            client: crate::http::client(),
+            client,
             store,
             token_cache: Mutex::new(HashMap::new()),
+            low_budget: Mutex::new(HashSet::new()),
             registry_override,
+        }
+    }
+
+    /// Every probe passes through here, so the routine case stays at debug
+    /// (#104). A pull budget under a tenth of the limit warns once per host,
+    /// and again only after it recovered.
+    fn log_rate_limit(&self, host: &str, resp: &reqwest::Response) {
+        let Some(limit) = resp.headers().get("ratelimit-limit") else {
+            debug!(host = %host, "no ratelimit headers on response");
+            return;
+        };
+        let limit = limit.to_str().unwrap_or("?");
+        let remaining = resp
+            .headers()
+            .get("ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-");
+        if self.first_low_budget(host, budget_low(limit, remaining)) {
+            warn!(host = %host, limit = ?limit, remaining = ?remaining, "registry pull budget is running low");
+        } else {
+            debug!(host = %host, limit = ?limit, remaining = ?remaining, "registry rate limit");
+        }
+    }
+
+    /// Record whether `host`'s budget is low; true only when it just became so.
+    fn first_low_budget(&self, host: &str, low: bool) -> bool {
+        let mut warned = self.low_budget.lock().expect("low budget mutex poisoned");
+        if low {
+            warned.insert(host.to_owned())
+        } else {
+            warned.remove(host);
+            false
         }
     }
 
@@ -297,17 +343,10 @@ async fn probe(authority: &str) -> Result<(), RegistryError> {
     }
 }
 
-fn log_rate_limit(host: &str, resp: &reqwest::Response) {
-    if let Some(limit) = resp.headers().get("ratelimit-limit") {
-        info!(
-            host = %host,
-            limit = ?limit,
-            remaining = ?resp.headers().get("ratelimit-remaining"),
-            "registry rate limit"
-        );
-    } else {
-        debug!(host = %host, "no ratelimit headers on response");
-    }
+/// Is `remaining` under a tenth of `limit`? Both are `<count>;w=<seconds>`.
+fn budget_low(limit: &str, remaining: &str) -> bool {
+    let count = |v: &str| -> Option<u64> { v.split(';').next()?.trim().parse().ok() };
+    matches!((count(limit), count(remaining)), (Some(l), Some(r)) if r.saturating_mul(10) < l)
 }
 
 #[async_trait::async_trait]
@@ -367,9 +406,9 @@ impl Registry for OciRegistry {
                 resp.status()
             )));
         }
+        // Before the status check, so an exhausted budget (429) still says so.
+        self.log_rate_limit(&host, &resp);
         let resp = resp.error_for_status()?;
-
-        log_rate_limit(&host, &resp);
 
         let digest = resp
             .headers()
@@ -384,6 +423,29 @@ impl Registry for OciRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_budget_is_low_under_a_tenth_of_the_limit() {
+        assert!(budget_low("100;w=21600", "9;w=21600"));
+        assert!(!budget_low("100;w=21600", "10;w=21600"));
+        assert!(!budget_low("200;w=3600", "200;w=3600"));
+        assert!(!budget_low("100", "-"), "an unreadable budget is not low");
+        assert!(!budget_low("?", "0;w=60"));
+        assert!(!budget_low("100", &u64::MAX.to_string()), "no overflow");
+    }
+
+    #[test]
+    fn a_low_budget_warns_once_until_it_recovers() {
+        let reg = OciRegistry::with_client(Client::new(), Arc::new(CredentialStore::default()));
+        assert!(reg.first_low_budget("docker.io", true));
+        assert!(!reg.first_low_budget("docker.io", true), "still low: quiet");
+        assert!(reg.first_low_budget("ghcr.io", true), "per host");
+        assert!(!reg.first_low_budget("docker.io", false));
+        assert!(
+            reg.first_low_budget("docker.io", true),
+            "low again after recovering"
+        );
+    }
 
     #[test]
     fn endpoints_strip_trailing_slash() {

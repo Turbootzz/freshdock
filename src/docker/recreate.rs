@@ -5,7 +5,10 @@ use tracing::{debug, info, warn};
 
 use super::spec::ContainerSpec;
 use super::{DockerError, container_reference};
-use crate::health::{Clock, HealthConfig, HealthOutcome, HealthProbe, wait_for_health};
+use crate::compose::ProjectMember;
+use crate::health::{
+    Clock, ExitOutcome, HealthConfig, HealthOutcome, HealthProbe, wait_for_exit, wait_for_health,
+};
 use crate::labels::{Hook, LifecycleHooks};
 use crate::registry::ImageRef;
 use crate::rollback::{RollbackReason, rollback};
@@ -88,6 +91,21 @@ pub trait DockerOps: Sync {
     /// turns `network_mode: service:X` into `container:<id of X>` at create
     /// time, and that id dies with the replaced container.
     async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError>;
+    /// Every container of a compose project, **including stopped ones** (#78).
+    /// `all: true` is the point: an exited one-shot is invisible otherwise.
+    ///
+    /// Defaulted like [`preflight_recreate`](DockerOps::preflight_recreate), so
+    /// a fake that inherits it degrades to the single-container path.
+    async fn list_project(&self, _project: &str) -> Result<Vec<ProjectMember>, DockerError> {
+        Ok(Vec::new())
+    }
+    /// The id `reference` resolves to in the local image store (#102).
+    ///
+    /// Defaulted to `None` ("can't tell"), which keeps a repaired dependent on
+    /// its image id, the conservative choice for a fake with no image store.
+    async fn local_image_id(&self, _reference: &str) -> Result<Option<String>, DockerError> {
+        Ok(None)
+    }
 }
 
 /// Post-update image cleanup, off by default (PLAN §5.2 step 8). Both steps are
@@ -168,8 +186,8 @@ impl SwapError {
 /// passes its original `Config.Image` so the field round-trips byte-identical
 /// (issue #25) — feeding in the `library/`-prefixed parse used for the *pull*
 /// would silently rewrite `nginx:alpine` to `library/nginx:alpine` and drift
-/// the container. A dependent's repair passes its image *id* instead, on the
-/// deliberately different reasoning in [`reattach_one`].
+/// the container. A dependent's repair may pass its image *id* instead; see
+/// [`repair_image`].
 async fn swap_container(
     ops: &impl DockerOps,
     name: &str,
@@ -398,29 +416,61 @@ async fn reattach_one(
     let mut spec = ops.inspect(dependent).await?;
     rewrite_owner_reference(&mut spec, owner_name, new_owner_id);
     strip_shared_namespace_conflicts(&mut spec);
-    // Pin the exact bits the dependent is already running. It is being
-    // *repaired*, not updated: if its tag has moved locally since it started,
-    // re-creating from that tag would smuggle in an unrequested upgrade of an
-    // unmanaged container, with no health gate and no rollback behind it. The
-    // price is `Config.Image` becoming the image id — deliberately the opposite
-    // of the owner's own cycle, which must round-trip the original ref (issue
-    // #25) because there the *ref* is precisely what the operator asked to
-    // follow. Falls back to the ref when the daemon reported no id.
-    let image = spec.image_id.as_deref().unwrap_or(&spec.image_ref);
-    let (archive, _new_id) = match swap_container(ops, dependent, &spec, image, ts_provider).await {
-        Ok(swapped) => swapped,
-        Err(SwapError::Stop(e)) => return Err(e),
-        Err(SwapError::AfterStop { error, archive }) => {
-            if let Some(archive) = archive {
-                restore_after_failed_reattach(ops, dependent, &archive).await;
+    let repair = repair_image(ops, &spec).await;
+    let (archive, _new_id) =
+        match swap_container(ops, dependent, &spec, repair.image, ts_provider).await {
+            Ok(swapped) => swapped,
+            Err(SwapError::Stop(e)) => return Err(e),
+            Err(SwapError::AfterStop { error, archive }) => {
+                if let Some(archive) = archive {
+                    restore_after_failed_reattach(ops, dependent, &archive).await;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
+    if let Some(reason) = repair.pinned {
+        warn!(container = %dependent, image = %spec.image_ref, image_id = %repair.image, %reason, "re-attached from its image id; the container is pinned until it is recreated from its tag");
+    }
     if let Err(e) = ops.remove(&archive, false).await {
         warn!(archive = %archive, error = %e, "re-attached dependent but failed to remove its archived container; remove it manually");
     }
     Ok(())
+}
+
+/// The image a dependent is re-created from.
+struct RepairImage<'a> {
+    image: &'a str,
+    /// Why it had to be pinned to its image id, for the warning once it landed.
+    pinned: Option<String>,
+}
+
+/// The dependent's own reference while that still resolves to the image it
+/// runs, so it stays on its tag and keeps being checked (#102). Otherwise the
+/// exact image id: a repair must not smuggle in an upgrade with no health gate
+/// behind it, at the price of pinning the dependent until it is recreated from
+/// its tag. With no id, the reference.
+async fn repair_image<'a>(ops: &impl DockerOps, spec: &'a ContainerSpec) -> RepairImage<'a> {
+    let keep = RepairImage {
+        image: &spec.image_ref,
+        pinned: None,
+    };
+    let Some(id) = spec.image_id.as_deref() else {
+        return keep;
+    };
+    // An id or digest reference already names fixed bits.
+    if crate::probe::is_pinned(&spec.image_ref) {
+        return keep;
+    }
+    let reason = match ops.local_image_id(&spec.image_ref).await {
+        Ok(Some(tag_id)) if !crate::probe::behind_tag(Some(id), Some(&tag_id)) => return keep,
+        Ok(Some(tag_id)) => format!("its tag now points to {tag_id}"),
+        Ok(None) => "its tag does not resolve locally".to_owned(),
+        Err(e) => format!("its tag could not be resolved: {e}"),
+    };
+    RepairImage {
+        image: id,
+        pinned: Some(reason),
+    }
 }
 
 /// Best-effort restore of a dependent whose repair broke down after the rename.
@@ -583,6 +633,100 @@ pub async fn recreate_with_health(
     Ok(RecreateOutcome::RolledBack(event))
 }
 
+/// Verdict of re-running a compose one-shot ([`recreate_one_shot`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneShotOutcome {
+    /// Exited zero: the condition its dependents wait on is satisfied.
+    Completed,
+    Failed {
+        exit_code: i64,
+    },
+    /// Still running when its budget ran out. As good as a failure: the
+    /// condition was not met.
+    TimedOut,
+    SkippedByHook(HookSkipReason),
+}
+
+/// Re-run a compose one-shot the project waits on (issue #78).
+///
+/// Same cycle as [`recreate_with_health`] up to the start, then a different
+/// question: a one-shot's correct terminal state is `exited 0`, which the
+/// health gate would read as a crash, so [`wait_for_exit`] asks for the code.
+///
+/// **A failure is deliberately not rolled back.** The command already ran and
+/// may have half-applied; restoring the previous container object changes
+/// nothing about that and destroys the only logs explaining it. The failed
+/// container and the archive are both kept and the caller aborts the rollout.
+/// **Lifecycle hooks are skipped entirely**, both of them, for the same reason:
+/// a one-shot has already exited when the cycle starts and has exited again
+/// when it ends, and `docker exec` refuses a container that is not running. A
+/// pre-update hook here could therefore only ever fail, and a failing
+/// pre-update hook aborts the rollout, so honouring it would let one label
+/// silently block every update in the project forever.
+#[allow(clippy::too_many_arguments)]
+pub async fn recreate_one_shot(
+    ops: &(impl DockerOps + HealthProbe),
+    name: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+    clock: &impl Clock,
+    cleanup: Cleanup,
+    hooks: &LifecycleHooks,
+    ts_provider: impl Fn() -> i64,
+) -> Result<OneShotOutcome, DockerError> {
+    if hooks.pre_update.is_some() || hooks.post_update.is_some() {
+        warn!(
+            container = %name,
+            "ignoring lifecycle hooks on a one-shot: it is not running, so neither hook could be exec'd"
+        );
+    }
+    let cycle = match recreate_one(ops, name, &LifecycleHooks::default(), &ts_provider).await? {
+        CycleOutcome::Completed(cycle) => cycle,
+        CycleOutcome::Skipped(reason) => return Ok(OneShotOutcome::SkippedByHook(reason)),
+    };
+
+    match wait_for_exit(ops, &cycle.new_id, timeout, poll_interval, clock).await {
+        ExitOutcome::Exited { exit_code: 0 } => {
+            info!(container = %cycle.owner_name, "one-shot completed successfully");
+            reattach_dependents(
+                ops,
+                &cycle.owner_name,
+                Some(&cycle.new_id),
+                &cycle.dependents,
+                &ts_provider,
+            )
+            .await;
+            if let Err(e) = ops.remove(&cycle.old_name, false).await {
+                warn!(archive = %cycle.old_name, error = %e, "one-shot completed but failed to remove the archived old container; remove it manually");
+            }
+            run_cleanup(ops, cleanup, cycle.old_image_id.as_deref()).await;
+            Ok(OneShotOutcome::Completed)
+        }
+        ExitOutcome::Exited { exit_code } => {
+            warn!(
+                container = %cycle.owner_name,
+                exit_code,
+                archive = %cycle.old_name,
+                "one-shot failed; leaving the failed container and its archive in place so the logs survive"
+            );
+            // Past the stop their namespace is already gone, and an exited
+            // one-shot is nothing to re-attach to. Name them so they are not
+            // lost from the record.
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
+            Ok(OneShotOutcome::Failed { exit_code })
+        }
+        ExitOutcome::TimedOut => {
+            warn!(
+                container = %cycle.owner_name,
+                archive = %cycle.old_name,
+                "one-shot did not finish within its timeout; leaving it running so its logs survive"
+            );
+            warn_abandoned_dependents(&cycle.owner_name, &cycle.dependents);
+            Ok(OneShotOutcome::TimedOut)
+        }
+    }
+}
+
 /// Post-success image cleanup. Runs only after the new container is healthy and
 /// the old-container archive has been removed (so the superseded image is no
 /// longer referenced by it). Every step is best-effort: a failure — notably a
@@ -693,6 +837,12 @@ mod tests {
         /// When set, a dependent's `inspect` reports no image id — the
         /// fall-back-to-the-ref half of the image-pinning contract.
         omit_dependent_image_id: bool,
+        /// What the dependent's tag resolves to locally (`None`: can't tell).
+        dependent_tag_image: Option<String>,
+        /// When set, resolving the dependent's tag errors.
+        dependent_tag_lookup_fails: bool,
+        /// `Config.Image` a dependent's `inspect` reports, when not `alpine:3.20`.
+        dependent_image_ref: Option<String>,
     }
 
     impl RecordingOps {
@@ -772,6 +922,22 @@ mod tests {
             self
         }
 
+        /// The dependent's tag resolves locally to `id`.
+        fn with_dependent_tag_image(mut self, id: &str) -> Self {
+            self.dependent_tag_image = Some(id.to_owned());
+            self
+        }
+
+        fn with_failing_dependent_tag_lookup(mut self) -> Self {
+            self.dependent_tag_lookup_fails = true;
+            self
+        }
+
+        fn with_dependent_image_ref(mut self, reference: &str) -> Self {
+            self.dependent_image_ref = Some(reference.to_owned());
+            self
+        }
+
         fn with_failing_dependent_inspect(mut self) -> Self {
             self.dependent_inspect_fails = true;
             self
@@ -837,7 +1003,10 @@ mod tests {
                 // `container:<ref>` network mode under test.
                 return Ok(ContainerSpec {
                     name: name.to_owned(),
-                    image_ref: "alpine:3.20".to_owned(),
+                    image_ref: self
+                        .dependent_image_ref
+                        .clone()
+                        .unwrap_or_else(|| "alpine:3.20".to_owned()),
                     image_id: (!self.omit_dependent_image_id).then(|| "sha256:depimg".to_owned()),
                     // A real `inspect` of a container-scoped sidecar always
                     // carries a daemon-generated hostname (its own short id)
@@ -987,6 +1156,16 @@ mod tests {
             Ok(self
                 .hook_status
                 .unwrap_or(HookStatus::Completed { exit_code: 0 }))
+        }
+
+        async fn local_image_id(&self, reference: &str) -> Result<Option<String>, DockerError> {
+            self.record(format!("local_image_id:{reference}"));
+            if self.dependent_tag_lookup_fails {
+                return Err(DockerError::Spec(crate::docker::spec::SpecError::Missing(
+                    "tag-lookup",
+                )));
+            }
+            Ok(self.dependent_tag_image.clone())
         }
 
         async fn list_network_dependents(&self, name: &str) -> Result<Vec<String>, DockerError> {
@@ -1578,6 +1757,8 @@ mod tests {
     fn dependent_cycle(name: &str) -> Vec<String> {
         vec![
             format!("inspect:{name}"),
+            // Resolved before the stop, while the dependent still runs.
+            "local_image_id:alpine:3.20".to_owned(),
             format!("stop:{name}"),
             format!("rename:{name}"),
             format!("create:{name}"),
@@ -1680,22 +1861,80 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn dependent_is_re_created_from_its_exact_image_id() {
+    async fn dependent_stays_on_its_tag_while_the_tag_resolves_to_its_image() {
+        // #102: re-creating from the id pinned an opted-in sidecar for good.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_dependent_tag_image("sha256:depimg");
+        recreate_fd_smoke(&ops).await;
+
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("alpine:3.20"),
+            "the tag still names the running bits, so keeping it changes nothing"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_is_pinned_to_its_image_id_once_its_tag_moved() {
         // A repair must not double as an upgrade: the dependent gets the exact
-        // bits it was already running, even if its tag has since moved.
-        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef");
+        // bits it was already running.
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_dependent_tag_image("sha256:newer");
         recreate_fd_smoke(&ops).await;
 
         assert_eq!(
             ops.created_image_for("vpn-peer").as_deref(),
             Some("sha256:depimg"),
-            "an unmanaged sidecar must never be silently upgraded by a repair"
+            "a sidecar must never be silently upgraded by a repair"
         );
         assert_eq!(
             ops.into_calls().iter().filter(|c| *c == "pull").count(),
             1,
             "only the updated container is pulled — a dependent already has \
              the image it runs"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_whose_tag_cannot_be_resolved_is_pinned_to_its_image_id() {
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef");
+        recreate_fd_smoke(&ops).await;
+
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("sha256:depimg")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_whose_tag_lookup_fails_is_pinned_to_its_image_id() {
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_failing_dependent_tag_lookup();
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(matches!(outcome, RecreateOutcome::Recreated { .. }));
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("sha256:depimg"),
+            "an unknown tag must never be trusted with the repair"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dependent_already_on_an_image_id_is_not_looked_up() {
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_dependent_image_ref("sha256:depimg");
+        recreate_fd_smoke(&ops).await;
+
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("sha256:depimg")
+        );
+        assert!(
+            !ops.into_calls()
+                .iter()
+                .any(|c| c.starts_with("local_image_id")),
+            "an id names fixed bits; there is nothing to resolve"
         );
     }
 
@@ -1791,6 +2030,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn rollback_repair_keeps_the_dependent_on_its_tag() {
+        let ops = RecordingOps::with_dependent("vpn-peer", "container:0123456789abcdef")
+            .with_dependent_tag_image("sha256:depimg")
+            .with_probe(&RecordingOps::crashed_probe());
+        let outcome = recreate_fd_smoke(&ops).await;
+
+        assert!(matches!(outcome, RecreateOutcome::RolledBack(_)));
+        assert_eq!(
+            ops.created_image_for("vpn-peer").as_deref(),
+            Some("alpine:3.20")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn rollback_restores_under_the_inspected_name_not_the_addressed_id() {
         // `freshdock recreate <id>` whose update rolls back: the archive must
         // be renamed back to the container's real name, not to the id string
@@ -1848,6 +2101,7 @@ mod tests {
         let calls = ops.into_calls();
         let expected: Vec<String> = [
             "inspect:vpn-peer",
+            "local_image_id:alpine:3.20",
             "stop:vpn-peer",
             "rename:vpn-peer",
             "create:vpn-peer",

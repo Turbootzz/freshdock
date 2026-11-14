@@ -12,9 +12,10 @@ use crate::docker::check::DockerCheck;
 use crate::errors::AppError;
 use crate::format::short_digest;
 use crate::labels::{self, Mode, PolicyDefaults};
-use crate::probe::{self, ProbeOutcome, pinned_digest};
+use crate::probe::{self, ProbeOutcome, ProbeTarget, pinned_digest};
 use crate::registry::Registry;
 use crate::registry::digest::OciRegistry;
+use bollard::models::ContainerSummary;
 
 const AUTH_REQUIRED: &str = "auth required (set credentials)";
 const CREDENTIALS_REJECTED: &str = "credentials rejected (check token)";
@@ -33,9 +34,17 @@ pub async fn run(
     store: Arc<CredentialStore>,
     settings: ResolvedSettings,
 ) -> Result<(), AppError> {
-    let docker = Docker::connect(store.clone()).await?;
-    let registry = OciRegistry::new(store);
-    let cells = collect_cells(&docker, &registry, settings.policy_defaults()).await?;
+    // Built before the Docker connect so a missing CA store fails the start.
+    let registry = OciRegistry::new(store.clone())?;
+    let docker = Docker::connect(store).await?;
+    let own_id_prefix = crate::selfid::own_container_id_prefix();
+    let cells = collect_cells(
+        &docker,
+        &registry,
+        settings.policy_defaults(),
+        own_id_prefix.as_deref(),
+    )
+    .await?;
     let mut table = build_table(no_color);
     for row in cells {
         table.add_row(Vec::from(row));
@@ -53,16 +62,37 @@ async fn collect_cells(
     docker: &impl DockerCheck,
     registry: &impl Registry,
     defaults: PolicyDefaults,
+    own_id_prefix: Option<&str>,
 ) -> Result<Vec<[String; 6]>, AppError> {
     let containers = docker.list_running().await?;
 
     let empty = HashMap::new();
 
-    let mut rows: Vec<RowPrep> = Vec::new();
+    let mut pending: Vec<(String, Mode, ContainerSummary)> = Vec::new();
     for c in containers {
         let lbls = c.labels.as_ref().unwrap_or(&empty);
-        let policy = labels::parse_policy(lbls, defaults)?;
+        // Warn-and-skip like the scheduler: one bad label (on any container,
+        // now that watch_all parses unlabelled bystanders too) must not take
+        // down the whole table — `check` always prints and exits 0 (#7).
+        let policy = match labels::parse_policy(lbls, defaults) {
+            Ok(p) => p,
+            Err(e) => {
+                let name = c
+                    .names
+                    .as_ref()
+                    .and_then(|n| n.first())
+                    .map(|s| s.trim_start_matches('/'))
+                    .unwrap_or("?");
+                warn!(container = %name, error = %e, "invalid freshdock labels; skipping");
+                continue;
+            }
+        };
         if !policy.enabled {
+            continue;
+        }
+        // The scheduler never auto-targets freshdock's own container, so the
+        // table must not promise it either.
+        if policy.auto_enabled && crate::selfid::is_own_container(own_id_prefix, c.id.as_deref()) {
             continue;
         }
         let name = c
@@ -74,14 +104,25 @@ async fn collect_cells(
         for note in labels::watchtower_diagnostics(lbls) {
             warn!(container = %name, %note, "watchtower label");
         }
-        let image_str = c.image.unwrap_or_else(|| "?".to_string());
-
-        rows.push(RowPrep {
-            name,
-            image: image_str,
-            mode: policy.mode,
-        });
+        pending.push((name, policy.mode, c));
     }
+
+    let targets = join_all(
+        pending
+            .iter()
+            .map(|(_, _, c)| probe::resolve_target(docker, c)),
+    )
+    .await;
+    let rows: Vec<RowPrep> = pending
+        .into_iter()
+        .zip(targets)
+        .map(|((name, mode, c), target)| RowPrep {
+            name,
+            mode,
+            target: target.map_err(|e| e.to_string()),
+            listed_image: c.image.unwrap_or_else(|| "?".to_string()),
+        })
+        .collect();
 
     // Probe each unique image reference once. A homelab compose stack often
     // has several containers sharing the same image; firing duplicate `image
@@ -100,14 +141,24 @@ async fn collect_cells(
 
     let mut cells = Vec::with_capacity(rows.len());
     for row in rows.into_iter() {
-        let outcome = by_image
-            .get(&row.image)
-            .cloned()
-            .unwrap_or_else(|| ProbeOutcome::Error("internal: missing fetch result".into()));
-        let (current, latest, update) = render_cells(&row.image, &outcome);
+        let (image, image_id, outcome) = match row.target {
+            Ok(t) => {
+                let outcome = by_image.get(&t.image).cloned().unwrap_or_else(|| {
+                    ProbeOutcome::Error("internal: missing fetch result".into())
+                });
+                (t.image, t.image_id, outcome)
+            }
+            // The listing's image id would otherwise render as a confident `pinned`.
+            Err(e) => (
+                row.listed_image,
+                None,
+                ProbeOutcome::Error(format!("container inspect failed: {e}")),
+            ),
+        };
+        let (current, latest, update) = render_cells(&image, &outcome, image_id.as_deref());
         cells.push([
             row.name,
-            row.image,
+            image,
             row.mode.to_string(),
             current,
             latest,
@@ -120,15 +171,32 @@ async fn collect_cells(
 
 /// Map a [`ProbeOutcome`] to the `(current digest, latest digest, update?)`
 /// table cells.
-fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String) {
+fn render_cells(
+    image: &str,
+    outcome: &ProbeOutcome,
+    container_image_id: Option<&str>,
+) -> (String, String, String) {
     let dash = || "-".to_string();
     match outcome {
-        ProbeOutcome::Fetched { local, latest } => {
-            let current = local
-                .current_for(latest)
-                .map(short_digest)
-                .unwrap_or_else(dash);
-            let update = match local.update_available(latest) {
+        ProbeOutcome::Fetched {
+            local,
+            latest,
+            tag_image_id,
+        } => {
+            // The image it runs is not the tag's, and may carry no digests.
+            let current = if probe::behind_tag(container_image_id, tag_image_id.as_deref()) {
+                dash()
+            } else {
+                local
+                    .current_for(latest)
+                    .map(short_digest)
+                    .unwrap_or_else(dash)
+            };
+            let update = match local.update_available_for(
+                latest,
+                container_image_id,
+                tag_image_id.as_deref(),
+            ) {
                 Some(true) => "yes",
                 Some(false) => "no",
                 None => "?",
@@ -150,7 +218,7 @@ fn render_cells(image: &str, outcome: &ProbeOutcome) -> (String, String, String)
 fn unique_images(rows: &[RowPrep]) -> Vec<String> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out: Vec<String> = Vec::new();
-    for r in rows {
+    for r in rows.iter().filter_map(|r| r.target.as_ref().ok()) {
         if seen.insert(&r.image) {
             out.push(r.image.clone());
         }
@@ -160,13 +228,16 @@ fn unique_images(rows: &[RowPrep]) -> Vec<String> {
 
 struct RowPrep {
     name: String,
-    image: String,
     mode: Mode,
+    /// The image to probe, or why the inspect failed.
+    target: Result<ProbeTarget, String>,
+    /// The listing's `Image`, shown when the inspect failed.
+    listed_image: String,
 }
 
 fn build_table(no_color: bool) -> Table {
     let mut t = Table::new();
-    t.load_preset(if no_color { NOTHING } else { UTF8_FULL });
+    t.load_style(if no_color { NOTHING } else { UTF8_FULL });
     t.set_header(vec![
         "container",
         "image",
@@ -185,8 +256,9 @@ mod tests {
     fn row(image: &str) -> RowPrep {
         RowPrep {
             name: "n".into(),
-            image: image.into(),
             mode: Mode::Watch,
+            target: Ok(ProbeTarget::from_ref(image)),
+            listed_image: image.into(),
         }
     }
 
@@ -220,9 +292,11 @@ mod tests {
     // --- collect_cells: command-layer table assembly (#26) ---
 
     use crate::docker::DockerError;
+    use crate::docker::check::{ContainerImage, LocalImage};
+    use crate::docker::spec::SpecError;
     use crate::registry::{Digest, ImageRef, RegistryError};
     use async_trait::async_trait;
-    use bollard::models::ContainerSummary;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const DIG_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -232,6 +306,7 @@ mod tests {
     fn summary(name: &str, image: &str, labels: &[(&str, &str)]) -> ContainerSummary {
         ContainerSummary {
             names: Some(vec![format!("/{name}")]),
+            id: Some(format!("id-{name}")),
             image: Some(image.to_owned()),
             labels: Some(
                 labels
@@ -244,11 +319,12 @@ mod tests {
     }
 
     /// Recording fake daemon: serves a fixed container list + per-image
-    /// RepoDigests, and counts `inspect_image_repo_digests` calls so the
-    /// dedupe contract can be asserted.
+    /// `LocalImage`s, and counts `inspect_image` calls for the dedupe contract.
     struct FakeDocker {
         containers: Vec<ContainerSummary>,
-        repo_digests: HashMap<String, Vec<String>>,
+        images: HashMap<String, LocalImage>,
+        config_images: HashMap<String, String>,
+        failing: HashSet<String>,
         inspect_calls: AtomicUsize,
     }
 
@@ -268,17 +344,37 @@ mod tests {
         ) -> Self {
             Self {
                 containers,
-                repo_digests: repo_digests
+                images: repo_digests
                     .iter()
                     .map(|(img, rds)| {
                         (
                             (*img).to_owned(),
-                            rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                            LocalImage {
+                                id: None,
+                                repo_digests: rds.iter().map(|rd| (*rd).to_owned()).collect(),
+                            },
                         )
                     })
                     .collect(),
+                config_images: HashMap::new(),
+                failing: HashSet::new(),
                 inspect_calls: AtomicUsize::new(0),
             }
+        }
+        /// The id the tag resolves to locally.
+        fn with_image_id(mut self, image: &str, id: &str) -> Self {
+            self.images.entry(image.to_owned()).or_default().id = Some(id.to_owned());
+            self
+        }
+        /// `Config.Image` for one container, when it differs from the listing.
+        fn with_config_image(mut self, id: &str, reference: &str) -> Self {
+            self.config_images
+                .insert(id.to_owned(), reference.to_owned());
+            self
+        }
+        fn failing_container(mut self, id: &str) -> Self {
+            self.failing.insert(id.to_owned());
+            self
         }
     }
 
@@ -287,12 +383,29 @@ mod tests {
         async fn list_running(&self) -> Result<Vec<ContainerSummary>, DockerError> {
             Ok(self.containers.clone())
         }
-        async fn inspect_image_repo_digests(
-            &self,
-            image: &str,
-        ) -> Result<Vec<String>, DockerError> {
+        async fn inspect_image(&self, image: &str) -> Result<LocalImage, DockerError> {
             self.inspect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.repo_digests.get(image).cloned().unwrap_or_default())
+            Ok(self.images.get(image).cloned().unwrap_or_default())
+        }
+        async fn container_image(&self, id: &str) -> Result<ContainerImage, DockerError> {
+            if self.failing.contains(id) {
+                return Err(DockerError::Spec(SpecError::Missing("Config")));
+            }
+            let listed = self
+                .containers
+                .iter()
+                .find(|c| c.id.as_deref() == Some(id))
+                .ok_or(DockerError::Spec(SpecError::Missing("Id")))?;
+            let reference = self
+                .config_images
+                .get(id)
+                .cloned()
+                .or_else(|| listed.image.clone())
+                .ok_or(DockerError::Spec(SpecError::Missing("Config.Image")))?;
+            Ok(ContainerImage {
+                reference,
+                image_id: listed.image_id.clone(),
+            })
         }
     }
 
@@ -342,7 +455,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 1);
@@ -366,7 +479,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_B);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -393,7 +506,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_B);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][5], "no", "the upstream digest is already local");
@@ -420,7 +533,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_C);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][5], "yes");
@@ -441,7 +554,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][3], "-", "no current digest is known");
@@ -465,7 +578,7 @@ mod tests {
         );
         let registry = FakeRegistry::auth_required();
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells[0][4], AUTH_REQUIRED);
@@ -482,7 +595,7 @@ mod tests {
         // A rejected token (private image) must read differently from "no creds"
         // so the operator rotates rather than sets a credential.
         let (current, latest, update) =
-            render_cells("alpine:3.19", &ProbeOutcome::CredentialsRejected);
+            render_cells("alpine:3.19", &ProbeOutcome::CredentialsRejected, None);
         assert_eq!(latest, CREDENTIALS_REJECTED);
         assert_ne!(latest, AUTH_REQUIRED);
         assert_eq!(current, "-");
@@ -500,7 +613,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 1, "only the opted-in container gets a row");
@@ -528,12 +641,261 @@ mod tests {
                 mode: Some(Mode::Live),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
         assert_eq!(
             cells[0][2], "live",
             "the global default_mode applies when no freshdock.mode label is set"
+        );
+    }
+
+    // --- watch_all opt-out mode + self guard (issue #79) ---
+
+    const SELF_ID: &str = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890";
+    const SELF_PREFIX: &str = "abc123def456";
+
+    /// Defaults with the opt-out mode switched on.
+    fn watch_all() -> PolicyDefaults {
+        PolicyDefaults {
+            watch_all: true,
+            ..Default::default()
+        }
+    }
+
+    /// Give a summary a fixed container id, for the self-guard tests.
+    fn with_id(summary: ContainerSummary, id: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            ..summary
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_all_lists_unlabelled_container() {
+        let docker = FakeDocker::new(
+            vec![summary("web", "alpine:3.19", &[])],
+            &[("alpine:3.19", &format!("alpine@{DIG_A}"))],
+        );
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(
+            &docker,
+            &registry,
+            PolicyDefaults {
+                mode: Some(Mode::Nightly),
+                ..watch_all()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cells.len(), 1, "an unlabelled container is listed");
+        assert_eq!(cells[0][0], "web");
+        assert_eq!(cells[0][2], "nightly", "the default mode fills the cell");
+        assert_eq!(cells[0][5], "yes");
+    }
+
+    #[tokio::test]
+    async fn watch_all_skips_own_container() {
+        let docker = FakeDocker::new(
+            vec![
+                with_id(summary("freshdock", "alpine:3.19", &[]), SELF_ID),
+                summary("web", "redis:7", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), Some(SELF_PREFIX))
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "our own container gets no row");
+        assert_eq!(cells[0][0], "web");
+    }
+
+    #[tokio::test]
+    async fn watch_all_still_omits_enable_false() {
+        let docker = FakeDocker::new(
+            vec![
+                summary("out", "alpine:3.19", &[("freshdock.enable", "false")]),
+                summary(
+                    "wt-out",
+                    "redis:7",
+                    &[("com.centurylinklabs.watchtower.enable", "false")],
+                ),
+                summary("in", "nginx:1.27", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+                ("nginx:1.27", &format!("nginx@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "both opt-out labels still exclude");
+        assert_eq!(cells[0][0], "in");
+    }
+
+    #[tokio::test]
+    async fn invalid_labels_on_one_container_do_not_break_the_table() {
+        // A stray bad label on a bystander (visible at all only under
+        // watch_all) must cost that container its row, not the whole table.
+        let docker = FakeDocker::new(
+            vec![
+                summary("bad", "alpine:3.19", &[("freshdock.notify", "1")]),
+                summary("web", "redis:7", &[]),
+            ],
+            &[
+                ("alpine:3.19", &format!("alpine@{DIG_A}")),
+                ("redis:7", &format!("redis@{DIG_A}")),
+            ],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, watch_all(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 1, "the parse failure skips only that row");
+        assert_eq!(cells[0][0], "web");
+    }
+
+    // --- the image each container runs, not the tag ---
+
+    const OLD_ID: &str = "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10";
+    const NEW_ID: &str = "sha256:0e7f2f0e2e8b4a4b8c3d1a5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192";
+
+    /// A summary carrying a container id and the image id it runs.
+    fn container_with_id(
+        name: &str,
+        id: &str,
+        image: &str,
+        image_id: Option<&str>,
+        labels: &[(&str, &str)],
+    ) -> ContainerSummary {
+        ContainerSummary {
+            id: Some(id.to_owned()),
+            image_id: image_id.map(str::to_owned),
+            ..summary(name, image, labels)
+        }
+    }
+
+    #[tokio::test]
+    async fn image_column_shows_config_image_when_the_list_carries_an_id() {
+        let docker = FakeDocker::new(
+            vec![container_with_id(
+                "web",
+                "c1",
+                OLD_ID,
+                Some(OLD_ID),
+                &[("freshdock.enable", "true")],
+            )],
+            &[("nginx:alpine", &format!("nginx@{DIG_A}"))],
+        )
+        .with_config_image("c1", "nginx:alpine");
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells[0][1], "nginx:alpine");
+        assert_eq!(cells[0][5], "yes");
+    }
+
+    #[tokio::test]
+    async fn siblings_on_one_tag_are_judged_by_the_image_each_runs() {
+        // `a` runs what the tag resolves to; `b` was left behind by an update.
+        let docker = FakeDocker::new(
+            vec![
+                container_with_id(
+                    "a",
+                    "c1",
+                    "nginx:alpine",
+                    Some(NEW_ID),
+                    &[("freshdock.enable", "true")],
+                ),
+                container_with_id(
+                    "b",
+                    "c2",
+                    "nginx:alpine",
+                    Some(OLD_ID),
+                    &[("freshdock.enable", "true")],
+                ),
+            ],
+            &[("nginx:alpine", &format!("nginx@{DIG_B}"))],
+        )
+        .with_image_id("nginx:alpine", NEW_ID);
+        let registry = FakeRegistry::new(DIG_B);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells[0][5], "no");
+        assert_eq!(cells[1][5], "yes");
+        assert_eq!(
+            cells[1][3], "-",
+            "the superseded image may carry no digests at all"
+        );
+        assert_eq!(registry.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(docker.inspect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn inspect_failure_renders_an_error_not_pinned() {
+        let docker = FakeDocker::new(
+            vec![
+                container_with_id(
+                    "bad",
+                    "c1",
+                    OLD_ID,
+                    Some(OLD_ID),
+                    &[("freshdock.enable", "true")],
+                ),
+                summary("web", "redis:7", &[("freshdock.enable", "true")]),
+            ],
+            &[("redis:7", &format!("redis@{DIG_A}"))],
+        )
+        .failing_container("c1");
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells.len(), 2, "the failed row is kept");
+        assert_eq!(cells[0][0], "bad");
+        assert_eq!(cells[0][1], OLD_ID, "the listing's image is shown");
+        assert!(cells[0][4].starts_with("error:"), "got {}", cells[0][4]);
+        assert_eq!(cells[0][5], "-");
+        assert_eq!(cells[1][5], "no", "the other row is unaffected");
+    }
+
+    #[tokio::test]
+    async fn missing_image_in_the_listing_renders_a_placeholder() {
+        let docker = FakeDocker::new(
+            vec![ContainerSummary {
+                image: None,
+                ..summary("web", "ignored", &[("freshdock.enable", "true")])
+            }],
+            &[],
+        );
+        let registry = FakeRegistry::new(DIG_A);
+
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(cells[0][1], "?");
+        assert!(
+            cells[0][4].starts_with("error:"),
+            "a listing with no image is a read failure, not a verdict: got {}",
+            cells[0][4]
         );
     }
 
@@ -548,7 +910,7 @@ mod tests {
         );
         let registry = FakeRegistry::new(DIG_A);
 
-        let cells = collect_cells(&docker, &registry, PolicyDefaults::default())
+        let cells = collect_cells(&docker, &registry, PolicyDefaults::default(), None)
             .await
             .unwrap();
         assert_eq!(cells.len(), 2, "both containers still get their own row");

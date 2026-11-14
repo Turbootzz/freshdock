@@ -13,6 +13,7 @@
 - [Configuration](configuration.md)
 - [CLI reference](cli-reference.md)
 - [Scheduling & modes](scheduling.md)
+- [Compose projects](compose.md)
 - [Notifications](notifications.md)
 - [Health gating & rollback](health-and-rollback.md)
 - [Lifecycle hooks](lifecycle-hooks.md)
@@ -28,4 +29,5 @@
 - [Recreate round-trip](manual-tests/recreate.md)
 - [Image cleanup](manual-tests/cleanup.md)
 - [Network-namespace dependents](manual-tests/network-dependents.md)
+- [Compose rollouts](manual-tests/compose-rollout.md)
 - [SMTP notifications](manual-tests/smtp.md)

@@ -348,6 +348,19 @@ async fn weird_config_recreate_roundtrip_is_byte_identical() {
         "Config.Image must round-trip (nginx:alpine, not library/nginx:alpine) — issue #25"
     );
 
+    let new_short_id: String = after
+        .id
+        .as_deref()
+        .expect("after id")
+        .chars()
+        .take(12)
+        .collect();
+    assert_eq!(
+        ac.hostname.as_deref(),
+        Some(new_short_id.as_str()),
+        "a daemon-assigned hostname must follow the new container, not copy the old id"
+    );
+
     // --- Config dimensions ---
     assert_eq!(bc.env, ac.env, "env drifted");
     assert_eq!(bc.cmd, ac.cmd, "cmd drifted");

@@ -4,12 +4,15 @@ pub mod recreate;
 pub mod rename;
 pub mod spec;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bollard::auth::DockerCredentials;
 use bollard::models::{
-    ContainerState, ContainerStateStatusEnum, ContainerSummary, HealthStatusEnum,
+    ContainerState, ContainerStateStatusEnum, ContainerSummary, ContainerSummaryStateEnum,
+    HealthStatusEnum,
 };
 use bollard::query_parameters::{
     CreateImageOptionsBuilder, ListContainersOptions, PruneImagesOptionsBuilder,
@@ -19,10 +22,11 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::compose::{self, ProjectMember};
 use crate::config::CredentialStore;
 use crate::docker::recreate::{DockerOps, HookStatus};
 use crate::docker::spec::ContainerSpec;
-use crate::health::{ContainerRuntimeState, HealthProbe};
+use crate::health::{Clock, ContainerRuntimeState, HealthProbe, TokioClock};
 use crate::registry::ImageRef;
 use crate::registry::digest::split_repository;
 
@@ -47,6 +51,64 @@ pub enum DockerError {
         api_version: String,
         networks: usize,
     },
+}
+
+impl DockerError {
+    /// A registry rate limit that clears within seconds. Docker Hub's pull
+    /// quota resets in hours, so it doesn't count.
+    pub fn is_transient_rate_limit(&self) -> bool {
+        use bollard::errors::Error;
+        let (status, message) = match self {
+            DockerError::Bollard(Error::DockerResponseServerError {
+                status_code,
+                message,
+            }) => (Some(*status_code), message),
+            DockerError::Bollard(Error::DockerStreamError { error }) => (None, error),
+            _ => return false,
+        };
+        let message = message.to_ascii_lowercase();
+        let limited = status == Some(429)
+            || ["toomanyrequests", "too many requests", "http 429"]
+                .iter()
+                .any(|needle| message.contains(needle));
+        limited && !message.contains("pull rate limit")
+    }
+}
+
+/// Backoff between pull retries (#105); fits the default 30 s shutdown drain.
+const PULL_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+
+/// Run `pull`, retrying it while the registry rate-limits it.
+async fn retry_rate_limited<F, Fut>(
+    clock: &impl Clock,
+    image: &str,
+    mut pull: F,
+) -> Result<(), DockerError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), DockerError>>,
+{
+    for delay in PULL_RETRY_DELAYS {
+        match pull().await {
+            Err(e) if e.is_transient_rate_limit() => {
+                warn!(%image, error = %e, retry_in_s = delay.as_secs(), "pull rate-limited by the registry; retrying");
+                clock.sleep(delay).await;
+            }
+            result => return result,
+        }
+    }
+    let result = pull().await;
+    if result
+        .as_ref()
+        .is_err_and(DockerError::is_transient_rate_limit)
+    {
+        warn!(%image, retries = PULL_RETRY_DELAYS.len(), "pull still rate-limited; giving up until the next run");
+    }
+    result
 }
 
 pub struct Docker {
@@ -94,6 +156,27 @@ impl Docker {
             ..Default::default()
         };
         Ok(self.client.list_containers(Some(opts)).await?)
+    }
+
+    /// Every container labelled into `project`, running or not (issue #78).
+    /// Filtered daemon-side, and `all: true` so the project's exited one-shots
+    /// are visible at all.
+    pub async fn list_project_members(
+        &self,
+        project: &str,
+    ) -> Result<Vec<ProjectMember>, DockerError> {
+        let opts = ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([(
+                "label".to_owned(),
+                vec![format!("{}={project}", compose::LABEL_PROJECT)],
+            )])),
+            ..Default::default()
+        };
+        let summaries = self.client.list_containers(Some(opts)).await?;
+        let mut members: Vec<ProjectMember> = summaries.iter().map(project_member).collect();
+        crate::rollout::resolve_member_images(self, &mut members).await?;
+        Ok(members)
     }
 
     /// Pull the given image reference from its registry, draining the
@@ -273,7 +356,7 @@ impl Docker {
             &self.list_running().await?,
             owner_name,
             &full_id,
-            own_hostname().as_deref(),
+            crate::selfid::own_container_id_prefix().as_deref(),
         ))
     }
 
@@ -368,6 +451,29 @@ fn multi_network_guard(api_version: &str, networks: usize) -> Result<(), DockerE
     }
 }
 
+/// Project a listing row onto the daemon-agnostic [`ProjectMember`].
+///
+/// `running` counts `restarting` and `paused` as up: neither has *finished*,
+/// and reading a crash-looping migration as exited would let a rollout treat it
+/// as completed.
+fn project_member(c: &ContainerSummary) -> ProjectMember {
+    ProjectMember {
+        name: container_name(c),
+        id: c.id.clone().unwrap_or_default(),
+        image_ref: c.image.clone().unwrap_or_default(),
+        image_id: c.image_id.clone(),
+        labels: c.labels.clone().unwrap_or_default(),
+        running: matches!(
+            c.state,
+            Some(
+                ContainerSummaryStateEnum::RUNNING
+                    | ContainerSummaryStateEnum::RESTARTING
+                    | ContainerSummaryStateEnum::PAUSED
+            )
+        ),
+    }
+}
+
 /// Container name from a summary (leading `/` trimmed), falling back to id.
 /// Shared by the scheduler's per-tick sweep and the network-dependent scan.
 pub(crate) fn container_name(c: &ContainerSummary) -> String {
@@ -379,29 +485,6 @@ pub(crate) fn container_name(c: &ContainerSummary) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// freshdock's own hostname, used to recognise (and never stop) the freshdock
-/// container itself. Inside a container the daemon sets the hostname to the
-/// container's short id unless overridden; `/etc/hostname` is the reading that
-/// survives a `docker exec` environment, with `$HOSTNAME` as the fallback.
-fn own_hostname() -> Option<String> {
-    let from_file = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        // An empty (whitespace-only) file must fall through to $HOSTNAME, not
-        // pin the chain to `Some("")` and disable self-recognition entirely.
-        .filter(|h| !h.is_empty());
-    from_file
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .filter(|h| !h.is_empty())
-}
-
-/// Could `hostname` be a container id (or short id)? Docker's short id is 12
-/// hex characters; anything shorter or non-hex is an operator-chosen hostname
-/// and must never be prefix-matched against container ids.
-fn looks_like_container_id(hostname: &str) -> bool {
-    hostname.len() >= 12 && hostname.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Names in `running` that share the network namespace of the container
 /// identified by `owner_name`/`full_id` (`""` when the id could not be
 /// resolved). `self_hostname` is freshdock's own hostname, so it can recognise
@@ -409,7 +492,7 @@ fn looks_like_container_id(hostname: &str) -> bool {
 /// testable without a daemon.
 ///
 /// Re-attachment repairs a bystander rather than updating it, so it
-/// deliberately ignores the `freshdock.enable` policy gate — only the two
+/// deliberately ignores the `freshdock.enable` policy gate — only the
 /// *explicit* opt-out signals are honoured (see [`explicitly_opts_out`]).
 fn network_dependent_names(
     running: &[ContainerSummary],
@@ -435,7 +518,7 @@ fn network_dependent_names(
             // freshdock joined to the namespace it is updating: stopping
             // ourselves kills the daemon mid-cycle, and an explicit stop
             // defeats `restart: always`.
-            if is_self(summary, self_hostname) {
+            if crate::selfid::is_own_container(self_hostname, summary.id.as_deref()) {
                 warn!(
                     container = %dependent,
                     owner = %owner_name,
@@ -459,39 +542,15 @@ fn network_dependent_names(
         .collect()
 }
 
-/// Is this summary freshdock's own container? True only when our hostname
-/// looks like a container id and the candidate's id starts with it.
-fn is_self(summary: &ContainerSummary, self_hostname: Option<&str>) -> bool {
-    let Some(hostname) = self_hostname else {
-        return false;
-    };
-    if !looks_like_container_id(hostname) {
-        return false;
-    }
-    summary
-        .id
-        .as_deref()
-        .is_some_and(|id| id.starts_with(hostname))
-}
-
-/// Does this container carry an **explicit** freshdock opt-out —
-/// `freshdock.enable` set to a false value, or `freshdock.mode=off`? Matching
-/// is case-insensitive and whitespace-tolerant, as in [`crate::labels`].
-///
-/// Absent labels deliberately do *not* opt out: the whole point of the
-/// re-attach pass is repairing an unlabelled bystander whose namespace *we*
+/// [`labels::explicitly_opts_out`](crate::labels::explicitly_opts_out) for a
+/// listing row. Absent labels deliberately do *not* opt out: the whole point of
+/// the re-attach pass is repairing an unlabelled bystander whose namespace *we*
 /// broke.
 fn explicitly_opts_out(summary: &ContainerSummary) -> bool {
-    let Some(labels) = summary.labels.as_ref() else {
-        return false;
-    };
-    let value = |key: &str| {
-        labels
-            .get(key)
-            .map(|v| v.trim().to_ascii_lowercase())
-            .unwrap_or_default()
-    };
-    value("freshdock.enable") == "false" || value("freshdock.mode") == "off"
+    summary
+        .labels
+        .as_ref()
+        .is_some_and(crate::labels::explicitly_opts_out)
 }
 
 /// The container a `HostConfig.NetworkMode` joins, if any: `container:<ref>`
@@ -565,9 +624,15 @@ impl DockerOps for Docker {
         multi_network_guard(&self.api_version, networks)
     }
 
+    async fn local_image_id(&self, reference: &str) -> Result<Option<String>, DockerError> {
+        debug!(%reference, "local image id");
+        Ok(self.inspect_local_image(reference).await?.id)
+    }
+
     async fn pull(&self, image_ref: &ImageRef) -> Result<(), DockerError> {
         debug!(repo = %image_ref.repository, tag = %image_ref.tag, "pull");
-        self.pull_image(image_ref).await
+        let image = format!("{}:{}", image_ref.repository, image_ref.tag);
+        retry_rate_limited(&TokioClock, &image, || self.pull_image(image_ref)).await
     }
 
     async fn stop(
@@ -643,6 +708,11 @@ impl DockerOps for Docker {
         debug!(container = %name, "list_network_dependents");
         self.network_dependents_of(name).await
     }
+
+    async fn list_project(&self, project: &str) -> Result<Vec<ProjectMember>, DockerError> {
+        debug!(%project, "list_project");
+        Docker::list_project_members(self, project).await
+    }
 }
 
 #[async_trait]
@@ -656,6 +726,115 @@ impl HealthProbe for Docker {
 mod tests {
     use super::*;
     use bollard::models::Health;
+
+    // --- registry rate limits on pull (#105) ---
+
+    fn stream_error(error: &str) -> DockerError {
+        DockerError::Bollard(bollard::errors::Error::DockerStreamError {
+            error: error.to_owned(),
+        })
+    }
+
+    fn server_error(status_code: u16, message: &str) -> DockerError {
+        DockerError::Bollard(bollard::errors::Error::DockerResponseServerError {
+            status_code,
+            message: message.to_owned(),
+        })
+    }
+
+    #[test]
+    fn transient_rate_limits_are_recognised() {
+        // GHCR via lscr.io, classic image store.
+        assert!(
+            stream_error("toomanyrequests: retry-after: 224.292µs, allowed: 44000/minute")
+                .is_transient_rate_limit()
+        );
+        // Docker Desktop, containerd image store.
+        assert!(
+            server_error(
+                500,
+                "failed to resolve reference \"localhost:5001/fd105/app:1\": unexpected status \
+                 from HEAD request to http://localhost:5001/v2/fd105/app/manifests/1: 429 Too \
+                 Many Requests"
+            )
+            .is_transient_rate_limit()
+        );
+        assert!(server_error(429, "Too Many Requests").is_transient_rate_limit());
+        assert!(server_error(500, "too many requests to registry").is_transient_rate_limit());
+        assert!(
+            server_error(
+                500,
+                "error parsing HTTP 429 response body: invalid character"
+            )
+            .is_transient_rate_limit()
+        );
+        assert!(!stream_error("manifest unknown").is_transient_rate_limit());
+        assert!(!server_error(404, "No such image").is_transient_rate_limit());
+    }
+
+    #[test]
+    fn docker_hubs_pull_quota_is_not_retried() {
+        assert!(
+            !server_error(
+                429,
+                "toomanyrequests: You have reached your pull rate limit"
+            )
+            .is_transient_rate_limit(),
+            "not even as a bare 429"
+        );
+        assert!(
+            !server_error(
+                500,
+                "toomanyrequests: You have reached your pull rate limit. You may increase the \
+                 limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit"
+            )
+            .is_transient_rate_limit()
+        );
+    }
+
+    /// Returns the result, attempt count and time spent backing off.
+    async fn retry_over(
+        outcomes: &[fn() -> Result<(), DockerError>],
+    ) -> (Result<(), DockerError>, usize, Duration) {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result = retry_rate_limited(&crate::health::TokioClock, "img:1", || {
+            let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { outcomes[n.min(outcomes.len() - 1)]() }
+        })
+        .await;
+        (result, attempts.into_inner(), started.elapsed())
+    }
+
+    fn limited() -> Result<(), DockerError> {
+        Err(stream_error("toomanyrequests: retry-after: 1µs"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_pull_is_retried_until_it_succeeds() {
+        let (result, attempts, waited) = retry_over(&[limited, limited, || Ok(())]).await;
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+        assert_eq!(waited, Duration::from_secs(2 + 5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_that_stays_rate_limited_gives_up_inside_the_drain() {
+        let (result, attempts, waited) = retry_over(&[limited]).await;
+        assert!(result.is_err_and(|e| e.is_transient_rate_limit()));
+        assert_eq!(attempts, PULL_RETRY_DELAYS.len() + 1);
+        assert!(
+            waited < Duration::from_secs(30),
+            "the default stop timeout must outlast the ladder: {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn any_other_pull_error_is_not_retried() {
+        let (result, attempts, _) = retry_over(&[|| Err(stream_error("manifest unknown"))]).await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     // --- multi-network create preflight (API 1.44 / Docker 25.0 floor) ---
 
@@ -1013,11 +1192,17 @@ mod tests {
                 "2",
                 &[("freshdock.enable", "true"), ("freshdock.mode", "OFF")],
             ),
-            summary_with("fd-unlabelled", "container:fd-base", "3", &[]),
+            summary_with(
+                "fd-wt-out",
+                "container:fd-base",
+                "3",
+                &[("com.centurylinklabs.watchtower.enable", "false")],
+            ),
+            summary_with("fd-unlabelled", "container:fd-base", "4", &[]),
             summary_with(
                 "fd-enabled",
                 "container:fd-base",
-                "4",
+                "5",
                 &[("freshdock.enable", "true")],
             ),
         ];

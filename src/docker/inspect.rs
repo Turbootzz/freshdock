@@ -1,4 +1,5 @@
 use super::DockerError;
+use super::check::LocalImage;
 use super::spec::{ContainerSpec, SpecError};
 
 impl super::Docker {
@@ -9,16 +10,14 @@ impl super::Docker {
         Ok(ContainerSpec::from_inspect(resp)?)
     }
 
-    /// Returns the locally-cached manifest digests (`repo@sha256:...`) for an
-    /// image reference, as Docker reports them via `docker image inspect`.
-    /// Returns an empty vec when the image has no recorded RepoDigests (e.g.
-    /// images built locally and never pulled from a registry).
-    pub async fn inspect_image_repo_digests(
-        &self,
-        image: &str,
-    ) -> Result<Vec<String>, DockerError> {
+    /// One local image: its id and the `repo@sha256:...` digests it carries.
+    /// Empty for a locally built image, and under containerd once its tag moved.
+    pub async fn inspect_local_image(&self, image: &str) -> Result<LocalImage, DockerError> {
         let resp = self.client.inspect_image(image).await?;
-        Ok(resp.repo_digests.unwrap_or_default())
+        Ok(LocalImage {
+            id: resp.id,
+            repo_digests: resp.repo_digests.unwrap_or_default(),
+        })
     }
 }
 
